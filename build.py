@@ -11,7 +11,7 @@ detection looks for.
 What goes in:
   python.org's "embeddable" Python, of the version this script runs on (downloaded; its SHA-256 is printed)
   tkinter and Tcl/Tk from this Python's installation (the embeddable package leaves them out)
-  paho-mqtt, pystray and Pillow (pip, into the bundle only)
+  the packages in requirements.txt: paho-mqtt, pystray and Pillow (pip, into the bundle only)
   filament_guard.py, guard_ui.py, guard_ledger.py, README.md and LICENSE, in app/ (the MIT licence asks that it goes with every copy)"""
 import os, sys, io, shutil, hashlib, zipfile, subprocess, urllib.request
 import filament_guard as fg
@@ -35,7 +35,7 @@ for name in ('tcl8.6', 'tk8.6', 'tcl8'):
 shutil.copytree(os.path.join(base, 'tcl', 'tcl8.6', 'encoding'), os.path.join(out, 'tcl', 'tcl8.6', 'encoding'))     # Tcl does not start without its encodings
 
 subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '--no-compile', '--only-binary=:all:',
-                       '--target', os.path.join(out, 'Lib', 'site-packages'), 'paho-mqtt', 'pystray', 'pillow'])
+                       '--target', os.path.join(out, 'Lib', 'site-packages'), '-r', os.path.join(here, 'requirements.txt')])
 
 os.makedirs(os.path.join(out, 'app'))
 for name in ('filament_guard.py', 'guard_ui.py', 'guard_ledger.py', 'README.md', 'LICENSE'): shutil.copy2(os.path.join(here, name), os.path.join(out, 'app'))
