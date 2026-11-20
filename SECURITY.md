@@ -1,0 +1,18 @@
+# Security
+
+## What the guard touches
+
+- **The LAN access code.** The guard reads it from Bambu Studio's own configuration (`%APPDATA%\BambuStudio\BambuStudio.conf`) at each check. It sends it only to the printer, on the local network, over the printer's MQTT port (8883, TLS). It is not written to the log, the state file or any window.
+- **The printer.** The guard subscribes to the printer's status reports and sends one status request ("report everything"). It sends no command that changes the printer: no print, pause, stop, temperature or motion command.
+- **The printer's certificate is not verified.** The printer signs its own certificate, so the guard accepts it without checking it. The link is encrypted, but a device on your local network that impersonates the printer could receive the access code. Use the guard only on a network you trust.
+- **The local network.** To find a printer's IP address the guard listens for the printer's own announcements (multicast, UDP ports 2021 and 1990). It does not scan. You can name an address in `config.json` instead.
+- **The internet.** The guard makes no internet connection. The one exception is `build.py`, which downloads Python from python.org to make the packaged zip (and pip, which fetches the packages in `requirements.txt`).
+- **Files.** The guard reads the G-code Bambu Studio writes under `%TEMP%\bamboo_model`. Its log and state are in `%LOCALAPPDATA%\BambuFilamentGuard`. Its settings are in `config.json` beside the script. Starting automatically adds a shortcut to your Startup folder. The log and state can hold printer serial numbers and IP addresses.
+
+## Report a vulnerability
+
+Use GitHub's private vulnerability reporting: open this repository's **Security** tab and choose **Report a vulnerability**. Please do not open a public issue for a vulnerability.
+
+Say what you found, how to reproduce it, and which version of the guard it affects. Never include a real access code or serial number in a report.
+
+Only the latest release is supported.

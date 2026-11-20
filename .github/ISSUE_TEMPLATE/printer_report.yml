@@ -1,0 +1,59 @@
+name: Printer report
+description: It works, or does not work, on my printer.
+labels: [printer-report]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The guard was built on the H2D. Reports from other models are especially welcome, whether it works or not.
+
+        **Remove printer serial numbers and IP addresses** from everything you paste. Never post a LAN access code.
+  - type: dropdown
+    id: works
+    attributes:
+      label: Does it work?
+      options:
+        - It works
+        - It partly works
+        - It does not work
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Printer model
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware version
+    validations:
+      required: true
+  - type: input
+    id: ams
+    attributes:
+      label: AMS type
+      description: AMS, AMS 2 Pro, AMS HT, AMS lite, external spool, or a mix.
+    validations:
+      required: true
+  - type: input
+    id: studio_version
+    attributes:
+      label: Bambu Studio version
+    validations:
+      required: true
+  - type: textarea
+    id: selftest
+    attributes:
+      label: Output of `python filament_guard.py selftest`
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: card
+    attributes:
+      label: What the card showed
+      description: Compared with what is loaded on the printer. Wrong amounts, colours or nozzles are the most useful to hear about.
+    validations:
+      required: true
