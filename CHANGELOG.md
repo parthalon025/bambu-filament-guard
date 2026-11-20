@@ -4,6 +4,8 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-20
+
 ### Added
 
 - Learning scores itself. When a print it followed ends, the guard keeps what it had forecast the tray's reading would fall by, by what it knew before that print, and what the reading fell. From 9 scored prints, and readings at empty that repeat within a tray, the reserve is measured from those errors (a one-sided 90 % conformal bound, per gram of print plus 20 g, never below 5 g or 2 % of the need) instead of the fixed one, and can be smaller: a tray that proves accurate is no longer called "tight" on 3 % of its spool. A new setting, "Measure the reserve from past prints" (`measured_reserve`, on), turns it off. Until it is earned, or with it off, no answer is looser than 1.3.0's.
@@ -58,6 +60,7 @@ The first public release.
 - A notification-area icon with the last result and the settings; `check`, `status`, `trays`, `selftest`, `install` and `uninstall` commands, with exit codes a script can gate on.
 - A packaged folder and zip with a Python of its own (`python build.py`), for a computer that has none.
 
-[Unreleased]: https://github.com/parthalon025/bambu-filament-guard/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/parthalon025/bambu-filament-guard/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/parthalon025/bambu-filament-guard/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/parthalon025/bambu-filament-guard/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/parthalon025/bambu-filament-guard/releases/tag/v1.2.0
