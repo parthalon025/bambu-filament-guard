@@ -12,7 +12,7 @@ What goes in:
   python.org's "embeddable" Python, of the version this script runs on (downloaded; its SHA-256 is printed)
   tkinter and Tcl/Tk from this Python's installation (the embeddable package leaves them out)
   the packages in requirements.txt: paho-mqtt, pystray and Pillow (pip, into the bundle only)
-  filament_guard.py, guard_ui.py, guard_ledger.py, guard_learn.py, README.md and LICENSE, in app/ (the MIT licence asks that it goes with every copy)"""
+  filament_guard.py, guard_ui.py, guard_ledger.py, guard_learn.py, guard_stats.py, README.md and LICENSE, in app/ (the MIT licence asks that it goes with every copy)"""
 import os, sys, io, shutil, hashlib, zipfile, subprocess, urllib.request
 import filament_guard as fg
 
@@ -38,7 +38,7 @@ subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', '--dis
                        '--target', os.path.join(out, 'Lib', 'site-packages'), '-r', os.path.join(here, 'requirements.txt')])
 
 os.makedirs(os.path.join(out, 'app'))
-for name in ('filament_guard.py', 'guard_ui.py', 'guard_ledger.py', 'guard_learn.py', 'README.md', 'LICENSE'): shutil.copy2(os.path.join(here, name), os.path.join(out, 'app'))
+for name in ('filament_guard.py', 'guard_ui.py', 'guard_ledger.py', 'guard_learn.py', 'guard_stats.py', 'README.md', 'LICENSE'): shutil.copy2(os.path.join(here, name), os.path.join(out, 'app'))
 # The embeddable Python looks for modules only where this file says: its own library, tkinter, the packages, the guard.
 open(os.path.join(out, tag + '._pth'), 'w').write('\n'.join([tag + '.zip', '.', 'Lib', 'Lib\\site-packages', 'app']) + '\n')
 open(os.path.join(out, 'Install.cmd'), 'w').write('@echo off\r\nstart "" "%~dp0pythonw.exe" "%~dp0app\\filament_guard.py" setup\r\n')
