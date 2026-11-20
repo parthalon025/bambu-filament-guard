@@ -210,7 +210,8 @@ class Card:
         if brief:
             line = tk.Frame(w, bg=t['surface']); line.grid(row=2, column=0, sticky='ew'); line.columnconfigure(0, weight=1)
             p = res['printer']
-            busy = (', less what the print running there still needs' if p.get('counted') else ', which is printing a job the guard could not count') if p['state'] in fg.BUSY else ''
+            busy = ((', less what the print running there still needs' if p.get('counted') else ', which is printing a job the guard could not count')
+                    + fg.beyond_text(p)) if p['state'] in fg.BUSY else ''
             text = 'Ignored for this project' if res.get('ignored') else f"{len(res['rows'])} filament{'s' if len(res['rows']) != 1 else ''} against the spools on the {p['model']}" + busy
             self._label(line, text, 'muted', 9, row=0, column=0)
             self._button(line, 'Details', lambda: self.act('details', res), row=0, column=1, padx=(3 * SPACE, 0))
@@ -240,6 +241,7 @@ class Card:
                 spools = f"Spools as the {p['model']} reports them now; the amounts are the AMS's estimate." + (
                     f" It is printing now{fg.job_text(p)}: that job is still drawing from these spools, and the guard could not count what it still needs."
                     if p['state'] in fg.BUSY else '')
+            spools += ''.join(f" The print running now needs {g:.0f} g more of {label}'s filament than the loaded spools hold." for label, g in (p.get('beyond') or {}).items())
             ignored = ' Ignored for this project: it shows as one line until the finding changes.' if res.get('ignored') else ''
             self._label(w, spools + ignored, 'muted', 9, wrap=620, row=4, column=0, pady=(2 * SPACE, 0))
         bar = tk.Frame(w, bg=t['surface']); bar.grid(row=5, column=0, sticky='w', pady=(2 * SPACE, 0))

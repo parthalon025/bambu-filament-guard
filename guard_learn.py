@@ -13,8 +13,11 @@ printer runs whose trays can be named:
     (the header's own split charges the nozzle's content to the filament pushed out, see layer_profile); and whether
     the record is sound: the same spool throughout, a reading that never rose, no gap in following longer than
     guard_ledger.GAP, the tray never empty, the job seen to finish.
-  - a run-dry: a tray the job draws on that is in one look and gone from the next while the job runs, with its last
-    reading, when that reading was low enough for a spool that ran out (DRY_MOST); a fuller spool was taken out.
+  - a run-dry: a tray the job draws on, giving filament by the profile at that point of the print, that is reported
+    empty in two looks in a row while the job runs, with its last reading, when that was low enough for a spool that ran
+    out (DRY_MOST); a fuller spool, or one the print was not drawing on then, was taken out. Only for a job with a
+    profile. A run-dry stops being used once the tray is seen, in a later job, still giving filament at a lower reading.
+    With it go the printer's print_error and hms codes at that look, raw, to judge it by later.
 Kept in a file of its own, STATE_DIR/learned.json: the last KEEP_JOBS jobs and KEEP_DRY run-dries per (printer, tray).
 
 Learned per (printer, tray label), from sound records only, each number used from its threshold on:
@@ -27,7 +30,7 @@ Seen as a straight line, reading = dry + rate x true amount: dry is measured dir
 W x (1 - rate), a gauge that counts too little of what it feeds. The two are views of the same error: the smaller of the
 two corrections, not their sum, is taken, and neither ever adds, so learning can only make a check stricter. With no
 history, or learning off (setting "learn"), every check is as it was."""
-import json, os, threading, time
+import os, time
 import filament_guard as fg
 import guard_ledger as gl
 
@@ -36,18 +39,19 @@ SAMPLE_SPAN = 10              # seconds: a layer change seen between two looks f
 SETTLE = 60                   # seconds after FINISH the end reading is taken: the end routine unloads the filament, and the
                               # AMS may correct its figure then; the first FINISH reading is kept beside it (end_first)
 KEEP_JOBS, KEEP_DRY = 20, 5   # per (printer, tray): enough for every number below, and a trace to judge them by later
-DRY_MOST = (50.0, 0.10)       # grams, share of the spool's full weight: a spool that leaves with more was taken out, not run dry
+DRY_MOST = 50.0               # grams: a spool that leaves reading more was taken out, not run dry. Flat: 10 % of a 1 kg spool
+                              # would be 100 g, far beyond a gauge's error (the one measured run-dry read 20 g)
 DRY_EVENTS = 3                # dry is the largest of the last 3: one odd event is not forgotten at once, nor kept for ever
 RATE_JOBS = 10                # rate is taken over the last 10 sound whole jobs: recent, and many grams
 RATE_JOB_GRAMS = 5.0          # a job of less, read in whole grams, says nothing about a rate
 RATE_MIN_JOBS = 3             # rate is used from 3 such jobs on...
 RATE_MIN_GRAMS = 300.0        # ...that took 300 g or more from the tray between them: the reading's whole grams are then 1 % at most
 RATE_NOISE = 0.99             # a rate of 0.99 or more is used as 1: within 1 % is the noise of whole-gram readings
-RATE_FLOOR = 0.5              # a rate below this is not used: a gauge that counts less than half of what it feeds is more
-                              # likely readings that lagged behind the print than a gauge that far out
+RATE_FLOOR = 0.9              # a rate below this is not used: it means the readings lagged behind the print, not a gauge that
+                              # far out (the one measurement implies about 0.98), and applied it would make every check on the
+                              # tray come out short
 PRE_JOBS = 5                  # pre is the largest of the last 5 sound jobs that have both readings...
 PRE_MIN_JOBS = 2              # ...and is used from 2 on: the loss before layer 1 is the same each print, so two agree on it
-LOCK = threading.RLock()
 
 
 # ---------------------------------------------------------------- the history file
@@ -56,40 +60,38 @@ def path():
     return os.path.join(fg.STATE_DIR, 'learned.json')
 
 def load():
-    """{serial: {tray label: {'jobs': [record], 'dry': [event]}}}. No file is no history; a damaged one is set aside."""
-    for attempt in range(6):
-        try:
-            with open(path(), encoding='utf-8') as f: return json.load(f)
-        except FileNotFoundError: return {}
-        except PermissionError:                                # being replaced just now
-            if attempt == 5: raise
-            time.sleep(0.05)
-        except ValueError:
-            try: os.replace(path(), path() + '.damaged')
-            except OSError: pass
-            fg.log('learned.json was damaged: set aside as learned.json.damaged, learning starts again')
-            return {}
+    """{serial: {tray label: {'jobs': [record], 'dry': [event]}}}. No file is no history; a damaged one is set aside
+    (filament_guard.read_json, under the state folder's lock like every write of it)."""
+    return fg.read_json(path(), {})
 
 def save(history):
-    os.makedirs(fg.STATE_DIR, exist_ok=True)
-    with open(path() + '.new', 'w', encoding='utf-8') as f: json.dump(history, f, separators=(',', ':'))
-    for attempt in range(6):
-        try: os.replace(path() + '.new', path()); return
-        except PermissionError:                                # a check reading it just then (Windows)
-            if attempt == 5: raise
-            time.sleep(0.05)
+    with fg.state_lock(): fg.write_json(path(), history, separators=(',', ':'))
 
 def keep(serial, label, kind, item, most):
     """Adds a job record or a run-dry to a tray's history, keeping the last `most`."""
-    with LOCK:
+    with fg.state_lock():
         history = load()
         items = history.setdefault(serial, {}).setdefault(label, {}).setdefault(kind, [])
         items.append(item); del items[:-most]
         save(history)
 
-def forget():
-    with LOCK: save({})
-    fg.log('what was learned is forgotten')
+def forget(label=None, printer=None, names=None):
+    """Empties the history, or one tray's: label, and printer (its serial, or its model as names maps serials to models)
+    where more than one printer has such a tray. Returns what was forgotten, in words; ValueError when that cannot be
+    told (no such tray, or which printer's)."""
+    with fg.state_lock():
+        history = load()
+        if label is None: what = 'everything learned'; history = {}
+        else:
+            names = names or {}
+            mine = [s for s, trays in history.items() if label in trays and (printer is None or printer in (s, names.get(s)))]
+            if not mine: raise ValueError(f'nothing is learned of a tray {label}' + (f' on {printer}' if printer else ''))
+            if len(mine) > 1: raise ValueError(f"{label} is a tray of more than one printer: name one with --printer ({', '.join(names.get(s, s) for s in mine)})")
+            del history[mine[0]][label]
+            what = f'what was learned of {label} on {names.get(mine[0], mine[0])}'
+        save(history)
+    fg.log(f'{what} is forgotten')
+    return what
 
 
 # ---------------------------------------------------------------- what is learned
@@ -97,11 +99,16 @@ def forget():
 def day(at):
     return time.strftime('%d %b', time.localtime(at)).lstrip('0')
 
+def contradicted(event):
+    """Why a run-dry is no longer used, in words, or ''."""
+    c = event.get('contradicted')
+    return f"on {day(c['at'])} a spool in it still gave filament at {c['reading']:.0f} g" if c else ''
+
 def model(tray_history):
     """The three numbers of one tray: {'dry' | 'rate' | 'pre': {'value', 'used', 'why'}}. value None: no evidence yet.
     used: past its threshold. why: the evidence in words when used, what is missing when not."""
     jobs = [j for j in tray_history.get('jobs', []) if j.get('sound')]
-    dries = tray_history.get('dry', [])[-DRY_EVENTS:]
+    dries = [d for d in tray_history.get('dry', []) if not d.get('contradicted')][-DRY_EVENTS:]
     out = {}
     if dries:
         worst = max(dries, key=lambda d: d['reading'])
@@ -136,7 +143,8 @@ def corrections(serial, trays, history=None):
         if m['dry']['used']: options.append((g - m['dry']['value'], m['dry']['why']))
         if m['rate']['used'] and w: options.append((w - (w - g) / m['rate']['value'], m['rate']['why']))
         credited, evidence = min(options, key=lambda o: o[0])
-        fix = {'credited': max(0.0, credited), 'evidence': evidence} if credited < g else {}
+        credited = max(0.0, credited)
+        fix = {'credited': credited, 'evidence': evidence} if credited < g else {}            # a tray reading 0 g is not "counted lower" at 0 g
         if m['pre']['used'] and m['pre']['value'] > 0: fix.update(pre=m['pre']['value'], pre_note=m['pre']['why'])
         if fix: out[t['label']] = fix
     return out
@@ -175,16 +183,16 @@ class Recorder:
     the follower. Each job's records are written when it ends: seen to finish (SETTLE seconds after FINISH), failed or
     cancelled, or replaced by another job."""
     def __init__(self, serial):
-        self.serial, self.job, self.last, self.closed = serial, None, None, None   # last: (when, state, layer, {label: tray}) of the look before
+        self.serial, self.job, self.last = serial, None, None          # last: (when, state, layer, {label: tray}) of the look before
 
     def look(self, status, now=None):
         now = time.time() if now is None else now
         state, key, layer = status.get('gcode_state'), gl.job_key(status), layer_of(status)
         trays, empty = {t['label']: t for t in fg.trays_of(status)[0]}, emptied(status)
         last, self.last = self.last, (now, state, layer, trays)
-        if self.job and self.job['key'] != key: self.close('the printer showed another job before this one was seen to finish')
-        if self.job is None and state in fg.BUSY and not (key == self.closed and last and last[1] in fg.BUSY):
-            self.job = self.open(status, key, now)
+        if self.job and (self.job['key'] != key or (self.job['finished'] and state != 'FINISH')):   # the next job, also with the same name (LAN-only)
+            self.close(None if self.job['finished'] else 'the printer showed another job before this one was seen to finish')
+        if self.job is None and state in fg.BUSY: self.job = self.open(status, key, now)
         job = self.job
         if job is None: return
         if last and now - last[0] > gl.GAP: self.unsound(f'not followed for {(now - last[0]) / 60:.0f} minutes')
@@ -194,10 +202,11 @@ class Recorder:
         for label, tr in job['trays'].items():
             t = trays.get(label)
             if t is None:
-                if label in empty:
-                    if not tr.get('gone') and state in ('RUNNING', 'PAUSE') and last and label in last[3]: self.gone(label, tr, layer, now)
-                    tr['gone'] = True
+                if label not in empty or state not in ('RUNNING', 'PAUSE') or tr.get('gone'): continue
+                if not tr.get('empty'): tr['empty'] = layer                     # the first look that shows it empty: one more to be sure
+                else: tr['gone'] = True; self.gone(label, tr, tr['empty'], now, status)
                 continue
+            tr['empty'] = None
             g = t['grams']
             if g is None: continue
             if not same_spool(tr['spool'], spool(t)): self.unsound(f'{label} holds another spool')
@@ -217,7 +226,6 @@ class Recorder:
         if state == 'FINISH':
             job['finished'] = job['finished'] or now
             if now - job['finished'] >= SETTLE: self.close(None)
-        elif job['finished']: self.close(None)                         # finished, and the printer has moved on before the reading settled
         elif state not in fg.BUSY: self.close('failed or cancelled' if state == 'FAILED' else f'it stopped without finishing ({state})')
 
     def open(self, status, key, now):
@@ -249,22 +257,38 @@ class Recorder:
                 printed += p['layers'][slot][n] - p['purge'][slot][n]; purge += p['purge'][slot][n] - pushed[n]
         return printed, purge
 
-    def gone(self, label, tr, layer, now):
-        """A tray the job draws on has left the status while the job runs: a run-dry when its last reading was low enough."""
-        reading, w = tr['last'], (tr['spool'] or {}).get('weight')
+    def gone(self, label, tr, layer, now, status):
+        """A tray the job draws on was reported empty in two looks in a row while the job ran (from `layer`): a run-dry when
+        its last reading was low enough and the profile has the print drawing on it then; else its spool was taken out."""
+        reading, job = tr['last'], self.job
         if reading is None: return
-        if reading > max(DRY_MOST[0], DRY_MOST[1] * (w or 0)):
-            fg.log(f'{label}: a spool reading {reading:.0f} g was taken out during "{self.job["name"]}": not a run-dry, nothing learned from it')
+        if not job['profile']:                                         # what the print draws on, and when, cannot be told
+            fg.log(f'{label} emptied during "{job["name"]}", a print not sliced on this computer: nothing learned from it')
+            self.unsound(f'{label} emptied'); return
+        feeding = sum(self.given(job, label, max(0, layer - 1), layer + 1)) > 0
+        if reading > DRY_MOST or not feeding:
+            fg.log(f'{label}: a spool reading {reading:.0f} g was taken out during "{job["name"]}" at layer {layer}'
+                   + ('' if feeding else ', where the print was not drawing on it') + ': not a run-dry, nothing learned from it')
             self.unsound(f'{label}: its spool was taken out'); return
-        needed = sum(self.given(self.job, label, layer)) if self.job['profile'] else None
-        keep(self.serial, label, 'dry', {'at': now, 'job': self.job['name'], 'reading': reading, 'layer': layer, 'needed': needed, 'spool': tr['spool']}, KEEP_DRY)
-        fg.log(f'{label} ran dry at layer {layer} of "{self.job["name"]}" reading {reading:.0f} g' + (f'; the job still needed {needed:.1f} g of it' if needed is not None else ''))
+        needed = sum(self.given(job, label, layer))
+        keep(self.serial, label, 'dry', {'at': now, 'job': job['name'], 'reading': reading, 'layer': layer, 'needed': needed, 'spool': tr['spool'],
+                                         'print_error': status.get('print_error'), 'hms': status.get('hms')}, KEEP_DRY)
+        fg.log(f'{label} ran dry at layer {layer} of "{job["name"]}" reading {reading:.0f} g; the job still needed {needed:.1f} g of it')
         self.unsound(f'{label} ran dry')
+
+    @staticmethod
+    def fed_at(tr):
+        """The lowest reading at which the tray was seen still giving filament in this job (a reading followed by a lower
+        one), or None."""
+        seq = ([tr['before']] if tr['before'] is not None else []) + [r for _, r in tr['samples']] + ([tr['end']] if tr['end'] is not None else [])
+        return min((a for a, b in zip(seq, seq[1:]) if b < a), default=None)
 
     def close(self, why):
         job, self.job = self.job, None
-        self.closed = job['key']
         if why: job['sound'] = False; job['why'].append(why)
+        for label, tr in job['trays'].items():
+            fed = self.fed_at(tr)
+            if fed is not None: contradict(self.serial, label, fed, job['opened'], job['name'])
         if not job['profile']: return                                  # nothing to measure the readings against: only its run-dries count
         notes = []
         for label, tr in job['trays'].items():
@@ -281,6 +305,17 @@ class Recorder:
                 'sound': job['sound'], 'why': list(job['why'])}, KEEP_JOBS)
             notes.append(label)
         if notes: fg.log(f'recorded "{job["name"]}" for learning: {", ".join(notes)}' + ('' if job['sound'] else f' (not used: {"; ".join(job["why"])})'))
+
+
+def contradict(serial, label, reading, at, name):
+    """A tray seen still giving filament at `reading` in a job begun `at`: a run-dry of it from before, that read more when
+    its spool ran dry, is no longer used (kept, marked with this evidence)."""
+    with fg.state_lock():
+        history = load()
+        events = [d for d in history.get(serial, {}).get(label, {}).get('dry', []) if d['at'] < at and reading < d['reading'] and not d.get('contradicted')]
+        for d in events: d['contradicted'] = {'at': at, 'job': name, 'reading': reading}
+        if events: save(history)
+    for d in events: fg.log(f'{label}: the run-dry at {d["reading"]:.0f} g of {day(d["at"])} is no longer used: in "{name}" it still gave filament at {reading:.0f} g')
 
 
 # ---------------------------------------------------------------- the command
@@ -312,7 +347,8 @@ def report(history, names=None, learning=True):
                 lines.append(f"    {name:<5} {value:<16} " + (f"used: {x['why']}" if x['used'] else f"not used: {x['why']}"))
             for d in dries:
                 lines.append(f"    ran dry {time.strftime('%d %b %H:%M', time.localtime(d['at']))} at layer {d['layer']} of \"{d['job']}\", reading {d['reading']:.0f} g"
-                             + (f", {d['needed']:.1f} g still to go" if d.get('needed') is not None else ''))
+                             + (f", {d['needed']:.1f} g still to go" if d.get('needed') is not None else '')
+                             + (f"; no longer used: {contradicted(d)}" if d.get('contradicted') else ''))
             split = printed_and_purged(jobs)
             lines.append('    per gram printed / purged: ' + (f'{split[0]:.3f} / {split[1]:.3f} g (a report only, not used)' if split else 'not enough to tell'))
     return lines
