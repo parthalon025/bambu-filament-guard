@@ -20,7 +20,7 @@ With Python 3 (`pip install paho-mqtt pystray pillow`):
 python filament_guard.py install      # start automatically, and now
 ```
 
-Without Python: unzip `dist\BambuFilamentGuard-<version>.zip` (made by `python build.py`) where it can stay, and open `Install.cmd`. It runs from that folder; `Uninstall.cmd` removes it.
+Without Python: unzip `BambuFilamentGuard-<version>.zip` where it can stay, and open `Install.cmd`. It runs from that folder; `Uninstall.cmd` removes it. The zip is not in the repository: `python build.py`, on a computer that has Python, makes it in `dist\`.
 
 The guard starts with Windows and waits. Its icon, a spool, is in the notification area while Bambu Studio runs.
 
