@@ -10,7 +10,7 @@ Warns, for every filament of a print sliced in Bambu Studio, when the spools on 
 
 ![The guard's "Filament check" card: "Not enough filament for this print", plate 1 on a Bambu Lab H2D. Five filaments, each with what it needs, its spool, what that spool has and the result: blue and red not enough, green tight, white and grey enough. Under each row a note gives the spool's reading and what the print running on the printer still needs of it.](docs/card-warning.png)
 
-A plate checked while the same plate prints: after the running print, two of its filaments would not have enough, and one would be tight. The figures in the pictures are invented, after the print of 2026-11-19 described under "The running print".
+A plate checked while the same plate prints: after the running print, two of its filaments would not have enough, and one would be tight. The pictures are the guard's own card. The job in them is made up, with figures modelled on the print of 2026-11-19 described under "The running print".
 
 - Checks every filament of every plate you slice, in any project, against what the spools on the printer hold, purge and prime tower included: as soon as the slice is done, and again for all the project's sliced plates when "Send print job" opens.
 - Counts the print that is running, when it was sliced on this computer: a plate sliced while another prints is checked against what the spools will hold when it can start.
