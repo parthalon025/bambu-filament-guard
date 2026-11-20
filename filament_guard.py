@@ -13,6 +13,7 @@ short. The card comes back beside the "Send print job" dialog while a warning st
                                        running Bambu Studio. Options: --times N (N prints of it), --popup, --json.
                                        Exit code 0 enough, 1 tight / unknown, 2 short, 3 not checked.
   filament_guard.py trays              the spools every known printer reports
+  filament_guard.py learned [--forget] what was learned from previous prints, per tray (--forget: start again)
   filament_guard.py selftest           can the guard read this Bambu Studio and reach the printers? Exit code 1 = no
   filament_guard.py watch              the guard itself (what the shortcut runs; --no-start-line: setup's card says it)
   filament_guard.py setup              install, and say so on a card (what Install.cmd of the packaged guard runs)
@@ -25,6 +26,7 @@ What it reads, and from where:
             its serial prefix (%APPDATA%/BambuStudio/printers/*.json); the IP from the printer's own LAN announcement.
   left      the printer's status over MQTT (read only, one "report everything" request): grams left per AMS tray.
             For a spool the printer cannot measure: the amount entered on the card, counted down (guard_ledger.py).
+  learned   per tray, from the prints the guard followed: how far its reading can be trusted (guard_learn.py).
   running   the job the printer runs or prepares, from the same status (name, file, layer, trays), matched to a slice
             the guard saw: what it still needs, by that slice's grams per layer (read from the whole G-code, kept in
             %LOCALAPPDATA%/BambuFilamentGuard/profiles/), is taken off the spools first. The answer is for the moment
@@ -60,6 +62,11 @@ DEFAULTS = {
     'at_send': True,             # check again when "Send print job" opens, and show a warning beside that dialog
     'poll_seconds': 2,
     'printers': {},              # optional, per serial: {"ip": "192.168.1.50"} when the printer is not announced on this LAN
+    # Learn from previous prints, per tray, how far its reading can be trusted (guard_learn.py): the guard follows a
+    # printer it has checked while it prints (read only, as for entered amounts), and a check counts a tray with less
+    # where the tray's history shows its reading runs high. It can only make a check stricter. Off: nothing is followed
+    # or corrected for it; what was learned is kept.
+    'learn': True,
 }
 SEVERITY = {'OK': 0, 'UNKNOWN': 1, 'TIGHT': 2, 'SPLIT': 3, 'SHORT': 4, 'MISSING': 4, 'COLOUR': 4}
 BUSY = ('RUNNING', 'PAUSE', 'PREPARE')                    # a job is on the printer: it draws, or is about to draw, on the spools
@@ -453,9 +460,17 @@ def grams_left(t):
     if weight > 0 and pct >= 0: return weight * pct / 100.0
     return None
 
+def spool_id(t):
+    """A spool's own id (its RFID tag) from a tray of the printer's status, or None: blank or all zeros is no tag."""
+    for key in ('tray_uuid', 'tag_uid'):
+        v = str(t.get(key) or '').strip()
+        if v and set(v) != {'0'}: return v
+    return None
+
 def trays_of(status):
-    """([{'label', 'type', 'fid', 'colour', 'name', 'grams', 'weight', 'nozzle'}], two_nozzles) for every loaded spool.
-    weight is the full spool's filament in grams (tray_weight), None when the printer does not know it.
+    """([{'label', 'type', 'fid', 'colour', 'name', 'grams', 'weight', 'nozzle', 'spool'}], two_nozzles) for every loaded
+    spool. weight is the full spool's filament in grams (tray_weight), None when the printer does not know it; spool the
+    spool's tag (spool_id).
     label is the tray as Bambu Studio shows it (A1..D4, HT-A, Ext). nozzle is the one the tray's AMS feeds, where the
     printer has two: the low half of the top byte of the AMS 'info' word, 1 = left, 0 = right (H2D, firmware 01.04);
     the tray each nozzle has loaded confirms it. None = not known, and then the tray counts for either nozzle."""
@@ -475,7 +490,7 @@ def trays_of(status):
         try: weight = float(t.get('tray_weight')) or None
         except (TypeError, ValueError): weight = None
         out.append({'label': label, 'type': t['tray_type'], 'fid': t.get('tray_info_idx', ''), 'colour': '#' + (t.get('tray_color') or '808080')[:6].upper(),
-                    'name': t.get('tray_sub_brands', ''), 'grams': grams_left(t), 'weight': weight, 'nozzle': nozzle if two else None})
+                    'name': t.get('tray_sub_brands', ''), 'grams': grams_left(t), 'weight': weight, 'nozzle': nozzle if two else None, 'spool': spool_id(t)})
     for a in status.get('ams', {}).get('ams', []) or []:
         aid = int(a.get('id', 0))
         for t in a.get('tray', []) or []:
@@ -523,8 +538,10 @@ def assess(fil, trays, cfg, times=1):
         return row
     group = [t for t in near if fil['fid'] and t['fid'] == fil['fid']] or near
     group.sort(key=lambda t: -(t['grams'] or 0))
-    row['trays'] = [{'label': t['label'], 'grams': t['grams'], 'colour': t['colour'], 'name': t['name'], 'type': t['type'],
-                     'entered': t.get('entered'), 'stale': t.get('stale'), 'reads': t.get('reads'), 'reserved': t.get('reserved')} for t in group]
+    need = row['need'] = need + (group[0].get('pre') or 0) * times     # what the tray judged on was seen to lose before layer 1 (guard_learn)
+    row['trays'] = [{'label': t['label'], 'grams': t['grams'], 'colour': t['colour'], 'name': t['name'], 'type': t['type'], 'entered': t.get('entered'),
+                     'stale': t.get('stale'), 'reads': t.get('reads'), 'reserved': t.get('reserved'), 'credited': t.get('credited'), 'evidence': t.get('evidence'),
+                     'pre': t.get('pre')} for t in group]
     known = [t['grams'] for t in group if t['grams'] is not None]
     unknown = [t['label'] for t in group if t['grams'] is None]
     if not known:
@@ -534,15 +551,18 @@ def assess(fil, trays, cfg, times=1):
                        else f"{', '.join(unknown)} reports no remaining amount")
         return row
     row['best'], row['total'] = max(known), sum(known)
-    reserve = max(need * cfg['margin_pct'] / 100.0, (group[0].get('weight') or 0) * cfg['spool_reserve_pct'] / 100.0)   # group[0] is the fullest spool
+    # The reserve is a share of the fullest spool's full weight. Learning may make another spool the fullest: the larger
+    # of the two weights is taken, so that the reserve is never smaller for having learned (see credit).
+    plainest = max(group, key=lambda t: t.get('plain', t['grams']) or 0)
+    reserve = max(need * cfg['margin_pct'] / 100.0, max(group[0].get('weight') or 0, plainest.get('weight') or 0) * cfg['spool_reserve_pct'] / 100.0)
     if row['best'] >= need + reserve: row['status'] = 'OK'
     elif row['best'] >= need: row['status'] = 'TIGHT'; row['note'] = f"{row['best'] - need:.0f} g to spare, and the AMS's figure can be {reserve:.0f} g out"
     elif row['total'] >= need: row['status'] = 'SPLIT'; row['note'] = 'only across these spools: AMS auto refill must be on'
     else: row['status'] = 'SHORT'; row['note'] = f"short by {need - row['total']:.0f} g"
     if unknown and row['status'] in ('SHORT', 'SPLIT', 'TIGHT'): row['note'] += f"; {', '.join(unknown)} holds an unknown amount more"
-    held = [t for t in group if round(t.get('reserved') or 0)]   # the print running now takes its share of these first (see evaluate); under 1 g it goes unsaid
-    if held:
-        row['note'] += ('; ' if row['note'] else '') + '; '.join(f"{t['label']} reads {t['reads']:.0f} g, of which the running print still needs {t['reserved']:.0f} g" for t in held)
+    said = [x for x in (tray_note(t) for t in group) if x]
+    if group[0].get('pre'): said.append(f"{group[0]['label']} {group[0]['pre_note']}, which is added to the need")
+    if said: row['note'] += ('; ' if row['note'] else '') + '; '.join(said)
     entered = [t for t in group if t.get('entered')]         # a spool the printer cannot measure: the amount is the user's, less the prints since
     if entered:
         row['note'] += ('; ' if row['note'] else '') + ', '.join(f"{t['label']} as entered on {time.strftime('%d %b', time.localtime(t['entered']))}" for t in entered) + ', less the prints since'
@@ -550,6 +570,30 @@ def assess(fil, trays, cfg, times=1):
     if alike and row['status'] in ('SHORT', 'SPLIT', 'TIGHT'):
         row['note'] += '; similar colour: ' + ', '.join(f"{t['label']} {t['name'] or t['type']}" + (f" {t['grams']:.0f} g" if t['grams'] is not None else '') for t in alike)
     return row
+
+def tray_note(t):
+    """What became of a tray's reading before it was judged, in words: counted lower for what was learned of the tray,
+    and the running print's share taken off. Under 1 g either way it goes unsaid."""
+    learned, share = t.get('credited') is not None and round(t['credited']) < round(t['reads']), round(t.get('reserved') or 0)
+    if not learned: return f"{t['label']} reads {t['reads']:.0f} g, of which the running print still needs {t['reserved']:.0f} g" if share else ''
+    return f"{t['label']} reads {t['reads']:.0f} g, counted as {t['credited']:.0f} g: {t['evidence']}" + (f"; the running print still needs {t['reserved']:.0f} g of it" if share else '')
+
+def credit(trays, owed, learned=None):
+    """What each tray the printer measures is counted with, for the moment the checked print could start: its reading,
+    corrected by what was learned of the tray (learned: guard_learn.corrections; only ever lower), less what the print
+    running now still needs of it (owed). An amount entered by hand is left as it is: guard_ledger took the whole job off
+    it when the job started. Keeps the reading ('reads') whenever anything was corrected or taken off, and what the tray
+    would be counted with had nothing been learned ('plain'), which keeps the reserve from shrinking (see assess)."""
+    for t in trays:
+        if t['grams'] is None or t.get('entered') or t.get('stale'): continue
+        raw, share, fix = t['grams'], owed.get(t['label'], 0.0), (learned or {}).get(t['label'], {})
+        base = fix.get('credited', raw)
+        if 'credited' in fix: t['credited'], t['evidence'] = base, fix['evidence']
+        if fix.get('pre'): t['pre'], t['pre_note'] = fix['pre'], fix['pre_note']
+        if share or base < raw: t['reads'] = raw
+        if share: t['reserved'] = min(base, share)
+        t['grams'], t['plain'] = base - t.get('reserved', 0.0), raw - min(raw, share)
+    return trays
 
 def pick_printer(model, printers):
     """The printer a plate is checked against: of the known printers of the model it was sliced for, the one selected
@@ -592,6 +636,8 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
                 if not new_ip or new_ip == ip: raise
                 status = read_status(new_ip, printer['serial'], code)
             if seen is not None: seen[printer['serial']] = status
+        try: update_state(lambda st: st.setdefault('looked', {}).__setitem__(printer['serial'], time.time()))   # learning follows a printer a check looked at
+        except OSError: pass
     except (PrinterError, OSError, ValueError, KeyError) as e:
         res['error'] = str(e) if isinstance(e, PrinterError) else f'{e.__class__.__name__}: {e}'
         return res
@@ -602,9 +648,10 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         # The answer is for the moment this print could start: what the print running now still needs is not there for
         # it. Taken off the printer's own readings only: an entered amount had the whole job taken off when it started.
         owed, counted = guard_ledger.owed(status, load_state().get('slices', []))
-        for t in trays:
-            if owed.get(t['label']) and t['grams'] is not None and not t.get('entered') and not t.get('stale'):
-                t['reads'], t['reserved'] = t['grams'], min(t['grams'], owed[t['label']]); t['grams'] -= t['reserved']
+        if cfg.get('learn'):
+            import guard_learn
+            credit(trays, owed, guard_learn.corrections(printer['serial'], trays))
+        else: credit(trays, owed)
         rows = [assess(f, trays, cfg, times) for f in plate['filaments']]
         share_spools(rows, plate['filaments'], trays, cfg, times)
     except Exception as e:                   # a status the guard does not understand must end as a card that says so, not as a line in the log
@@ -870,19 +917,24 @@ class Guard:
         paths = sorted((p for p in temp_gcodes() if os.path.dirname(p) == folder), key=os.path.getmtime, reverse=True)[:8] if beside else [newest]
         if key: self.checking(key, checking_text(printer_for(plate_at(newest))), studio_pid(newest))
         def work():
-            seen, out = {}, []
+            seen, out, unread = {}, [], []
             for path in paths:
                 try:
                     with open(path, 'rb') as f: plate = parse_plate(read_head(f))
                 except (OSError, ValueError) as e:                       # one plate that cannot be read does not cost the others their check
-                    log(f'cannot read the slice {path}: {e.__class__.__name__}: {e}'); continue
-                if not plate or not plate['filaments']: continue
+                    log(f'cannot read the slice {path}: {e.__class__.__name__}: {e}'); unread.append(f'it cannot be read ({e})'); continue
+                if plate is None: unread.append('Bambu Studio is still writing it'); continue
+                if not plate['filaments']: continue
                 res = evaluate(plate, self.cfg, project_title(path), seen=seen); res['pid'], res['plate_no'] = studio_pid(path), plate_number(path)
                 log(('at "Send print job": ' if beside else 'checked on request: ') + report_text(res).replace('\n', ' | ')); out.append(res)
-            return max(out, key=lambda r: -1 if r['error'] else SEVERITY[r['worst']]) if out else None     # the newest of the worst
-        def then(res):
+            return (max(out, key=lambda r: -1 if r['error'] else SEVERITY[r['worst']]) if out else None), unread    # the newest of the worst
+        def then(found):
+            res, unread = found
             try:
                 if res is not None and (not beside or guard_ui.visible(beside)): self.deliver(res, full=not beside, beside=beside)   # not: nothing sliced, or the dialog has closed meanwhile
+                elif res is None and unread and not beside:                       # asked for from the icon: an answer, not a line that goes
+                    self.card.note('Filament could not be checked', [(False, f'The newest slice ({project_title(newest)}): {unread[0]}.'),
+                                                                     (None, 'Slice it again, or check again in a moment. The log has the file.')], 'danger', studio_pid(newest))
             finally: self.checked(key)
         self.later(work, then, lambda: self.checked(key))
 
@@ -910,6 +962,10 @@ class Guard:
         self.greeted = True
         if self.cfg['ok_seconds'] and not self.card.is_open():
             self.card.line(f'Bambu Filament Guard {VERSION} is watching for sliced plates', 'ok', self.cfg['ok_seconds'], pid, hold=True)
+
+    def forget_learned(self):
+        import guard_learn
+        guard_learn.forget(); self.card.note('What was learned is forgotten', [(None, 'The guard learns again from the next prints it follows.')])
 
     def show_last(self):
         if self.last: self.deliver(self.last, full=True)
@@ -1001,7 +1057,7 @@ class Guard:
         if self.ticks % 5 == 0 and self.tray: self.tray.visible(bool(guard_ui.studio_windows()))
         if self.ticks % 5 == 0: self.greet()
         if self.ticks % 25 == 1:
-            for serial in guard_ledger.serials():
+            for serial in guard_ledger.followed(self.cfg):
                 if serial not in self.jobs or not self.jobs[serial].is_alive():
                     self.jobs[serial] = guard_ledger.JobWatch(serial, self.cfg); self.jobs[serial].start()
 
@@ -1087,6 +1143,11 @@ def selftest(cfg):
             trays, _ = trays_of(status); guard_ledger.apply(trays, p['serial'], 'ams' in status)
             out.append((True, f"{p['model']}: {len(trays)} spool(s), {sum(t['grams'] is not None for t in trays)} with a known amount"))
         except PrinterError as e: out.append((False if 'refused' in str(e) else None, f"{p['model']}: {e}"))
+    import guard_learn
+    history = guard_learn.load()
+    jobs = [j for trays in history.values() for h in trays.values() for j in h.get('jobs', [])]
+    out.append((True if cfg.get('learn') else None, f"Learning from prints is {'on' if cfg.get('learn') else 'off'}: {len(jobs)} tray record(s) of past prints, "
+                f"{sum(1 for j in jobs if j.get('sound'))} sound (\"learned\" says more)"))
     out.append((True, 'Bambu Studio is running: the card shows in its window') if guard_ui.studio_windows() else (None, 'Bambu Studio is not running: the card shows when it is'))
     out.append((True, 'The guard is running') if is_running() else (False, 'The guard is not running: "install" starts it'))
     out.append((True, 'It starts automatically') if os.path.exists(STARTUP_LNK) else (None, 'It does not start automatically'))
@@ -1157,6 +1218,7 @@ def main(argv=None):
     c = sub.add_parser('check'); c.add_argument('file', nargs='?'); c.add_argument('--times', type=int, default=1)
     c.add_argument('--popup', action='store_true'); c.add_argument('--json', action='store_true')
     sub.add_parser('watch').add_argument('--no-start-line', action='store_true')
+    sub.add_parser('learned').add_argument('--forget', action='store_true')
     for name in ('install', 'uninstall', 'setup', 'status', 'stop', 'trays', 'selftest'): sub.add_parser(name)
     a = ap.parse_args(argv)
     if a.cmd == 'watch': return watch(start_line=not a.no_start_line)
@@ -1172,6 +1234,12 @@ def main(argv=None):
         lines = selftest(cfg)
         for mark, text in lines: print({True: '[ok]', False: '[!!]', None: '[--]'}[mark], text)
         return 1 if any(mark is False for mark, _ in lines) else 0
+    if a.cmd == 'learned':
+        import guard_learn
+        if a.forget: guard_learn.forget(); print('what was learned is forgotten'); return 0
+        try: names = {p['serial']: p['model'] for p in known_printers(bs_conf())}
+        except (OSError, ValueError): names = {}
+        print('\n'.join(guard_learn.report(guard_learn.load(), names, cfg.get('learn')))); return 0
     if a.cmd == 'trays':
         import guard_ledger
         conf = bs_conf()

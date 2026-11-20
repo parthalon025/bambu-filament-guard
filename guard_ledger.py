@@ -17,13 +17,19 @@ the print before it (LAN-only mode gives every job the id 0).
 
 For the check of the next print, owed() tells what the job the printer runs still needs from each tray: the per-layer
 profile of the slice it was made from, from the printer's layer to the end. filament_guard takes that off the trays the
-printer measures, and not off an entered amount, which had the whole job taken off when the job started."""
+printer measures, and not off an entered amount, which had the whole job taken off when the job started.
+
+JobWatch, the standing read-only link to a printer, also serves learning (guard_learn.py): with the setting "learn" on,
+a printer is followed while a check has looked at it within LOOKED, or while it prints, and each look goes to the
+guard_learn.Recorder too. Entered amounts are counted exactly as without it."""
 import re, threading, time
 import filament_guard as fg
 
 STARTED = ('RUNNING', 'PAUSE', 'FINISH', 'FAILED')        # states in which a job has drawn filament and its tray mapping is its own
 NO_JOB = ['-', '-']
 GAP = 600                                                  # seconds without a look at the printer after which jobs may have been missed
+LOOKED = 1800                                              # seconds a printer a check looked at is followed for learning: a print sent
+                                                           # after the check is seen from its start
 
 
 def identity(tray):
@@ -32,6 +38,17 @@ def identity(tray):
 def serials():
     """The printers that have an entered amount."""
     return [s for s, book in fg.load_state().get('spools', {}).items() if book]
+
+def followed(cfg, state=None):
+    """The printers to follow: those with an entered amount; with learning on, also one a check looked at within LOOKED
+    (in this process or another: it goes through the state file), or that was printing at its last look (a guard
+    started during a print follows it on)."""
+    state = fg.load_state() if state is None else state
+    out = {s for s, book in state.get('spools', {}).items() if book}
+    if cfg.get('learn'):
+        out |= {s for s, at in state.get('looked', {}).items() if time.time() - at < LOOKED}
+        out |= {s for s, on in state.get('printing', {}).items() if on}
+    return sorted(out)
 
 def apply(trays, serial, complete=True):
     """Gives the trays the printer cannot measure the amount entered for them (grams, and 'entered': when), or marks
@@ -166,12 +183,16 @@ def all_out_of_date(serial, why):
 
 
 class JobWatch(threading.Thread):
-    """Follows one printer for as long as it has entered amounts: a standing, read-only subscription to its status,
-    looked at every 3 seconds. Each job is counted once, when it is first seen running (or already over)."""
+    """Follows one printer while it is to be followed (followed()): a standing, read-only subscription to its status,
+    looked at every 3 seconds. Each job is counted once, when it is first seen running (or already over), for the
+    entered amounts; and every look goes to the learning's Recorder while learning is on."""
     def __init__(self, serial, cfg):
+        import guard_learn
         super().__init__(daemon=True)
         self.serial, self.cfg, self.stopped = serial, cfg, threading.Event()
+        self.recorder, self.entered = guard_learn.Recorder(serial), serial in serials()
         state = fg.load_state()
+        self.printing = state.get('printing', {}).get(serial)                # was it printing at the last look (kept in the state file)
         self.counted = state.get('jobs', {}).get(serial)                     # the key of the last job counted; None = take the first sighting as the baseline
         self.followed = state.get('followed', {}).get(serial)                # when the printer was last looked at (kept in the state file, to the minute)
         self.saved = 0.0
@@ -199,6 +220,30 @@ class JobWatch(threading.Thread):
         self.seen, self.active = (state, key), running
         return done
 
+    def see(self, status):
+        """One look at the printer's whole status: for the entered amounts (look) while there are any, and for learning."""
+        entered = self.serial in serials()
+        if entered and not self.entered: self.restart()
+        if entered: self.look(status, gap=bool(self.followed) and time.time() - self.followed > GAP)
+        self.entered = entered
+        if self.cfg.get('learn'):
+            try: self.recorder.look(status)
+            except Exception as e: fg.log(f'learning: {e.__class__.__name__}: {e}')   # learning never stops the entered amounts' count
+        self.mark_followed(); self.mark_printing(status.get('gcode_state') in fg.BUSY)
+
+    def restart(self):
+        """The printer has its first entered amount while followed for learning: as a follower started now would, the
+        next sighting is the baseline (enter() has cleared the job counted)."""
+        self.counted, self.seen, self.active = fg.load_state().get('jobs', {}).get(self.serial), (None, None), None
+
+    def wanted(self):
+        """Still to be followed: an entered amount, or learning has a reason (followed()), or a job it is recording."""
+        return self.serial in followed(self.cfg) or (self.cfg.get('learn') and self.recorder.job is not None)
+
+    def mark_printing(self, on):
+        if on != self.printing:
+            self.printing = on; fg.update_state(lambda st: st.setdefault('printing', {}).__setitem__(self.serial, on))
+
     def remember(self, key):
         self.counted = key
         fg.update_state(lambda st: st.setdefault('jobs', {}).__setitem__(self.serial, key))
@@ -210,7 +255,7 @@ class JobWatch(threading.Thread):
             fg.update_state(lambda st: st.setdefault('followed', {}).__setitem__(self.serial, self.followed))
 
     def run(self):
-        while not self.stopped.is_set():
+        while not self.stopped.is_set() and self.wanted():
             link = None
             try:
                 conf = fg.bs_conf(); ip = fg.printer_ip(self.serial, self.cfg, refresh=self.lost)
@@ -218,10 +263,10 @@ class JobWatch(threading.Thread):
                     status, lock, first, opened = {}, threading.Lock(), [], time.time()
                     def on_report(d):
                         with lock: fg.merge(status, d); first.append(time.time()) if not first else None
-                    def on_refused(rc): fg.log(f'following the printer for entered amounts: {ip} refused the access code Bambu Studio holds for it')
+                    def on_refused(rc): fg.log(f'following the printer: {ip} refused the access code Bambu Studio holds for it')
                     link = fg.printer_link(ip, self.serial, conf['access_code'][self.serial], f'bambu-filament-guard-jobs-{fg.os.getpid()}', on_report, on_refused)
                     while not self.stopped.wait(3):
-                        if self.serial not in serials(): self.stopped.set(); break   # the last entry is gone: nothing left to follow
+                        if not self.wanted(): self.stopped.set(); break             # no entered amount, and nothing for learning to watch
                         if not first:
                             if time.time() - opened > 40: self.lost = True; break    # no report: the address or the access code has changed
                             continue
@@ -229,9 +274,9 @@ class JobWatch(threading.Thread):
                         with lock: snap = fg.json.loads(fg.json.dumps(status))
                         if 'gcode_state' not in snap: continue
                         self.lost = False
-                        self.look(snap, gap=bool(self.followed) and time.time() - self.followed > GAP); self.mark_followed()
+                        self.see(snap)
             except Exception as e:
-                fg.log(f'following the printer for entered amounts: {e.__class__.__name__}: {e}')
+                fg.log(f'following the printer: {e.__class__.__name__}: {e}')
             finally:
                 if link: link.loop_stop(); link.disconnect()
             self.stopped.wait(60)
