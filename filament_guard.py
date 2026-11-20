@@ -25,7 +25,7 @@ What it reads, and from where:
             its serial prefix (%APPDATA%/BambuStudio/printers/*.json); the IP from the printer's own LAN announcement.
   left      the printer's status over MQTT (read only, one "report everything" request): grams left per AMS tray.
             For a spool the printer cannot measure: the amount entered on the card, counted down (guard_ledger.py).
-  running   the job the printer runs or prepares, from the same status (its name, layer and trays), matched to a slice
+  running   the job the printer runs or prepares, from the same status (name, file, layer, trays), matched to a slice
             the guard saw: what it still needs, by that slice's grams per layer (read from the whole G-code, kept in
             %LOCALAPPDATA%/BambuFilamentGuard/profiles/), is taken off the spools first. The answer is for the moment
             the checked print could start.
@@ -202,28 +202,52 @@ def lines_of(stream, size=1 << 20):
 # a filament selected, the start of a layer, absolute or relative extrusion.
 GCODE_STEP = re.compile(rb'[ \t]*(?:G([0-3]|92)[ \t][^;E\n]*E([-+]?(?:\d+\.?\d*|\.\d+))|T(\d+)|M73 L(\d+)|M8([23])(?![\d.]))')
 
+def flush_table(settings, n):
+    """How much Bambu Studio flushes at a filament change, from its settings block: (the nozzle of each slot, counted
+    from 0; volume(nozzle, from slot, to slot) in mm3). flush_volumes_matrix holds k x n x n volumes, k nozzles by n
+    project filaments, each times its nozzle's flush_multiplier; filament_map gives each slot's nozzle, counted from 1
+    (one nozzle: all 1, or absent). None when the table is missing, of another size, or cannot be read."""
+    try:
+        k = len(settings.get(b'nozzle_diameter', b'0.4').split(b','))
+        matrix = [float(v) for v in settings[b'flush_volumes_matrix'].split(b',')]
+        times = [float(v) for v in settings.get(b'flush_multiplier', b','.join([b'1'] * k)).split(b',')]
+        nozzle = [int(v) - 1 for v in settings[b'filament_map'].split(b',')] if k > 1 else [0] * n
+    except (KeyError, ValueError): return None
+    if n < 1 or len(matrix) != k * n * n or len(times) != k or len(nozzle) != n or not all(0 <= z < k for z in nozzle): return None
+    return nozzle, lambda z, a, b: matrix[z * n * n + (a - 1) * n + b - 1] * times[z]
+
 def layer_profile(stream, plate):
-    """{slot: [grams in layer 0, layer 1, ..., the last layer]} for each filament of the plate, from its whole G-code (a
-    100 MB file in a few seconds), or None when the G-code is not understood. A layer starts at "M73 L<n>", the number the
-    printer reports as layer_num; layer 0 is what comes before. "T<n>" selects slot n + 1 (T255 and above are not
-    filaments). Each list adds up to the header's total, the guard's measure of the need: the printer purges by itself at
-    each filament change, and that purge is in the total but in the G-code only as comments, so what the moves leave out
-    is spread evenly over the changes to that filament. Moves that add up to more than the total are scaled down to it
-    within max(0.5 g, 2 %); beyond that the G-code is not understood. None also for a file that is not the one the plate
-    was read from (its totals differ), that ends before its first or its last layer, whose layers are out of order, or
-    that lacks a filament's density or diameter."""
-    head, lines = {}, lines_of(stream)
+    """{'layers': {slot: [grams in layer 0, layer 1, ..., the last layer]}, 'purge': {slot: grams of the total that the
+    moves leave out}} for each filament of the plate, from its whole G-code (a 100 MB file in a few seconds), or None
+    when the G-code is not understood. A layer starts at "M73 L<n>", the number the printer reports as layer_num; layer
+    0 is what comes before. "T<n>" selects slot n + 1 (T255 and above are not filaments). Each list adds up to the
+    header's total, the guard's measure of the need: the printer purges by itself at each filament change, and that
+    purge is in the total but in the G-code only as comments. So what the moves leave out goes to the changes to that
+    filament, each weighed by Bambu Studio's flush table (the volume from the filament its nozzle held before; a
+    nozzle's first filament weighs nothing), evenly when they all weigh nothing or there is no table. The table gives
+    weights only: on two nozzles its volumes need not add up to the header's grams. Moves that add up to more than the
+    total are scaled down to it within max(0.5 g, 2 %); beyond that the G-code is not understood. None also for a file
+    that is not the one the plate was read from (its totals differ), that has no settings block, that ends before its
+    first or its last layer, whose layers are out of order, or that lacks a filament's density or diameter."""
+    head, settings, lines = {}, {}, lines_of(stream)
     for line in lines:
         if line.startswith(b'; HEADER_BLOCK_END'): break
         key, colon, value = line[2:].partition(b':')
         if colon and line.startswith(b'; '): head[key.strip()] = value.strip()
+    else: return None
+    for line in lines:                                 # the settings block, for the flush table
+        if line.startswith(b'; CONFIG_BLOCK_END'): break
+        key, equals, value = line[2:].partition(b' = ')
+        if equals and key in (b'flush_volumes_matrix', b'flush_multiplier', b'filament_map', b'nozzle_diameter'): settings[key] = value.strip()
     else: return None
     def numbers(key):
         try: return [float(v) for v in head.get(key, b'').split(b',') if v.strip()]
         except ValueError: return []
     if [w for w in numbers(b'total filament weight [g]') if w > 0] != [f['grams'] for f in plate['filaments']]: return None
     density, diameter = numbers(b'filament_density'), numbers(b'filament_diameter')
-    mm, loads = {}, {}                                 # mm of filament by (slot, layer); the layers in which each slot is loaded
+    flush = flush_table(settings, len(density))
+    nozzle_of = flush[0] if flush else []
+    mm, loads, held = {}, {}, {}                       # mm of filament by (slot, layer); each slot's loads, (layer, what its nozzle held before); each nozzle's filament
     tool, layer, run, absolute, at = None, 0, 0.0, False, 0.0
     for line in lines:
         if line[:1] == b';': continue
@@ -237,7 +261,8 @@ def layer_profile(stream, plate):
         elif t is not None:
             if int(t) < 255 and int(t) + 1 != tool:
                 mm[tool, layer] = mm.get((tool, layer), 0.0) + run; run = 0.0
-                tool = int(t) + 1; loads.setdefault(tool, []).append(layer)
+                tool = int(t) + 1; z = nozzle_of[tool - 1] if tool <= len(nozzle_of) else 0
+                loads.setdefault(tool, []).append((layer, held.get(z))); held[z] = tool
         elif new_layer is not None:
             if int(new_layer) < layer: return None    # layers out of order: "from this layer to the end" would mean nothing
             mm[tool, layer] = mm.get((tool, layer), 0.0) + run; run = 0.0
@@ -249,7 +274,7 @@ def layer_profile(stream, plate):
     if len(plate['filaments']) == 1:                  # one filament: what runs before any "T" is that one
         for (slot, n), v in list(mm.items()):
             if slot is None: mm[plate['filaments'][0]['slot'], n] = mm.get((plate['filaments'][0]['slot'], n), 0.0) + v
-    out = {}
+    out = {'layers': {}, 'purge': {}}
     for f in plate['filaments']:
         slot, total = f['slot'], f['grams']
         if slot > min(len(density), len(diameter)) or density[slot - 1] <= 0 or diameter[slot - 1] <= 0: return None
@@ -258,14 +283,18 @@ def layer_profile(stream, plate):
         moved = sum(grams)
         if moved > total:
             if moved - total > max(0.5, total * 0.02): return None
-            grams = [g * total / moved for g in grams]
+            grams, purge = [g * total / moved for g in grams], 0.0
         else:
             # a filament that is never selected is where it first extrudes; one that neither is selected nor extrudes
             # is not understood: to put its grams anywhere would be a guess, and in layer 0 one that is never counted
-            spots = loads.get(slot) or [n for n, g in enumerate(grams) if g > 0][:1]
+            spots, purge = loads.get(slot) or [(n, None) for n, g in enumerate(grams) if g > 0][:1], total - moved
             if not spots: return None
-            for n in spots: grams[n] += (total - moved) / len(spots)
-        out[slot] = grams
+            try: weights = [flush[1](nozzle_of[slot - 1], before, slot) if flush and before else 0.0 for _, before in spots]
+            except IndexError: weights = []
+            whole = sum(weights)
+            if not whole > 0: weights, whole = [1.0] * len(spots), float(len(spots))
+            for (n, _), w in zip(spots, weights): grams[n] += purge * w / whole
+        out['layers'][slot], out['purge'][slot] = grams, purge
     return out
 
 def temp_gcodes():
@@ -584,18 +613,21 @@ def has_text(row):
     if row['best'] is None: return '?' if row['trays'] else '-'
     return f"{row['best']:.0f} g" + (f" ({row['total']:.0f} g in all)" if row['total'] > row['best'] else '')
 
-def job_stage(p):
-    """Where the printer's job is, in words: "layer 11 of 27"; "preparing", when the layer shown may be the job before's."""
-    if p['state'] == 'PREPARE': return 'preparing'
-    if isinstance(p.get('layer'), int) and p['layer'] >= 1: return f"layer {p['layer']}" + (f" of {p['layers']}" if p.get('layers') else '')
-    return f"{p['percent']} %"
+def job_text(p):
+    """The printer's job and where it is, in words: " (Benchy, layer 11 of 27)"; "preparing" when the layer shown may be
+    the job before's; the percentage without a layer; the name alone without either; '' without a name too."""
+    if p['state'] == 'PREPARE': stage = 'preparing'
+    elif isinstance(p.get('layer'), int) and p['layer'] >= 1: stage = f"layer {p['layer']}" + (f" of {p['layers']}" if p.get('layers') else '')
+    else: stage = f"{p['percent']} %" if p.get('percent') is not None else ''
+    words = ', '.join(x for x in (p.get('job'), stage) if x)
+    return f' ({words})' if words else ''
 
 def report_text(res):
     lines = [headline(res) + (f": {res['title']}" if res['title'] else '') + (f" x {res['times']}" if res['times'] != 1 else '')]
     if res['error']: return lines[0] + '\n  ' + res['error']
     p, busy = res['printer'], ''
     if p['state'] in BUSY:
-        busy = f" ({p['job']}, {job_stage(p)}): " + ('the running print is counted: what it still needs is taken off its spools' if p.get('counted') else
+        busy = f"{job_text(p)}: " + ('the running print is counted: what it still needs is taken off its spools' if p.get('counted') else
                                                     "its spools are still being used, and the guard could not count that print: the amounts are the spools' amounts now")
     lines.append(f"  {p['model']}, {p['state']}" + busy)
     for r in res['rows']:
@@ -629,6 +661,20 @@ def newest_gcode(pid=None):
     try: return max(files, key=os.path.getmtime) if files else None
     except OSError: return None
 
+def plate_at(path):
+    """The plate of a G-code file, or None while it cannot be read."""
+    try:
+        with open(path, 'rb') as f: return parse_plate(read_head(f))
+    except (OSError, ValueError): return None
+
+def printer_for(plate):
+    """The printer a plate is checked against, as Bambu Studio's configuration knows it (the printer is not asked), or None."""
+    try: return pick_printer(plate['printer_model'], known_printers(bs_conf())) if plate else None
+    except (OSError, ValueError, KeyError): return None
+
+def checking_text(printer):
+    return f"Checking the spools on the {printer['model']}…" if printer else 'Checking the spools…'
+
 def studio_version():
     try: return str(bs_conf().get('app', {}).get('version', ''))
     except (OSError, ValueError): return ''
@@ -638,26 +684,28 @@ def profile_name(title, plate_no, plate):
     key = json.dumps([title, plate_no, [[f['slot'], round(f['grams'], 2)] for f in plate['filaments']]])
     return hashlib.sha1(key.encode('utf-8')).hexdigest()[:16] + '.json'
 
-def load_profile(entry):
-    """{slot: [grams by layer]} of a remembered slice (see layer_profile), or None: it has none, or the file is gone."""
+def load_profile(entry, part='layers'):
+    """One part of a remembered slice's profile (see layer_profile), by slot: 'layers', [grams by layer], or 'purge',
+    the grams of each total that the moves leave out. None: it has none, or the file is gone."""
     if not entry or not entry.get('profile'): return None
     try:
-        with open(os.path.join(STATE_DIR, 'profiles', os.path.basename(entry['profile'])), encoding='utf-8') as f: return {int(k): v for k, v in json.load(f).items()}
-    except (OSError, ValueError, AttributeError): return None
+        with open(os.path.join(STATE_DIR, 'profiles', os.path.basename(entry['profile'])), encoding='utf-8') as f: return {int(k): v for k, v in json.load(f)[part].items()}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError): return None
 
 def remember_slice(title, plate_no, plate, profile=None):
     """Notes a slice that was read: which Bambu Studio version wrote it (the self-test reports that), what it needs
     (guard_ledger counts a print down from it when the printer starts a job of that name) and, when given, its per-layer
     profile (what a print of it still needs while it runs). A profile is a file of its own in profiles/, because the
-    state file is read and written whole at every change; it goes with its slice, when a re-slice of the same plate
-    replaces it or it drops out of the 30 kept."""
+    state file is read and written whole at every change: {"layers": {slot: [grams by layer]}, "purge": {slot: grams}}.
+    It goes with its slice, when a re-slice of the same plate replaces it or it drops out of the 30 kept."""
     version, folder = studio_version(), os.path.join(STATE_DIR, 'profiles')
     name = profile_name(title, plate_no, plate) if profile else None
     with STATE_LOCK:
         if name:
             try:
                 os.makedirs(folder, exist_ok=True); path = os.path.join(folder, name)
-                with open(path + '.new', 'w', encoding='utf-8') as f: json.dump({str(s): [round(g, 4) for g in grams] for s, grams in profile.items()}, f, separators=(',', ':'))
+                kept = {'layers': {str(s): [round(g, 4) for g in grams] for s, grams in profile['layers'].items()}, 'purge': {str(s): round(g, 4) for s, g in profile['purge'].items()}}
+                with open(path + '.new', 'w', encoding='utf-8') as f: json.dump(kept, f, separators=(',', ':'))
                 os.replace(path + '.new', path)
             except OSError as e:                                     # a check reading the old file just then (Windows): the slice counts, without a profile
                 log(f'{title}, plate {plate_no}: its per-layer profile could not be kept ({e.__class__.__name__}): a print of it is not counted while it runs'); name = None
@@ -715,6 +763,7 @@ class Guard:
         self.todo, self.stopping = queue.Queue(), threading.Event()
         self.last, self.paused, self.ticks, self.sending, self.jobs = None, False, 0, set(), {}
         self.warning = None                                   # the warning on the full card: (title, plate, severity, when)
+        self.busy, self.greeted = {}, False                   # the checks someone waits for, by what started them: (their line, its text)
         self.card = guard_ui.Card(root, act=self.act, on_close=None if standing else root.quit)
         self.tray = guard_ui.Tray(self) if standing else None
 
@@ -792,12 +841,15 @@ class Guard:
         sending Bambu Studio has sliced, because which of them is being sent cannot be read; the worst answer shows,
         when it is a warning, and names its plate."""
         import guard_ui
+        key = None if beside else 'icon'                      # beside the dialog only a warning shows: no line while it is checked
+        if key in self.busy: self.checking(key, self.busy[key][1]); return     # asked again while its check runs: it says so, and starts nothing
         newest = newest_gcode(pid)
         if not newest:
             if not beside: self.card.note('No sliced plate found', [(None, 'Slice a plate in Bambu Studio first.')])
             return
         folder = os.path.dirname(newest)
         paths = sorted((p for p in temp_gcodes() if os.path.dirname(p) == folder), key=os.path.getmtime, reverse=True)[:8] if beside else [newest]
+        if key: self.checking(key, checking_text(printer_for(plate_at(newest))), studio_pid(newest))
         def work():
             seen, out = {}, []
             for path in paths:
@@ -807,9 +859,34 @@ class Guard:
                 log(('at "Send print job": ' if beside else 'checked on request: ') + report_text(res).replace('\n', ' | ')); out.append(res)
             return max(out, key=lambda r: -1 if r['error'] else SEVERITY[r['worst']]) if out else None     # the newest of the worst
         def then(res):
-            if res is None or (beside and not guard_ui.visible(beside)): return   # nothing sliced, or the dialog has closed meanwhile
-            self.deliver(res, full=not beside, beside=beside)
-        self.later(work, then)
+            try:
+                if res is not None and (not beside or guard_ui.visible(beside)): self.deliver(res, full=not beside, beside=beside)   # not: nothing sliced, or the dialog has closed meanwhile
+            finally: self.checked(key)
+        self.later(work, then, lambda: self.checked(key))
+
+    def checking(self, key, text, pid=None, asked=True):
+        """Says at once that a check someone waits for is under way, in a line the answer replaces. key: what started
+        it. asked: the user asked for it, and its answer is a full card; otherwise (a new slice) the line is held while
+        Bambu Studio is minimised, and a full card that stands is left alone, since the answer may leave it standing."""
+        shown = self.busy.get(key, (None,))[0]
+        if shown is not None and self.card.win is shown and self.card.is_open(): return
+        if not asked and self.card.is_open() and not self.card.one_line: self.busy[key] = (None, text); return
+        self.busy[key] = (self.card.line(text, pid=pid, hold=not asked), text)
+
+    def checked(self, key):
+        """The check key started has ended: its line goes, unless an answer has taken its place."""
+        shown = self.busy.pop(key, (None,))[0]
+        if shown is not None and self.card.win is shown and self.card.is_open(): self.card.close()
+
+    def greet(self):
+        """Once in a run of the guard, the first time Bambu Studio is on screen (not minimised): a line saying that the
+        guard is running, which goes by itself. Not when one line for "enough" is turned off: quiet was asked for."""
+        import guard_ui
+        pid = None if self.greeted else guard_ui.studio_on_screen()
+        if pid is None: return
+        self.greeted = True
+        if self.cfg['ok_seconds'] and not self.card.is_open():
+            self.card.line(f'Bambu Filament Guard {VERSION} is watching for sliced plates', 'ok', self.cfg['ok_seconds'], pid, hold=True)
 
     def show_last(self):
         if self.last: self.deliver(self.last, full=True)
@@ -849,13 +926,17 @@ class Guard:
         """A newly sliced plate: checked and handed to the Tk thread, then remembered with its per-layer profile, read
         from the same file. The check comes first: the card does not wait for the profile, and a re-slice of the plate
         that is printing would otherwise replace the slice, and the profile, that the running print is counted from."""
-        title, plate_no, profile = project_title(path), plate_number(path), None
+        title, plate_no, profile, waiting = project_title(path), plate_number(path), None, False
         try:
             if not self.paused and plate['filaments']:
+                printer = printer_for(plate)
+                if printer and self.cfg['ok_seconds']:                          # no line for a check that ends in silence (a printer not on this LAN), nor for a quiet guard
+                    waiting = True; self.todo.put(lambda: self.checking('slice', checking_text(printer), studio_pid(path), asked=False))
                 res = evaluate(plate, self.cfg, title); res['pid'], res['plate_no'] = studio_pid(path), plate_no
                 log(report_text(res).replace('\n', ' | '))
                 self.todo.put(lambda: self.deliver(res))
         finally:                                                                 # the slice is remembered whatever became of the check: guard_ledger counts from it
+            if waiting: self.todo.put(lambda: self.checked('slice'))
             if plate['filaments']:
                 try:
                     with open(path, 'rb') as f: profile = layer_profile(f, plate)
@@ -870,7 +951,9 @@ class Guard:
         while not self.stopping.is_set():
             if os.path.exists(stop_flag): self.stopping.set(); break
             try:
-                for path, plate in watcher.new_plates(): self.take_slice(path, plate)
+                for path, plate in watcher.new_plates():
+                    try: self.take_slice(path, plate)
+                    except Exception as e: log(f'error: {e.__class__.__name__}: {e}')   # one plate that fails does not cost the others of this round their check
                 for path, why in watcher.problems:
                     version = studio_version(); log(f'cannot read the slice {path} of Bambu Studio {version}: {why}')
                     if version not in told:                                      # said once for each Bambu Studio version, logged every time
@@ -892,6 +975,7 @@ class Guard:
             if handle not in self.sending and self.cfg['at_send'] and not self.paused: self.check_newest(pid, beside=handle)
         self.sending = set(dialogs)
         if self.ticks % 5 == 0 and self.tray: self.tray.visible(bool(guard_ui.studio_windows()))
+        if self.ticks % 5 == 0: self.greet()
         if self.ticks % 25 == 1:
             for serial in guard_ledger.serials():
                 if serial not in self.jobs or not self.jobs[serial].is_alive():

@@ -26,6 +26,10 @@ The guard starts with Windows and waits. Its icon, a spool, is in the notificati
 
 ## The card
 
+A check takes a second or three, because the guard asks the printer each time. While one runs that you are waiting for (a plate you just sliced, or one you asked for from the icon) the card says so at once in one line, "Checking the spools on the Bambu Lab H2D…", and the answer takes its place. It does not cover a full card that is still open, and beside "Send print job" nothing shows until there is a warning.
+
+When the guard starts, the first time Bambu Studio is on screen it shows one line, "Bambu Filament Guard 1.3.0 is watching for sliced plates", which goes away by itself. With "One line when there is enough" turned off, quiet was asked for: a new slice shows no "Checking…" line, and the guard no start line.
+
 | Button | Does |
 |---|---|
 | Check again | Asks the printer again, for the same slice: after swapping a spool, no re-slice is needed. |
@@ -35,7 +39,7 @@ The guard starts with Windows and waits. Its icon, a spool, is in the notificati
 
 ## The icon
 
-Its colour and tooltip are the last result. A click shows that result again. The menu: check the newest slice now, pause, self-test, the log, and the settings:
+Its colour and tooltip are the last result. A click shows that result again; before there is one, it checks the newest slice. A click while that check runs shows the "Checking…" line again and starts no second check. The menu: check the newest slice now, pause, self-test, the log, and the settings:
 
 - One line when there is enough (`ok_seconds`)
 - Warn when a colour is not loaded / when a spool's amount is unknown (`popup_on`)
@@ -65,8 +69,8 @@ A spool matches a filament when it is the same material, on the nozzle that prin
 
 In batch printing the next plate is sliced while one prints. On 2026-11-19 a plate needing 85.3 g of blue was printing from a spool that read 105 g; the same plate, sliced again for the next run, was checked against those 105 g, although after the running print the spool would hold about 20 g. So every check counts the print that is running:
 
-- For each plate it sees sliced, the guard keeps how many grams of each filament every layer takes, read from the extrusion moves of the G-code. The printer purges by itself at each filament change, and that purge is in Bambu Studio's total but not in the moves, so what the moves leave out is spread evenly over that filament's changes; each filament's layers add up to its total.
-- The job the printer runs is matched to its slice (project name and layer count) and to the trays it uses (the job's tray mapping). What it still needs is its grams from the layer the printer is on to the end, that layer counted whole; while the printer prepares a job, all of it.
+- For each plate it sees sliced, the guard keeps how many grams of each filament every layer takes, read from the extrusion moves of the G-code. The printer purges by itself at each filament change, and that purge is in Bambu Studio's total but not in the moves. So what the moves leave out is placed at that filament's changes, each weighed by Bambu Studio's own flush table: the volume it flushes on that nozzle from the filament the nozzle held before (a nozzle's first filament weighs nothing). Without a table the guard can read, it is spread evenly over the changes. Each filament's layers add up to its total.
+- The job the printer runs is matched to its slice (project name, layer count and plate) and to the trays it uses (the job's tray mapping). What it still needs is its grams from the layer the printer is on to the end, that layer counted whole; while the printer prepares a job, all of it.
 - That is taken off each spool's reading before the check. The note of a filament says so: "C3 reads 105 g, of which the running print still needs 85 g". The card says whether the running print was counted.
 - An amount entered by hand is not reduced again: the whole job came off it when the job started (see below).
 
@@ -99,7 +103,7 @@ python filament_guard.py uninstall    # remove the shortcut and stop
 ## Limits
 
 - A running print is counted only when it was sliced on this computer while the guard (1.3.0 or later) was watching. Otherwise the card says it could not count it, and the amounts are what the spools hold now.
-- A job is matched to its slice by project name and layer count. Re-slicing a plate replaces its slice: from then on, a print still running from the earlier slice is counted with the new slice's amounts, or not at all when the layer count changed. Two plates of one project with the same number of layers are not told apart; the newer slice is taken.
+- A job is matched to its slice by project name and layer count, and by plate when the printer names the file it prints (`/data/Metadata/plate_2.gcode`, as the H2D does). A printer that does not (an A1 mini printing from its SD card reports nothing there) gets the newer of two plates of one project with the same number of layers. Re-slicing a plate replaces its slice: from then on, a print still running from the earlier slice is counted with the new slice's amounts, or not at all when the layer count changed.
 - What the running print still needs from a tray that has run out (taken out, or left for the AMS to refill from another spool) is not taken off any other spool.
 - Each plate is checked on its own. "Print all plates" needs the sum; check the exported file with `check`.
 - Which plate "Send print job" is sending, and which tray you pick there, cannot be read: the card beside it is the worst of the project's sliced plates, against every matching spool. Bambu Studio's own warning there ("The filament in … may be insufficient for this print") covers the chosen tray.

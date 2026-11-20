@@ -18,7 +18,7 @@ the print before it (LAN-only mode gives every job the id 0).
 For the check of the next print, owed() tells what the job the printer runs still needs from each tray: the per-layer
 profile of the slice it was made from, from the printer's layer to the end. filament_guard takes that off the trays the
 printer measures, and not off an entered amount, which had the whole job taken off when the job started."""
-import threading, time
+import re, threading, time
 import filament_guard as fg
 
 STARTED = ('RUNNING', 'PAUSE', 'FINISH', 'FAILED')        # states in which a job has drawn filament and its tray mapping is its own
@@ -84,12 +84,20 @@ def mapped_labels(status):
         else: out.append(None)
     return out
 
-def match_slice(name, layers, slices):
+def job_plate(status):
+    """The plate number of the job the printer shows, from the file it prints ("/data/Metadata/plate_2.gcode" on the
+    H2D), or None when the printer does not say (an A1 mini printing from its SD card reports '')."""
+    m = re.search(r'plate_(\d+)\.gcode$', str(status.get('gcode_file') or ''))
+    return int(m.group(1)) if m else None
+
+def match_slice(name, layers, slices, plate=None):
     """The slice a job was made from: the newest one whose project title starts the job's name (Bambu Studio names a
-    job "<project>" or "<project>_<plate name>") and whose layer count is the job's."""
+    job "<project>" or "<project>_<plate name>") and whose layer count is the job's; of that plate, when the job's plate
+    is known. Two plates of one project with the same layer count are told apart only by that."""
     for s in slices:
         if not (name == s['title'] or name.startswith(s['title'] + '_')): continue
         if layers and s.get('layers') and int(layers) != int(s['layers']): continue
+        if plate is not None and s.get('plate') != plate: continue
         return s
     return None
 
@@ -101,7 +109,7 @@ def paired(status, slices, all_labels):
     if labels is None and len(all_labels) != 1: return None, [], set(all_labels)   # no mapping and several trays: any of them may be in use
     if labels is not None and None in labels: return None, [], set(all_labels)     # a tray that cannot be named: none is certain
     used = set(all_labels) if labels is None else {l for l in labels if l}
-    s = match_slice(status.get('subtask_name') or '', status.get('total_layer_num'), slices)
+    s = match_slice(status.get('subtask_name') or '', status.get('total_layer_num'), slices, job_plate(status))
     if not s: return None, [], used                                                # not sliced on this computer: the trays are known, the grams are not
     fils = s['filaments']
     if labels is None: pairs = [(all_labels[0], f) for f in fils]
