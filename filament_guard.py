@@ -781,6 +781,8 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         reserve = None
         if cfg.get('learn'):
             reserve = guard_learn.reserve_words(printer['serial'], cfg=cfg)
+            offer = guard_learn.weigh_offer(printer['serial'], rows, cfg)
+            if offer: res['weigh'] = offer
     except Exception as e:                   # a status the guard does not understand must end as a card that says so, not as a line in the log
         res['error'] = f"the {printer['model']}'s report could not be worked out ({e.__class__.__name__}: {e})"
         return res
@@ -1023,6 +1025,13 @@ class Guard:
         elif name == 'amount':
             tray, grams = arg
             guard_ledger.enter(res['printer']['serial'], tray, grams); self.recheck(res, self.card.beside)
+        elif name in ('weigh', 'asked'):
+            import guard_learn
+            tray, grams = arg if name == 'weigh' else (arg, None)
+            if name == 'asked': guard_learn.asked(res['printer']['serial'], tray['label']); return
+            guard_learn.weigh(res['printer']['serial'], tray['label'], tray['reading'], grams,
+                              {'id': tray.get('spool'), 'type': tray['type'], 'colour': tray['colour'], 'fid': tray.get('fid'), 'weight': tray.get('weight')})
+            self.recheck(res, self.card.beside)
 
     def recheck(self, res, beside=None):
         import guard_ui
