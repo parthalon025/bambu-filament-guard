@@ -39,12 +39,13 @@ When the guard starts, the first time Bambu Studio runs it shows one line, "Bamb
 
 ## The icon
 
-Its colour and tooltip are the last result. A click shows that result again; before there is one, it checks the newest slice. A click while that check runs shows the "Checking…" line again and starts no second check. The menu: check the newest slice now, pause, self-test, the log, and the settings:
+Its colour and tooltip are the last result. A click shows that result again; before there is one, it checks the newest slice. A click while that check runs shows the "Checking…" line again and starts no second check. The menu: check the newest slice now, pause, self-test, the log, forget what was learned, and the settings:
 
 - One line when there is enough (`ok_seconds`)
 - Warn when a colour is not loaded / when a spool's amount is unknown (`popup_on`)
 - Check again at "Send print job" (`at_send`)
 - Reserve: 2, 3 or 5 % of the full spool (`spool_reserve_pct`)
+- Learn from prints, tray by tray (`learn`, on; see "Learning from previous prints")
 - Start automatically
 
 Settings are saved to `config.json` beside the script, which holds only what was changed. The keys, their defaults and their meaning are `DEFAULTS` at the top of `filament_guard.py`.
@@ -74,6 +75,24 @@ In batch printing the next plate is sliced while one prints. On 2026-11-19 a pla
 - That is taken off each spool's reading before the check. The note of a filament says so: "C3 reads 105 g, of which the running print still needs 85 g". The card says whether the running print was counted.
 - An amount entered by hand is not reduced again: the whole job came off it when the job started (see below).
 
+## Learning from previous prints
+
+The AMS's reading is an estimate, and not equally good in every tray. On 2026-11-19 tray C3 read 105 g and ran dry after 84-85 g of a print: it read about 20 g when it was empty. In the same print tray B4 fell 49 g for a need of 49.1 g: that tray tracks well. A fixed reserve treats both alike. So the guard learns, per printer and tray, how far that tray's reading can be trusted.
+
+**What is recorded.** While learning is on, the guard follows a printer it has checked in the last 30 minutes, or that is printing, over the same read-only link it uses for entered amounts: it reads the status every 3 seconds and sends nothing. For each job matched to a slice with a per-layer profile, it records per tray: the spool (its RFID tag when it has one), the reading before the first layer, at the start of each layer (at most 60 per print, thinned evenly), and a minute after the print finished; and how many grams the profile has that tray give over the same span, printed and purged apart. A record is used only when it is sound: the same spool throughout, a reading that never rose, no gap of ten minutes or more in following, the tray never empty, and the print seen to finish. A tray that empties out of the status while the print runs, having read 50 g (or 10 % of its spool) or less, is a run-dry, and its last reading is recorded; a fuller spool was taken out, which is logged and teaches nothing.
+
+**What is learned**, per tray, each number only past its threshold:
+
+| Number | What it is | Used when |
+|---|---|---|
+| dry | what the tray read when a spool ran dry in it: the largest of its last 3 run-dries | from the first run-dry |
+| rate | how far the reading fell for each gram the profile says the tray gave, over its last 10 sound whole prints of 5 g or more | from 3 such prints with 300 g between them, and only below 0.99 (whole-gram readings make 1 % noise) and not below 0.5 (more likely readings that lagged) |
+| pre | grams the tray lost before the first layer beyond what the profile has there: the largest of its last 5 sound prints | from 2 such prints |
+
+**What it changes.** A tray the printer measures is counted with the smallest of its reading G, G less dry, and W - (W - G) / rate (W the spool's full weight), never below 0; the running print's share is then taken off that. A filament judged on the tray needs pre more. The note says what was done and why: "C3 reads 105 g, counted as 85 g: it read 20 g when a spool ran dry in it on 19 Nov". Learning can only make a check stricter: it never counts a tray higher or a need lower, and an amount entered by hand is left alone. With nothing learned yet, or learning off, every check is as without it. It starts empty and needs prints the guard follows from start to finish. It was built from one measured incident and has not yet been confirmed over many prints; `learned` shows the evidence behind every number, so it can be judged.
+
+`learned` also reports, never uses, how the reading fell per gram printed and per gram purged separately, once there are sound prints whose purge shares differ enough to tell. `learned --forget` and "Forget what was learned" in the icon's menu start again from nothing.
+
 ## Spools without a reading
 
 A spool without an RFID tag, or on an external holder, reports no amount. Enter it on the card ("Amount in …"): weigh the spool and take off the empty spool. The guard then counts down, erring to the low side:
@@ -83,7 +102,7 @@ A spool without an RFID tag, or on an external holder, reports no amount. Enter 
 - When the printer was not followed for ten minutes or more (the computer asleep) and has printed something else since, every amount entered for it is out of date.
 - The entry ends when the printer reports another material or colour in that tray.
 
-To count, the guard keeps a standing read-only connection to a printer for as long as it has an entered amount. Not seen: a print started and finished while the printer was not followed, when the printer names it exactly like the one before (LAN-only mode).
+To count, the guard keeps a standing read-only connection to a printer for as long as it has an entered amount (and while learning has a reason to, see above). Not seen: a print started and finished while the printer was not followed, when the printer names it exactly like the one before (LAN-only mode).
 
 ## Commands
 
@@ -92,6 +111,7 @@ python filament_guard.py status       # running? where is the log?
 python filament_guard.py check        # the newest slice of the running Bambu Studio, as text
 python filament_guard.py check FILE.gcode.3mf --times 9   # nine prints of a sliced file
 python filament_guard.py trays        # the spools each printer reports
+python filament_guard.py learned      # what was learned from previous prints, per tray; --forget starts again
 python filament_guard.py selftest     # can the guard read this Bambu Studio and reach the printers?
 python filament_guard.py uninstall    # remove the shortcut and stop
 ```
@@ -112,6 +132,8 @@ python filament_guard.py uninstall    # remove the shortcut and stop
 - Printers are the ones Bambu Studio holds a LAN access code for. A plate sliced for another printer is logged and shows no card.
 - Which nozzle an AMS feeds is read as on the H2D (firmware 01.04.20.00). Where that cannot be read, a spool counts for either nozzle.
 - How a job names an external spool in its tray mapping has not been seen on a print; a tray the guard cannot name makes the entered amounts out of date, never wrong.
+- Learning learns nothing from a print not sliced on this computer, or followed only from its middle (the guard started during it). A spool moved to another tray starts again there: what is learned belongs to the tray, not the spool.
+- Learning takes the readings the printer reports to follow the spool between the guard's looks, 3 seconds apart. Not yet seen on a print, and recorded so that the history will show them: how often a tray's reading changes during a print (a reading that lags shows as a low rate, and a rate below 0.5 is not used); what a tray looks like in the status when its spool runs out (counted as a run-dry only when the tray is reported without a spool; a tray still reported, reading 0 g, makes the print's record unsound instead, with the reading before it); whether the AMS, refilling from a second spool, changes the job's tray mapping (the record then says at which layer, and is not used); and whether the reading settles after the print ends (both the first reading at the end and the one a minute later are kept).
 - The packaged guard is a folder, not one program. A single self-installing `.exe` was built first; Windows Defender removed it at its first start as `Trojan:Win32/Bearfoos.A!ml`, as it does with many unsigned packed programs that add themselves to Startup. The folder runs on python.org's signed `pythonw.exe` and is left alone.
 
 ## Files
@@ -120,11 +142,12 @@ python filament_guard.py uninstall    # remove the shortcut and stop
 |---|---|
 | `filament_guard.py` | G-code (totals and grams per layer), printer status, the assessment, the watcher, the commands |
 | `guard_ui.py` | the card and the icon |
-| `guard_ledger.py` | the prints that draw on the spools: entered amounts counted down, what the running print still needs |
+| `guard_ledger.py` | the prints that draw on the spools: entered amounts counted down, what the running print still needs; the link that follows a printer |
+| `guard_learn.py` | learning from previous prints, per tray: the record, the three numbers, what they change, `learned` |
 | `build.py` | makes the packaged folder and its zip |
 | `test_filament_guard.py` | `python -m pytest test_filament_guard.py` (needs no printer and no Bambu Studio) |
 
-Log and state: `%LOCALAPPDATA%\BambuFilamentGuard\`, with the grams per layer of the last 30 slices in `profiles\`. The LAN access code is read from Bambu Studio's configuration each time and goes to the printer only.
+Log and state: `%LOCALAPPDATA%\BambuFilamentGuard\`, with the grams per layer of the last 30 slices in `profiles\` and what was learned in `learned.json`. The LAN access code is read from Bambu Studio's configuration each time and goes to the printer only.
 
 ## Licence
 
