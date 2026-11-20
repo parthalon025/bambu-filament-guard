@@ -13,7 +13,8 @@ short. The card comes back beside the "Send print job" dialog while a warning st
                                        running Bambu Studio. Options: --times N (N prints of it), --popup, --json.
                                        Exit code 0 enough, 1 tight / unknown, 2 short, 3 not checked.
   filament_guard.py trays              the spools every known printer reports
-  filament_guard.py learned [--forget] what was learned from previous prints, per tray (--forget: start again)
+  filament_guard.py learned [--forget [TRAY]] what was learned from previous prints, per tray (--forget: start again,
+                                       for one tray only when named; --printer names the printer where two have it)
   filament_guard.py selftest           can the guard read this Bambu Studio and reach the printers? Exit code 1 = no
   filament_guard.py watch              the guard itself (what the shortcut runs; --no-start-line: setup's card says it)
   filament_guard.py setup              install, and say so on a card (what Install.cmd of the packaged guard runs)
@@ -35,7 +36,7 @@ What it reads, and from where:
 The access code goes from Bambu Studio's configuration to the printer and nowhere else: not into the log, the state
 file, a window or the output. Settings: the icon's menu, or config.json (see DEFAULTS). Log and state:
 %LOCALAPPDATA%/BambuFilamentGuard/. The card and the icon are in guard_ui.py."""
-import sys, os, re, json, ssl, time, glob, math, hashlib, itertools, zipfile, socket, struct, threading, queue, subprocess, argparse, tempfile
+import sys, os, re, json, ssl, time, glob, math, ctypes, hashlib, itertools, contextlib, zipfile, socket, struct, threading, queue, subprocess, argparse, tempfile
 
 APP = 'BambuFilamentGuard'
 VERSION = '1.3.0'
@@ -70,7 +71,7 @@ DEFAULTS = {
 }
 SEVERITY = {'OK': 0, 'UNKNOWN': 1, 'TIGHT': 2, 'SPLIT': 3, 'SHORT': 4, 'MISSING': 4, 'COLOUR': 4}
 BUSY = ('RUNNING', 'PAUSE', 'PREPARE')                    # a job is on the printer: it draws, or is about to draw, on the spools
-STATE_LOCK = threading.RLock()
+STATE_LOCK = threading.RLock()                            # where Windows' named mutexes are not to be had (see state_lock)
 LINK_NUMBER = itertools.count(1)
 
 
@@ -95,33 +96,84 @@ def log(msg):
     except OSError: pass
     with open(path, 'a', encoding='utf-8') as f: f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + msg + '\n')
 
-def load_state():
-    """The state file. No file is an empty state. A file that cannot be opened is tried again and then is an error, and a
-    damaged one is set aside: an empty answer in either case would let the next write replace everything with one key."""
-    path = os.path.join(STATE_DIR, 'state.json')
-    for attempt in range(6):
+class StateBusy(OSError):
+    """The state folder's files could not be had: another holder kept them past the wait, or a program outside the guard
+    held a file past the retries of a write."""
+
+_K32, _MUTEXES = [], {}
+
+def _kernel32():
+    if not _K32:
         try:
-            with open(path, encoding='utf-8') as f: return json.load(f)
-        except FileNotFoundError: return {}
-        except PermissionError:                                # the other copy of the guard (a command beside the watcher) is writing it
-            if attempt == 5: raise
-            time.sleep(0.05)
-        except ValueError:
-            try: os.replace(path, path + '.damaged')
-            except OSError: pass
-            log('state.json was damaged: set aside as state.json.damaged, starting empty')
-            return {}
+            k = ctypes.WinDLL('kernel32', use_last_error=True)
+            k.CreateMutexW.restype, k.CreateMutexW.argtypes = ctypes.c_void_p, (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
+            k.WaitForSingleObject.restype, k.WaitForSingleObject.argtypes = ctypes.c_uint32, (ctypes.c_void_p, ctypes.c_uint32)
+            k.ReleaseMutex.restype, k.ReleaseMutex.argtypes = ctypes.c_int, (ctypes.c_void_p,)
+        except (AttributeError, OSError): k = None
+        _K32.append(k)
+    return _K32[0]
+
+@contextlib.contextmanager
+def state_lock(wait=10.0):
+    """Sole use of the state folder's files (state.json, learned.json, profiles/) for a read, or a read and its write:
+    one holder at a time across the threads of this process and across processes (the watcher, a command beside it,
+    whose read-modify-writes would otherwise undo each other). A Windows named mutex, named after the folder: the thread
+    that holds it may take it again, and it is let go when its holder ends, even by a crash. StateBusy after `wait`."""
+    k32 = _kernel32()
+    if k32 is None:
+        with STATE_LOCK: yield
+        return
+    name = 'Local\\' + APP + '-files-' + hashlib.sha1(os.path.abspath(STATE_DIR).lower().encode('utf-8')).hexdigest()[:16]
+    handle = _MUTEXES.get(name) or _MUTEXES.setdefault(name, k32.CreateMutexW(None, False, name))
+    if not handle: raise StateBusy(f'no lock could be made for the state folder (error {ctypes.get_last_error()})')
+    if k32.WaitForSingleObject(handle, int(wait * 1000)) not in (0, 0x80):        # 0x80: its last holder ended without letting go: ours now
+        raise StateBusy(f'the state folder was held elsewhere for more than {wait:.0f} s')
+    try: yield
+    finally: k32.ReleaseMutex(handle)
+
+def read_json(path, empty):
+    """A JSON file of the state folder, read under state_lock: `empty` when there is none. A program outside the guard
+    holding it is waited for, then StateBusy. A damaged file is set aside (and logged), and `empty` is returned: kept
+    in place, it would make every later read fail."""
+    with state_lock():
+        for attempt in range(40):
+            try:
+                with open(path, encoding='utf-8') as f: return json.load(f)
+            except FileNotFoundError: return empty
+            except PermissionError: time.sleep(0.05)
+            except ValueError:
+                try: os.replace(path, path + '.damaged')
+                except OSError: pass
+                log(f'{os.path.basename(path)} was damaged: set aside as {os.path.basename(path)}.damaged, starting empty')
+                return empty
+        raise StateBusy(f'{os.path.basename(path)} is held by another program')
+
+def write_json(path, data, **how):
+    """Writes a JSON file of the state folder whole (call under state_lock): to a temp file of this process and thread,
+    put in place by a replace, which a reader never sees half done. Windows refuses the replace while a program outside
+    the guard holds the file: it is tried again for two seconds, then StateBusy, and the file is as it was."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp = f'{path}.{os.getpid()}.{threading.get_ident()}.new'
+    with open(temp, 'w', encoding='utf-8') as f: json.dump(data, f, **how)
+    for attempt in range(40):
+        try: os.replace(temp, path); return
+        except PermissionError: time.sleep(0.05)
+    try: os.remove(temp)
+    except OSError: pass
+    raise StateBusy(f'{os.path.basename(path)} could not be written: another program holds it')
+
+def load_state():
+    """The state file ({} when there is none; see read_json)."""
+    return read_json(os.path.join(STATE_DIR, 'state.json'), {})
 
 def save_state(state):
-    os.makedirs(STATE_DIR, exist_ok=True)
-    path = os.path.join(STATE_DIR, 'state.json')
-    with open(path + '.new', 'w', encoding='utf-8') as f: json.dump(state, f, indent=1)
-    os.replace(path + '.new', path)
+    with state_lock(): write_json(os.path.join(STATE_DIR, 'state.json'), state, indent=1)
 
 def update_state(change):
-    """Reads the state file, lets change(state) alter it, and writes it when it differs: one step for the threads of
-    this process. Returns what change returns."""
-    with STATE_LOCK:
+    """Reads the state file, lets change(state) alter it, and writes it when it differs: one step, which no other thread
+    or process can come between. Returns what change returns. StateBusy when the file cannot be had or written: the
+    state is then as it was, and the caller is the one to try again (a count-down is not taken as done until written)."""
+    with state_lock():
         state = load_state(); before = json.dumps(state, sort_keys=True)
         out = change(state)
         if json.dumps(state, sort_keys=True) != before: save_state(state)
@@ -537,11 +589,12 @@ def assess(fil, trays, cfg, times=1):
                        + (f", {t['grams']:.0f} g" if t['grams'] is not None else ''))
         return row
     group = [t for t in near if fil['fid'] and t['fid'] == fil['fid']] or near
+    plainest = max(group, key=lambda t: t.get('plain', t['grams']) or 0)   # the fullest spool had nothing been learned: taken before the sort by learned grams, so a tie goes as it would
     group.sort(key=lambda t: -(t['grams'] or 0))
     need = row['need'] = need + (group[0].get('pre') or 0) * times     # what the tray judged on was seen to lose before layer 1 (guard_learn)
     row['trays'] = [{'label': t['label'], 'grams': t['grams'], 'colour': t['colour'], 'name': t['name'], 'type': t['type'], 'entered': t.get('entered'),
                      'stale': t.get('stale'), 'reads': t.get('reads'), 'reserved': t.get('reserved'), 'credited': t.get('credited'), 'evidence': t.get('evidence'),
-                     'pre': t.get('pre')} for t in group]
+                     'pre': t.get('pre'), 'owes': t.get('owes'), 'refills': t.get('refills'), 'beyond': t.get('beyond')} for t in group]
     known = [t['grams'] for t in group if t['grams'] is not None]
     unknown = [t['label'] for t in group if t['grams'] is None]
     if not known:
@@ -553,7 +606,6 @@ def assess(fil, trays, cfg, times=1):
     row['best'], row['total'] = max(known), sum(known)
     # The reserve is a share of the fullest spool's full weight. Learning may make another spool the fullest: the larger
     # of the two weights is taken, so that the reserve is never smaller for having learned (see credit).
-    plainest = max(group, key=lambda t: t.get('plain', t['grams']) or 0)
     reserve = max(need * cfg['margin_pct'] / 100.0, max(group[0].get('weight') or 0, plainest.get('weight') or 0) * cfg['spool_reserve_pct'] / 100.0)
     if row['best'] >= need + reserve: row['status'] = 'OK'
     elif row['best'] >= need: row['status'] = 'TIGHT'; row['note'] = f"{row['best'] - need:.0f} g to spare, and the AMS's figure can be {reserve:.0f} g out"
@@ -572,27 +624,74 @@ def assess(fil, trays, cfg, times=1):
     return row
 
 def tray_note(t):
-    """What became of a tray's reading before it was judged, in words: counted lower for what was learned of the tray,
-    and the running print's share taken off. Under 1 g either way it goes unsaid."""
-    learned, share = t.get('credited') is not None and round(t['credited']) < round(t['reads']), round(t.get('reserved') or 0)
-    if not learned: return f"{t['label']} reads {t['reads']:.0f} g, of which the running print still needs {t['reserved']:.0f} g" if share else ''
-    return f"{t['label']} reads {t['reads']:.0f} g, counted as {t['credited']:.0f} g: {t['evidence']}" + (f"; the running print still needs {t['reserved']:.0f} g of it" if share else '')
+    """What became of a tray's amount before it was judged, in words: counted lower for what was learned of the tray, the
+    running print's share taken off, what that print needs beyond the tray and where it comes from. Under 1 g it goes
+    unsaid."""
+    learned = t.get('credited') is not None and round(t['credited']) < round(t['reads'])
+    owes, own, given = t.get('owes') or 0.0, t.get('reserved') or 0.0, sum(g for _, g in t.get('refills') or [])
+    if not (learned or round(owes) or round(given)): return ''
+    text = f"{t['label']} " + (f"holds {t['reads']:.0f} g as entered" if t.get('entered') else f"reads {t['reads']:.0f} g")
+    if learned: text += f", counted as {t['credited']:.0f} g: {t['evidence']}"
+    if round(owes - own):                                    # the running print needs more than the tray holds: the AMS goes on from another spool
+        took = [(label, g) for label, g in t.get('taken') or [] if round(g)]
+        text += (f"; the running print still needs {owes:.0f} g: {owes - own:.0f} g more than it holds"
+                 + (', taken off ' + ' and '.join(f'{label}' if len(took) == 1 else f'{label} ({g:.0f} g)' for label, g in took) if took else '')
+                 + (f"; {t['beyond']:.0f} g more than the other spools of this filament hold" if took and round(t.get('beyond') or 0) else
+                    ', and no other spool of this filament is loaded' if round(t.get('beyond') or 0) else ''))
+    elif round(own): text += (f"; the running print still needs {own:.0f} g of it" if learned else f", of which the running print still needs {own:.0f} g")
+    if round(given):
+        text += f"{'; and' if learned or round(owes) else ', of which'} the running print takes {given:.0f} g once " + ' and '.join(label for label, _ in t['refills']) + ' runs out'
+    return text
 
-def credit(trays, owed, learned=None):
-    """What each tray the printer measures is counted with, for the moment the checked print could start: its reading,
-    corrected by what was learned of the tray (learned: guard_learn.corrections; only ever lower), less what the print
-    running now still needs of it (owed). An amount entered by hand is left as it is: guard_ledger took the whole job off
-    it when the job started. Keeps the reading ('reads') whenever anything was corrected or taken off, and what the tray
-    would be counted with had nothing been learned ('plain'), which keeps the reserve from shrinking (see assess)."""
+def same_filament(a, b):
+    """Two loaded spools the AMS goes on with, one after the other, when one runs out (auto refill): the same material
+    and colour, the same product where both name one, for the same nozzle (or one that may feed either). Used for
+    what the running print needs beyond its own tray; for the print checked, assess's looser match decides."""
+    return (a['label'] != b['label'] and a['type'].upper() == b['type'].upper() and a['colour'] == b['colour']
+            and (not a['fid'] or not b['fid'] or a['fid'] == b['fid']) and (a.get('nozzle') is None or b.get('nozzle') is None or a['nozzle'] == b['nozzle']))
+
+def credit(trays, owed, learned=None, running=None, order=None):
+    """What each tray is counted with, for the moment the checked print could start: its reading, corrected by what was
+    learned of it (learned: guard_learn.corrections; only ever lower, and never an amount entered by hand), less what the
+    print running now still needs of it (owed).
+      - An amount entered by hand has the running print taken off it like a reading until guard_ledger has done so
+        itself (the entry's 'accounted' job is the running one, `running`, and nothing was 'missed').
+      - What the running print needs beyond a tray's amount comes, with AMS auto refill, from the loaded spools of the
+        same filament (same_filament), the fullest first: it is taken off them ('taken' on the tray, 'refills' on
+        theirs); what none of them holds is 'beyond' (assess and the card say so).
+    Keeps the amount before any of this ('reads') whenever something was corrected or taken off, and what the tray would
+    be counted with had nothing been learned ('plain'), which keeps the reserve from shrinking (see assess). The spools
+    a print goes on with are taken in the order they would be without learning (`order`), so that no tray is ever
+    counted higher for what was learned of another."""
+    plain = None
+    if learned:
+        plain = {t['label']: t for t in credit([dict(t) for t in trays], owed, None, running)}
+        order = {label: t.get('left', t['grams']) for label, t in plain.items()}
     for t in trays:
-        if t['grams'] is None or t.get('entered') or t.get('stale'): continue
-        raw, share, fix = t['grams'], owed.get(t['label'], 0.0), (learned or {}).get(t['label'], {})
+        if t['grams'] is None or t.get('stale'): continue
+        raw, share, fix = t['grams'], owed.get(t['label'], 0.0), {}
+        if not t.get('entered'): fix = (learned or {}).get(t['label'], {})
+        elif not running or (t.get('accounted') == running and t.get('missed') != running): share = 0.0
         base = fix.get('credited', raw)
         if 'credited' in fix: t['credited'], t['evidence'] = base, fix['evidence']
         if fix.get('pre'): t['pre'], t['pre_note'] = fix['pre'], fix['pre_note']
         if share or base < raw: t['reads'] = raw
-        if share: t['reserved'] = min(base, share)
-        t['grams'], t['plain'] = base - t.get('reserved', 0.0), raw - min(raw, share)
+        if share: t['owes'], t['reserved'] = share, min(base, share)
+        t['grams'] = t['left'] = base - t.get('reserved', 0.0)
+    order = order or {t['label']: t['left'] for t in trays if 'left' in t}
+    for t in trays:
+        excess = (t.get('owes') or 0.0) - (t.get('reserved') or 0.0)
+        if excess <= 1e-6: continue
+        for o in sorted((o for o in trays if 'left' in o and same_filament(t, o)), key=lambda o: -order.get(o['label'], 0.0)):
+            g = min(o['grams'], excess)
+            if g <= 0: continue
+            o.setdefault('reads', o['grams'])                         # not yet set: nothing was taken off it, so this is its amount
+            o['grams'] -= g; excess -= g
+            o.setdefault('refills', []).append((t['label'], g)); t.setdefault('taken', []).append((o['label'], g))
+            if excess <= 1e-6: break
+        if excess > 1e-6: t['beyond'] = excess
+    for t in trays:
+        if 'left' in t: t['plain'] = plain[t['label']]['grams'] if plain else t['grams']
     return trays
 
 def pick_printer(model, printers):
@@ -615,6 +714,13 @@ def share_spools(rows, filaments, trays, cfg, times):
             row['note'] = (f"filaments {', '.join(str(r['slot']) for r, _ in members)} share {' + '.join(labels)} and need {total * times:.0f} g together"
                            + (f": {joint['note']}" if joint['note'] else ''))
 
+def mark_looked(serial):
+    """Notes in the state file that a check looked at the printer (learning follows it, guard_ledger.followed); not again
+    within a minute, which would change nothing. A state file that cannot be written now only delays the following."""
+    try:
+        if time.time() - load_state().get('looked', {}).get(serial, 0) > 60: update_state(lambda st: st.setdefault('looked', {}).__setitem__(serial, time.time()))
+    except OSError: pass
+
 def evaluate(plate, cfg, title='', times=1, seen=None):
     """{'title', 'model', 'time', 'times', 'plate', 'printer', 'rows', 'worst', 'error'}: the whole answer for one sliced plate.
     seen: a dict that carries the printers' status from one call to the next, for several plates checked in one go."""
@@ -636,8 +742,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
                 if not new_ip or new_ip == ip: raise
                 status = read_status(new_ip, printer['serial'], code)
             if seen is not None: seen[printer['serial']] = status
-        try: update_state(lambda st: st.setdefault('looked', {}).__setitem__(printer['serial'], time.time()))   # learning follows a printer a check looked at
-        except OSError: pass
+        if cfg.get('learn'): mark_looked(printer['serial'])
     except (PrinterError, OSError, ValueError, KeyError) as e:
         res['error'] = str(e) if isinstance(e, PrinterError) else f'{e.__class__.__name__}: {e}'
         return res
@@ -646,19 +751,21 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         trays, _ = trays_of(status)
         guard_ledger.apply(trays, printer['serial'], 'ams' in status)   # spools the printer cannot measure get the amount entered for them
         # The answer is for the moment this print could start: what the print running now still needs is not there for
-        # it. Taken off the printer's own readings only: an entered amount had the whole job taken off when it started.
+        # it (see credit: an entered amount the ledger has not yet taken it off included).
         owed, counted = guard_ledger.owed(status, load_state().get('slices', []))
+        running = guard_ledger.job_key(status) if status.get('gcode_state') in BUSY else None
         if cfg.get('learn'):
             import guard_learn
-            credit(trays, owed, guard_learn.corrections(printer['serial'], trays))
-        else: credit(trays, owed)
+            credit(trays, owed, guard_learn.corrections(printer['serial'], trays), running)
+        else: credit(trays, owed, running=running)
         rows = [assess(f, trays, cfg, times) for f in plate['filaments']]
         share_spools(rows, plate['filaments'], trays, cfg, times)
     except Exception as e:                   # a status the guard does not understand must end as a card that says so, not as a line in the log
         res['error'] = f"the {printer['model']}'s report could not be worked out ({e.__class__.__name__}: {e})"
         return res
     res['printer'] = {'model': printer['model'], 'serial': printer['serial'], 'state': status.get('gcode_state', '?'), 'job': status.get('subtask_name', ''),
-                      'percent': status.get('mc_percent'), 'layer': status.get('layer_num'), 'layers': status.get('total_layer_num'), 'counted': counted}
+                      'percent': status.get('mc_percent'), 'layer': status.get('layer_num'), 'layers': status.get('total_layer_num'), 'counted': counted,
+                      'beyond': {t['label']: t['beyond'] for t in trays if round(t.get('beyond') or 0)}}
     res['rows'] = rows
     res['worst'] = max((r['status'] for r in rows), key=SEVERITY.get, default='OK')
     return res
@@ -688,6 +795,10 @@ def job_text(p):
     words = ', '.join(x for x in (p.get('job'), stage) if x)
     return f' ({words})' if words else ''
 
+def beyond_text(p):
+    """The running print's own shortfall, in words: what it needs beyond every loaded spool of a tray's filament."""
+    return ''.join(f"; it needs {g:.0f} g more of {label}'s filament than the loaded spools hold" for label, g in (p.get('beyond') or {}).items())
+
 def report_text(res):
     lines = [headline(res) + (f": {res['title']}" if res['title'] else '') + (f" x {res['times']}" if res['times'] != 1 else '')]
     if res['error']: return lines[0] + '\n  ' + res['error']
@@ -695,6 +806,7 @@ def report_text(res):
     if p['state'] in BUSY:
         busy = f"{job_text(p)}: " + ('the running print is counted: what it still needs is taken off its spools' if p.get('counted') else
                                                     "its spools are still being used, and the guard could not count that print: the amounts are the spools' amounts now")
+        busy += beyond_text(p)
     lines.append(f"  {p['model']}, {p['state']}" + busy)
     for r in res['rows']:
         lines.append(f"  {r['slot']:>2} {r['type']:<8} {r['colour']} {r['name'][:22]:<22} needs {r['need']:7.1f} g   {tray_text(r):<10} has {has_text(r):<22} {STATUS_WORD[r['status']]}"
@@ -754,8 +866,7 @@ def load_profile(entry, part='layers'):
     """One part of a remembered slice's profile (see layer_profile), by slot: 'layers' [grams by layer], 'purge' or
     'pushed'. None: it has none, or the file is gone."""
     if not entry or not entry.get('profile'): return None
-    try:
-        with open(os.path.join(STATE_DIR, 'profiles', os.path.basename(entry['profile'])), encoding='utf-8') as f: return {int(k): v for k, v in json.load(f)[part].items()}
+    try: return {int(k): v for k, v in read_json(os.path.join(STATE_DIR, 'profiles', os.path.basename(entry['profile'])), {})[part].items()}
     except (OSError, ValueError, KeyError, TypeError, AttributeError): return None
 
 def remember_slice(title, plate_no, plate, profile=None):
@@ -766,14 +877,12 @@ def remember_slice(title, plate_no, plate, profile=None):
     It goes with its slice, when a re-slice of the same plate replaces it or it drops out of the 30 kept."""
     version, folder = studio_version(), os.path.join(STATE_DIR, 'profiles')
     name = profile_name(title, plate_no, plate) if profile else None
-    with STATE_LOCK:
+    with state_lock():
         if name:
             try:
-                os.makedirs(folder, exist_ok=True); path = os.path.join(folder, name)
                 kept = {part: {str(s): [round(g, 4) for g in grams] for s, grams in by_slot.items()} for part, by_slot in profile.items()}
-                with open(path + '.new', 'w', encoding='utf-8') as f: json.dump(kept, f, separators=(',', ':'))
-                os.replace(path + '.new', path)
-            except OSError as e:                                     # a check reading the old file just then (Windows): the slice counts, without a profile
+                write_json(os.path.join(folder, name), kept, separators=(',', ':'))
+            except OSError as e:                                     # another program holding the old file: the slice counts, without a profile
                 log(f'{title}, plate {plate_no}: its per-layer profile could not be kept ({e.__class__.__name__}): a print of it is not counted while it runs'); name = None
         def change(st):
             st['verified'] = {'version': version, 'at': time.time()}
@@ -828,7 +937,7 @@ class Guard:
         self.cfg, self.root, self.standing = cfg, root, standing
         self.todo, self.stopping = queue.Queue(), threading.Event()
         self.last, self.paused, self.ticks, self.sending, self.jobs = None, False, 0, set(), {}
-        self.warning = None                                   # the warning on the full card: (title, plate, severity, when)
+        self.warning = None                                   # the warning on the full card: (title, plate, severity, when, the card's window)
         self.busy, self.greeted = {}, False                   # the checks someone waits for, by what started them: (their line, its text)
         self.card = guard_ui.Card(root, act=self.act, on_close=None if standing else root.quit)
         self.tray = guard_ui.Tray(self) if standing else None
@@ -850,8 +959,8 @@ class Guard:
         beside: the "Send print job" dialog, next to which only a warning is worth a card."""
         import guard_ui
         severity = -1 if res['error'] else SEVERITY[res['worst']]
-        if not full and not beside and self.warning and self.card.is_open():
-            title, plate_no, was, when = self.warning       # "slice all" brings the plates' answers seconds apart: a plate that is
+        if not full and not beside and self.warning and self.card.is_open() and self.card.win is self.warning[4]:   # the warning's own card, still open
+            title, plate_no, was, when, _ = self.warning    # "slice all" brings the plates' answers seconds apart: a plate that is
             if title == res['title'] and plate_no != res.get('plate_no') and severity < was and time.time() - when < 120: return   # fine does not wipe another plate's warning
         self.last = res
         if self.tray: self.tray.set(guard_ui.tone_of(res), self.last_text()); self.tray.refresh()
@@ -862,7 +971,7 @@ class Guard:
         res['ignored'] = self.ignored(res)
         if full or (res['worst'] in self.cfg['popup_on'] and not res['ignored']):
             self.card.show(res, beside=beside, hold=not full)
-            self.warning = (res['title'], res.get('plate_no'), severity, time.time()) if severity >= 2 else None
+            self.warning = (res['title'], res.get('plate_no'), severity, time.time(), self.card.win) if severity >= 2 else None
         elif not beside and self.cfg['ok_seconds']:
             self.card.show(res, brief=self.cfg['ok_seconds'], hold=True); self.warning = None
 
@@ -1218,7 +1327,9 @@ def main(argv=None):
     c = sub.add_parser('check'); c.add_argument('file', nargs='?'); c.add_argument('--times', type=int, default=1)
     c.add_argument('--popup', action='store_true'); c.add_argument('--json', action='store_true')
     sub.add_parser('watch').add_argument('--no-start-line', action='store_true')
-    sub.add_parser('learned').add_argument('--forget', action='store_true')
+    learned = sub.add_parser('learned')
+    learned.add_argument('--forget', nargs='?', const='', metavar='TRAY', help='forget what was learned: everything, or one tray (e.g. C3)')
+    learned.add_argument('--printer', help='with --forget TRAY: the printer, by serial or model, when more than one has that tray')
     for name in ('install', 'uninstall', 'setup', 'status', 'stop', 'trays', 'selftest'): sub.add_parser(name)
     a = ap.parse_args(argv)
     if a.cmd == 'watch': return watch(start_line=not a.no_start_line)
@@ -1236,9 +1347,11 @@ def main(argv=None):
         return 1 if any(mark is False for mark, _ in lines) else 0
     if a.cmd == 'learned':
         import guard_learn
-        if a.forget: guard_learn.forget(); print('what was learned is forgotten'); return 0
         try: names = {p['serial']: p['model'] for p in known_printers(bs_conf())}
         except (OSError, ValueError): names = {}
+        if a.forget is not None:
+            try: print(guard_learn.forget(a.forget or None, a.printer, names), 'is forgotten'); return 0
+            except ValueError as e: print(e); return 1
         print('\n'.join(guard_learn.report(guard_learn.load(), names, cfg.get('learn')))); return 0
     if a.cmd == 'trays':
         import guard_ledger
