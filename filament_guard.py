@@ -198,103 +198,122 @@ def lines_of(stream, size=1 << 20):
         yield from lines
     if rest: yield rest
 
-# The lines that move filament or say where it goes, indented or not: an extrusion or "G92 E" (only up to a comment),
-# a filament selected, the start of a layer, absolute or relative extrusion.
-GCODE_STEP = re.compile(rb'[ \t]*(?:G([0-3]|92)[ \t][^;E\n]*E([-+]?(?:\d+\.?\d*|\.\d+))|T(\d+)|M73 L(\d+)|M8([23])(?![\d.]))')
+# The lines that move filament or say where it goes, indented or not: a move or "G92" with an E, read only up to a
+# comment, and an X or Y before or after the E when there is one (a move along X or Y, not of the filament alone); a
+# filament selected; the start of a layer; absolute or relative extrusion. The X or Y is caught as one letter, not cut
+# out of the line: a 100 MB file has two and a half million such moves.
+GCODE_STEP = re.compile(rb'[ \t]*(?:G([0-3]|92)[ \t](?:[^;E\n]*?([XY]))?[^;E\n]*E([-+]?(?:\d+\.?\d*|\.\d+))(?:[^;\n]*?([XY]))?|T(\d+)|M73 L(\d+)|M8([23])(?![\d.]))')
+PURGE_MARKS = (b'; FLUSH_START', b'; FLUSH_END', b'; VFLUSH_START', b'; VFLUSH_END', b';VG1')
+VG1_E = re.compile(rb';VG1[^;\n]*?[ \t]E([-+]?(?:\d+\.?\d*|\.\d+))')
+PROFILE_TOLERANCE = (0.02, 0.002)            # grams, and share of the total: how far a filament's sum may be from the header's
 
-def flush_table(settings, n):
-    """How much Bambu Studio flushes at a filament change, from its settings block: (the nozzle of each slot, counted
-    from 0; volume(nozzle, from slot, to slot) in mm3). flush_volumes_matrix holds k x n x n volumes, k nozzles by n
-    project filaments, each times its nozzle's flush_multiplier; filament_map gives each slot's nozzle, counted from 1
-    (one nozzle: all 1, or absent). None when the table is missing, of another size, or cannot be read."""
-    try:
-        k = len(settings.get(b'nozzle_diameter', b'0.4').split(b','))
-        matrix = [float(v) for v in settings[b'flush_volumes_matrix'].split(b',')]
-        times = [float(v) for v in settings.get(b'flush_multiplier', b','.join([b'1'] * k)).split(b',')]
-        nozzle = [int(v) - 1 for v in settings[b'filament_map'].split(b',')] if k > 1 else [0] * n
-    except (KeyError, ValueError): return None
-    if n < 1 or len(matrix) != k * n * n or len(times) != k or len(nozzle) != n or not all(0 <= z < k for z in nozzle): return None
-    return nozzle, lambda z, a, b: matrix[z * n * n + (a - 1) * n + b - 1] * times[z]
-
-def layer_profile(stream, plate):
-    """{'layers': {slot: [grams in layer 0, layer 1, ..., the last layer]}, 'purge': {slot: grams of the total that the
-    moves leave out}} for each filament of the plate, from its whole G-code (a 100 MB file in a few seconds), or None
-    when the G-code is not understood. A layer starts at "M73 L<n>", the number the printer reports as layer_num; layer
-    0 is what comes before. "T<n>" selects slot n + 1 (T255 and above are not filaments). Each list adds up to the
-    header's total, the guard's measure of the need: the printer purges by itself at each filament change, and that
-    purge is in the total but in the G-code only as comments. So what the moves leave out goes to the changes to that
-    filament, each weighed by Bambu Studio's flush table (the volume from the filament its nozzle held before; a
-    nozzle's first filament weighs nothing), evenly when they all weigh nothing or there is no table. The table gives
-    weights only: on two nozzles its volumes need not add up to the header's grams. Moves that add up to more than the
-    total are scaled down to it within max(0.5 g, 2 %); beyond that the G-code is not understood. None also for a file
-    that is not the one the plate was read from (its totals differ), that has no settings block, that ends before its
-    first or its last layer, whose layers are out of order, or that lacks a filament's density or diameter."""
-    head, settings, lines = {}, {}, lines_of(stream)
+def layer_profile(stream, plate, why=None):
+    """{'layers': {slot: [grams in layer 0, layer 1, ..., the last layer]}, 'purge': {slot: [of those, the purge]},
+    'pushed': {slot: [of the purge, the nozzle's content charged to this filament (+) or taken off it (-)]}} for each
+    filament of the plate, from its whole G-code (a 100 MB file in about two seconds), or None when the G-code is not
+    understood; why, a list, then gets the reasons. The printed grams are layers less purge. A layer starts at "M73 L<n>", the number the printer reports as
+    layer_num; layer 0 is what comes before. "T<n>" selects slot n + 1 (T255 and above are not filaments).
+    Counted as Bambu Studio counts its header totals, measured on its 02.09.01.70 slices for the A1, P1, X1, H2, P2S,
+    A2L, X2D and H3C families (each filament within 0.005 g):
+      - the moves along X or Y that extrude (a positive E), anywhere in the file;
+      - the purge at each filament change: the extruding moves inside "; FLUSH_START" .. "; FLUSH_END" (A1, P1, X1),
+        or the ";VG1 E<n>" comments inside "; VFLUSH_START" .. "; VFLUSH_END" (the printer purges by itself: H2, P2S,
+        A2L, X2D, H3C). Of a change's purge, as much as the nozzle holds (nozzle_volume, of that filament's nozzle) is
+        the filament it pushes out, the rest the filament loaded; a nozzle's first filament pushes nothing out.
+    Not counted: moves of the filament alone outside a purge (retract, unretract, load, prime), and an E on any other
+    command. A filament whose sum is further from the header's total than PROFILE_TOLERANCE is not understood; within it,
+    its lists are scaled to the total, so they add up to it exactly. None also for a file that is not the one the plate
+    was read from (its totals differ), that ends before its first or its last layer, whose layers are out of order, or
+    that lacks a filament's density or diameter."""
+    def refuse(reason):
+        if why is not None: why.append(reason)
+    head, lines = {}, lines_of(stream)
     for line in lines:
         if line.startswith(b'; HEADER_BLOCK_END'): break
         key, colon, value = line[2:].partition(b':')
         if colon and line.startswith(b'; '): head[key.strip()] = value.strip()
-    else: return None
-    for line in lines:                                 # the settings block, for the flush table
+    else: return refuse('it has no header')
+    for line in lines:                                 # the settings block: each slot's nozzle, and what a nozzle holds
         if line.startswith(b'; CONFIG_BLOCK_END'): break
         key, equals, value = line[2:].partition(b' = ')
-        if equals and key in (b'flush_volumes_matrix', b'flush_multiplier', b'filament_map', b'nozzle_diameter'): settings[key] = value.strip()
-    else: return None
+        if equals and key in (b'filament_map', b'nozzle_diameter', b'nozzle_volume'): head[key] = value.strip()
+    else: return refuse('it has no settings block')
     def numbers(key):
         try: return [float(v) for v in head.get(key, b'').split(b',') if v.strip()]
         except ValueError: return []
-    if [w for w in numbers(b'total filament weight [g]') if w > 0] != [f['grams'] for f in plate['filaments']]: return None
-    density, diameter = numbers(b'filament_density'), numbers(b'filament_diameter')
-    flush = flush_table(settings, len(density))
-    nozzle_of = flush[0] if flush else []
-    mm, loads, held = {}, {}, {}                       # mm of filament by (slot, layer); each slot's loads, (layer, what its nozzle held before); each nozzle's filament
-    tool, layer, run, absolute, at = None, 0, 0.0, False, 0.0
+    if [w for w in numbers(b'total filament weight [g]') if w > 0] != [f['grams'] for f in plate['filaments']]: return refuse('its totals are not the plate\'s: the file has changed')
+    density, diameter, holds = numbers(b'filament_density'), numbers(b'filament_diameter'), numbers(b'nozzle_volume')
+    nozzle_of = [int(z) - 1 for z in numbers(b'filament_map')] if len(numbers(b'nozzle_diameter')) > 1 else []
+    mm = {}                                            # (slot, layer): [mm printed, mm purged]
+    changes, change, held, since = [], None, {}, 0.0   # filament changes, (pushed out, loaded, nozzle, layer, mm purged); each nozzle's filament
+    tool, layer, run, purged, absolute, at, flushing, venting = None, 0, 0.0, 0.0, False, 0.0, False, False
+    step_of = GCODE_STEP.match
     for line in lines:
-        if line[:1] == b';': continue
-        m = GCODE_STEP.match(line)
-        if not m: continue
-        move, e, t, new_layer, mode = m.groups()
+        if line[:1] == b';':
+            if not line.startswith(PURGE_MARKS): continue
+            if line.startswith(b';VG1'):
+                m = VG1_E.match(line)
+                if venting and m and float(m.group(1)) > 0: purged += float(m.group(1)); since += float(m.group(1))
+            elif line.startswith(b'; FLUSH_'): flushing = line.startswith(b'; FLUSH_START')
+            else: venting = line.startswith(b'; VFLUSH_START')
+            continue
+        m = step_of(line)
+        if m is None: continue
+        move, x_or_y, e, y_or_x, t, new_layer, mode = m.groups()
         if e is not None:
-            if move == b'92': at = float(e)
-            elif absolute: run += float(e) - at; at = float(e)
-            else: run += float(e)
+            if move == b'92': at = float(e); continue
+            step = float(e)
+            if absolute: step, at = step - at, step
+            if step <= 0: continue
+            if flushing: purged += step; since += step
+            elif x_or_y or y_or_x: run += step
         elif t is not None:
             if int(t) < 255 and int(t) + 1 != tool:
-                mm[tool, layer] = mm.get((tool, layer), 0.0) + run; run = 0.0
-                tool = int(t) + 1; z = nozzle_of[tool - 1] if tool <= len(nozzle_of) else 0
-                loads.setdefault(tool, []).append((layer, held.get(z))); held[z] = tool
+                if run or purged: cell = mm.setdefault((tool, layer), [0.0, 0.0]); cell[0] += run; cell[1] += purged; run = purged = 0.0
+                if change: changes.append(change + (since,))
+                tool, since = int(t) + 1, 0.0
+                z = nozzle_of[tool - 1] if tool <= len(nozzle_of) else 0
+                change = (held[z], tool, z, layer) if held.get(z) not in (None, tool) else None; held[z] = tool
         elif new_layer is not None:
-            if int(new_layer) < layer: return None    # layers out of order: "from this layer to the end" would mean nothing
-            mm[tool, layer] = mm.get((tool, layer), 0.0) + run; run = 0.0
+            if int(new_layer) < layer: return refuse('its layers are out of order')     # "from this layer to the end" would mean nothing
+            if run or purged: cell = mm.setdefault((tool, layer), [0.0, 0.0]); cell[0] += run; cell[1] += purged; run = purged = 0.0
             layer = int(new_layer)
         else: absolute = mode == b'2'
-    mm[tool, layer] = mm.get((tool, layer), 0.0) + run
+    if run or purged: cell = mm.setdefault((tool, layer), [0.0, 0.0]); cell[0] += run; cell[1] += purged
+    if change: changes.append(change + (since,))
     last = layer
-    if not last or (plate.get('layers') and last != plate['layers']): return None   # ends before its first layer, or before its last
+    if not last: return refuse('it ends before its first layer')
+    if plate.get('layers') and last != plate['layers']: return refuse(f"it ends at layer {last} of {plate['layers']}")
     if len(plate['filaments']) == 1:                  # one filament: what runs before any "T" is that one
-        for (slot, n), v in list(mm.items()):
-            if slot is None: mm[plate['filaments'][0]['slot'], n] = mm.get((plate['filaments'][0]['slot'], n), 0.0) + v
-    out = {'layers': {}, 'purge': {}}
+        for (slot, n), (p, q) in list(mm.items()):
+            if slot is None: cell = mm.setdefault((plate['filaments'][0]['slot'], n), [0.0, 0.0]); cell[0] += p; cell[1] += q
+    for f in plate['filaments']:
+        slot = f['slot']
+        if slot > min(len(density), len(diameter)) or density[slot - 1] <= 0 or diameter[slot - 1] <= 0: return refuse(f'filament {slot} has no density or diameter')
+    area = lambda slot: math.pi * (diameter[slot - 1] / 2) ** 2
+    # The header charges a nozzle's content to the filament it held, at the change, while the spool of the filament
+    # loaded supplies the whole purge. The profile follows the header (its totals are the guard's measure of the need),
+    # and keeps that share apart, as 'pushed', so that the spools' own view can be had back from it.
+    pushed = {}                                        # (slot, layer): mm3 of the purge that is the filament pushed out
+    for out_of, into, z, n, purge_mm in changes:
+        if max(out_of, into) > min(len(density), len(diameter)): continue
+        volume = min(holds[z] if z < len(holds) else 0.0, purge_mm * area(into))
+        pushed[out_of, n] = pushed.get((out_of, n), 0.0) + volume; pushed[into, n] = pushed.get((into, n), 0.0) - volume
+    out, off = {'layers': {}, 'purge': {}, 'pushed': {}}, []
     for f in plate['filaments']:
         slot, total = f['slot'], f['grams']
-        if slot > min(len(density), len(diameter)) or density[slot - 1] <= 0 or diameter[slot - 1] <= 0: return None
-        per_mm = math.pi * (diameter[slot - 1] / 2) ** 2 * density[slot - 1] / 1000
-        grams = [max(0.0, mm.get((slot, n), 0.0)) * per_mm for n in range(last + 1)]
-        moved = sum(grams)
-        if moved > total:
-            if moved - total > max(0.5, total * 0.02): return None
-            grams, purge = [g * total / moved for g in grams], 0.0
-        else:
-            # a filament that is never selected is where it first extrudes; one that neither is selected nor extrudes
-            # is not understood: to put its grams anywhere would be a guess, and in layer 0 one that is never counted
-            spots, purge = loads.get(slot) or [(n, None) for n, g in enumerate(grams) if g > 0][:1], total - moved
-            if not spots: return None
-            try: weights = [flush[1](nozzle_of[slot - 1], before, slot) if flush and before else 0.0 for _, before in spots]
-            except IndexError: weights = []
-            whole = sum(weights)
-            if not whole > 0: weights, whole = [1.0] * len(spots), float(len(spots))
-            for (n, _), w in zip(spots, weights): grams[n] += purge * w / whole
-        out['layers'][slot], out['purge'][slot] = grams, purge
+        per_mm3 = density[slot - 1] / 1000
+        printed = [mm.get((slot, n), (0.0, 0.0))[0] * area(slot) * per_mm3 for n in range(last + 1)]
+        purge = [(mm.get((slot, n), (0.0, 0.0))[1] * area(slot) + pushed.get((slot, n), 0.0)) * per_mm3 for n in range(last + 1)]
+        counted = sum(printed) + sum(purge)
+        if abs(counted - total) > max(PROFILE_TOLERANCE[0], total * PROFILE_TOLERANCE[1]) or not counted:
+            off.append(f'filament {slot} adds up to {counted:.3f} g, the header says {total:.2f} g ({counted - total:+.3f} g)'); continue
+        out['layers'][slot] = [(p + q) * total / counted for p, q in zip(printed, purge)]
+        out['purge'][slot] = [q * total / counted for q in purge]
+        out['pushed'][slot] = [pushed.get((slot, n), 0.0) * per_mm3 * total / counted for n in range(last + 1)]
+    if off:                                            # the accounting of another Bambu Studio version would show here, with a number
+        for reason in off: refuse(reason)
+        return None
     return out
 
 def temp_gcodes():
@@ -685,8 +704,8 @@ def profile_name(title, plate_no, plate):
     return hashlib.sha1(key.encode('utf-8')).hexdigest()[:16] + '.json'
 
 def load_profile(entry, part='layers'):
-    """One part of a remembered slice's profile (see layer_profile), by slot: 'layers', [grams by layer], or 'purge',
-    the grams of each total that the moves leave out. None: it has none, or the file is gone."""
+    """One part of a remembered slice's profile (see layer_profile), by slot: 'layers' [grams by layer], 'purge' or
+    'pushed'. None: it has none, or the file is gone."""
     if not entry or not entry.get('profile'): return None
     try:
         with open(os.path.join(STATE_DIR, 'profiles', os.path.basename(entry['profile'])), encoding='utf-8') as f: return {int(k): v for k, v in json.load(f)[part].items()}
@@ -696,7 +715,7 @@ def remember_slice(title, plate_no, plate, profile=None):
     """Notes a slice that was read: which Bambu Studio version wrote it (the self-test reports that), what it needs
     (guard_ledger counts a print down from it when the printer starts a job of that name) and, when given, its per-layer
     profile (what a print of it still needs while it runs). A profile is a file of its own in profiles/, because the
-    state file is read and written whole at every change: {"layers": {slot: [grams by layer]}, "purge": {slot: grams}}.
+    state file is read and written whole at every change: its parts as layer_profile gives them, by slot and layer.
     It goes with its slice, when a re-slice of the same plate replaces it or it drops out of the 30 kept."""
     version, folder = studio_version(), os.path.join(STATE_DIR, 'profiles')
     name = profile_name(title, plate_no, plate) if profile else None
@@ -704,7 +723,7 @@ def remember_slice(title, plate_no, plate, profile=None):
         if name:
             try:
                 os.makedirs(folder, exist_ok=True); path = os.path.join(folder, name)
-                kept = {'layers': {str(s): [round(g, 4) for g in grams] for s, grams in profile['layers'].items()}, 'purge': {str(s): round(g, 4) for s, g in profile['purge'].items()}}
+                kept = {part: {str(s): [round(g, 4) for g in grams] for s, grams in by_slot.items()} for part, by_slot in profile.items()}
                 with open(path + '.new', 'w', encoding='utf-8') as f: json.dump(kept, f, separators=(',', ':'))
                 os.replace(path + '.new', path)
             except OSError as e:                                     # a check reading the old file just then (Windows): the slice counts, without a profile
@@ -939,8 +958,9 @@ class Guard:
             if waiting: self.todo.put(lambda: self.checked('slice'))
             if plate['filaments']:
                 try:
-                    with open(path, 'rb') as f: profile = layer_profile(f, plate)
-                    if profile is None: log(f'{title}, plate {plate_no}: no per-layer profile (the G-code has changed or is not understood): a print of it is not counted while it runs')
+                    why = []
+                    with open(path, 'rb') as f: profile = layer_profile(f, plate, why)
+                    if profile is None: log(f"{title}, plate {plate_no}: no per-layer profile ({'; '.join(why)}): a print of it is not counted while it runs")
                 except Exception as e:                                           # the profile is extra: whatever happens to the file, the slice is remembered
                     log(f'{title}, plate {plate_no}: no per-layer profile ({e.__class__.__name__}: {e}): a print of it is not counted while it runs')
             remember_slice(title, plate_no, plate, profile)
