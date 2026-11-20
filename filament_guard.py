@@ -1,0 +1,955 @@
+"""Bambu Filament Guard: warns when the spools on the printer do not hold enough filament for a sliced print.
+
+Bambu Studio has no plugin interface, so this runs beside it. It watches the folder where Bambu Studio writes the
+G-code of every plate it slices (any project, any printer preset), reads from that G-code how many grams each
+filament needs, asks the printer what is left on every spool, and shows the answer as a card inside Bambu Studio's
+window, under the slicing result: one line that goes away when there is enough, the full table when a filament falls
+short. The card comes back beside the "Send print job" dialog while a warning stands.
+
+  filament_guard.py install            start automatically (Startup shortcut) and start now
+  filament_guard.py uninstall          remove the shortcut and stop
+  filament_guard.py status | stop      is the guard running / stop it
+  filament_guard.py check [FILE]       check one file now: .gcode or .gcode.3mf; no FILE = the newest slice of the
+                                       running Bambu Studio. Options: --times N (N prints of it), --popup, --json.
+                                       Exit code 0 enough, 1 tight / unknown, 2 short, 3 not checked.
+  filament_guard.py trays              the spools every known printer reports
+  filament_guard.py selftest           can the guard read this Bambu Studio and reach the printers? Exit code 1 = no
+  filament_guard.py watch              the guard itself (what the shortcut runs)
+  filament_guard.py setup              install, and say so on a card (what Install.cmd of the packaged guard runs)
+Run with "python" in front. build.py packs the guard with a Python of its own, for a computer that has none.
+
+What it reads, and from where:
+  need      G-code header "total filament weight [g]" per used filament (purge and prime tower included); type,
+            colour, filament id and nozzle from the G-code's own settings block.
+  printers  the serials that have a LAN access code in %APPDATA%/BambuStudio/BambuStudio.conf; the model of each from
+            its serial prefix (%APPDATA%/BambuStudio/printers/*.json); the IP from the printer's own LAN announcement.
+  left      the printer's status over MQTT (read only, one "report everything" request): grams left per AMS tray.
+            For a spool the printer cannot measure: the amount entered on the card, counted down (guard_ledger.py).
+
+The access code goes from Bambu Studio's configuration to the printer and nowhere else: not into the log, the state
+file, a window or the output. Settings: the icon's menu, or config.json (see DEFAULTS). Log and state:
+%LOCALAPPDATA%/BambuFilamentGuard/. The card and the icon are in guard_ui.py."""
+import sys, os, re, json, ssl, time, glob, itertools, zipfile, socket, struct, threading, queue, subprocess, argparse, tempfile
+
+APP = 'BambuFilamentGuard'
+VERSION = '1.2.0'
+HERE = os.path.dirname(os.path.abspath(__file__))
+STATE_DIR = os.path.join(os.environ.get('LOCALAPPDATA') or HERE, APP)
+CONFIG = os.path.join(HERE, 'config.json')
+BS_DATA = os.path.join(os.environ.get('APPDATA', ''), 'BambuStudio')
+MUTEX = 'Local\\' + APP
+STARTUP_LNK = os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'Bambu Filament Guard.lnk')
+
+DEFAULTS = {
+    # "Enough" asks for the need plus a reserve, because the AMS's figure is an estimate: the larger of margin_pct of
+    # the need and spool_reserve_pct of the spool's full weight (30 g on a 1 kg spool). The AMS counts what it feeds,
+    # so its error grows with what the spool has given, and is largest when the spool is nearly empty.
+    # Measured 2026-11-19 (H2D): a 1 kg spool reported at 105 g ran dry after 84-85 g of a print that needed 85.3 g.
+    'margin_pct': 10,
+    'spool_reserve_pct': 3,
+    'colour_tolerance': 40,      # how far a spool's colour may be from the project's and still count as that colour (0..765;
+                                 # Bambu's PLA Basic red and PLA Silk+ red are 31 apart, black and dark grey 190)
+    # Which results open the full card, which stays until closed. Add "UNKNOWN" to be told about spools without a
+    # remaining amount; remove "COLOUR" when the colours of your projects are not the colours you print in.
+    'popup_on': ['SHORT', 'MISSING', 'COLOUR', 'SPLIT', 'TIGHT'],
+    'ok_seconds': 8,             # a result that is not in popup_on shows as one line for this long; 0 = shows nothing
+    'at_send': True,             # check again when "Send print job" opens, and show a warning beside that dialog
+    'poll_seconds': 2,
+    'printers': {},              # optional, per serial: {"ip": "192.168.1.50"} when the printer is not announced on this LAN
+}
+SEVERITY = {'OK': 0, 'UNKNOWN': 1, 'TIGHT': 2, 'SPLIT': 3, 'SHORT': 4, 'MISSING': 4, 'COLOUR': 4}
+STATE_LOCK = threading.RLock()
+LINK_NUMBER = itertools.count(1)
+
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    try:
+        with open(CONFIG, encoding='utf-8') as f: cfg.update(json.load(f))
+    except FileNotFoundError: pass
+    except ValueError as e: log(f'config.json cannot be read ({e}): the defaults are used')
+    return cfg
+
+def save_config(cfg):
+    """Only what differs from DEFAULTS goes into config.json: a full copy would pin today's defaults for good."""
+    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+    json.dump({k: v for k, v in cfg.items() if DEFAULTS.get(k) != v}, open(CONFIG, 'w', encoding='utf-8'), indent=1)
+
+def log(msg):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    path = os.path.join(STATE_DIR, 'guard.log')
+    try:
+        if os.path.getsize(path) > 1_000_000: os.replace(path, path + '.1')
+    except OSError: pass
+    with open(path, 'a', encoding='utf-8') as f: f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + msg + '\n')
+
+def load_state():
+    """The state file. No file is an empty state. A file that cannot be opened is tried again and then is an error, and a
+    damaged one is set aside: an empty answer in either case would let the next write replace everything with one key."""
+    path = os.path.join(STATE_DIR, 'state.json')
+    for attempt in range(6):
+        try:
+            with open(path, encoding='utf-8') as f: return json.load(f)
+        except FileNotFoundError: return {}
+        except PermissionError:                                # the other copy of the guard (a command beside the watcher) is writing it
+            if attempt == 5: raise
+            time.sleep(0.05)
+        except ValueError:
+            try: os.replace(path, path + '.damaged')
+            except OSError: pass
+            log('state.json was damaged: set aside as state.json.damaged, starting empty')
+            return {}
+
+def save_state(state):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    path = os.path.join(STATE_DIR, 'state.json')
+    with open(path + '.new', 'w', encoding='utf-8') as f: json.dump(state, f, indent=1)
+    os.replace(path + '.new', path)
+
+def update_state(change):
+    """Reads the state file, lets change(state) alter it, and writes it when it differs: one step for the threads of
+    this process. Returns what change returns."""
+    with STATE_LOCK:
+        state = load_state(); before = json.dumps(state, sort_keys=True)
+        out = change(state)
+        if json.dumps(state, sort_keys=True) != before: save_state(state)
+        return out
+
+
+# ---------------------------------------------------------------- what the print needs: the sliced G-code
+
+def read_head(stream, limit=4 << 20):
+    """The text of a G-code file up to the end of its settings block (about 70 kB of a file that runs to 100 MB)."""
+    buf = b''
+    while len(buf) < limit and b'; CONFIG_BLOCK_END' not in buf:
+        chunk = stream.read(1 << 16)
+        if not chunk: break
+        buf += chunk
+    return buf.decode('utf-8', 'replace')
+
+def split_list(value):
+    """Bambu Studio writes text lists with ';' and number lists with ','."""
+    value = value.strip()
+    parts = value.split(';') if (';' in value or value.startswith('"')) else value.split(',')
+    return [p.strip().strip('"') for p in parts]
+
+def parse_plate(text):
+    """{'printer_model', 'time', 'layers', 'filaments': [{slot, type, fid, colour, name, grams, nozzle}]} from the head of a
+    Bambu Studio G-code. None while the file is not complete (Bambu Studio writes the totals last)."""
+    if '; HEADER_BLOCK_END' not in text or '; CONFIG_BLOCK_END' not in text: return None
+    head, _, body = text.partition('; HEADER_BLOCK_END')
+    def header(key):
+        m = re.search(r'^; ' + re.escape(key) + r'\s*:\s*(.*)$', head, re.M)
+        return m.group(1).strip() if m else None
+    def setting(key):
+        m = re.search(r'^; ' + re.escape(key) + r' = (.*)$', body, re.M)
+        return split_list(m.group(1)) if m and m.group(1).strip() else []
+    weights = header('total filament weight [g]')
+    if weights is None: return None
+    weights = [float(w) for w in weights.split(',') if w.strip()]
+    types, colours, fids, names = setting('filament_type'), setting('filament_colour'), setting('filament_ids'), setting('filament_settings_id')
+    used = header('filament')                      # the slots the totals belong to, e.g. "1,3,4"
+    if used: slots = [int(s) for s in used.split(',') if s.strip()]
+    elif len(weights) == len(types): slots = list(range(1, len(types) + 1))
+    else: raise ValueError(f'{len(weights)} filament totals for {len(types)} filaments and no "; filament:" line to place them')
+    if len(slots) != len(weights): raise ValueError(f'{len(weights)} filament totals for the {len(slots)} filaments in use')
+    # Two nozzles (H2D, H2C): filament_map says which nozzle prints each slot, 1 = left, 2 = right. A spool can only
+    # be used by the nozzle its AMS is plumbed to, so the nozzle is part of what "enough" means.
+    nozzle_of = setting('filament_map') if len(setting('nozzle_diameter')) > 1 else []
+    def at(lst, slot, default=''): return lst[slot - 1] if 0 < slot <= len(lst) else default
+    filaments = []
+    for slot, grams in zip(slots, weights):
+        if grams <= 0: continue
+        filaments.append({'slot': slot, 'type': at(types, slot, '?'), 'fid': at(fids, slot), 'colour': at(colours, slot, '#808080')[:7].upper(),
+                          'name': re.sub(r'\s*@.*$', '', at(names, slot)), 'grams': grams,
+                          'nozzle': {'1': 'left', '2': 'right'}.get(at(nozzle_of, slot))})
+    time_line = re.search(r'total estimated time: ([^;\n]+)', head)
+    layers = header('total layer number')
+    return {'printer_model': (setting('printer_model') or [''])[0], 'time': time_line.group(1).strip() if time_line else '',
+            'layers': int(layers) if layers and layers.isdigit() else None, 'filaments': filaments}
+
+def plates_of_file(path):
+    """[(label, plate)] of a .gcode file or of every sliced plate in a .gcode.3mf."""
+    if zipfile.is_zipfile(path):
+        out = []
+        with zipfile.ZipFile(path) as z:
+            names = sorted((n for n in z.namelist() if re.fullmatch(r'Metadata/plate_\d+\.gcode', n)), key=lambda n: int(re.findall(r'\d+', n)[0]))
+            for n in names:
+                with z.open(n) as f: plate = parse_plate(read_head(f))
+                if plate: out.append(('plate ' + re.findall(r'\d+', n)[0], plate))
+        if not out: raise ValueError('no sliced plate in this 3MF: slice it first (a project file holds no G-code)')
+        return out
+    with open(path, 'rb') as f: plate = parse_plate(read_head(f))
+    if not plate: raise ValueError('not a complete Bambu Studio G-code file')
+    return [('', plate)]
+
+def temp_gcodes():
+    """The G-code of every plate the running Bambu Studio copies have sliced: <temp>/bamboo_model/<day>/<time>#<pid>#<id>/
+    Metadata/.<pid>.<n>.gcode (PartPlate::get_tmp_gcode_path, v02.09.01.70). With under 2 GB free in the temp folder
+    Bambu Studio uses its own data folder instead."""
+    out = []
+    for root in (tempfile.gettempdir(), os.path.join(BS_DATA, 'tmp')):
+        out += glob.glob(os.path.join(root, 'bamboo_model', '*', '*', 'Metadata', '.*.gcode'))
+    return out
+
+def project_title(gcode_path):
+    """The project a temporary G-code belongs to: Bambu Studio notes the opened file in origin.txt of the session folder."""
+    try:
+        origin = open(os.path.join(os.path.dirname(os.path.dirname(gcode_path)), 'origin.txt'), encoding='utf-8', errors='replace').read().strip()
+        if origin: return re.sub(r'(\.gcode)?\.3mf$', '', os.path.basename(origin), flags=re.I)
+    except OSError: pass
+    return 'Unsaved project'
+
+
+# ---------------------------------------------------------------- what is left: the printer
+
+class PrinterError(Exception): pass
+
+def bs_conf():
+    s = open(os.path.join(BS_DATA, 'BambuStudio.conf'), encoding='utf-8', errors='replace').read()
+    return json.loads(s[:s.rfind('}') + 1])                    # a checksum line follows the JSON
+
+def model_by_serial_prefix():
+    out = {}
+    for path in glob.glob(os.path.join(BS_DATA, 'printers', '*.json')):
+        try: d = json.load(open(path, encoding='utf-8'))
+        except (OSError, ValueError): continue
+        for v in (d.values() if isinstance(d, dict) else []):
+            if isinstance(v, dict) and v.get('sn_prefix') and v.get('display_name'): out[v['sn_prefix']] = v['display_name']
+    return out
+
+def known_printers(conf):
+    """[{'serial', 'model'}] for every printer Bambu Studio holds a LAN access code for; the one selected there first."""
+    models = model_by_serial_prefix()
+    last = conf.get('app', {}).get('user_last_selected_machine')
+    serials = sorted(conf.get('access_code', {}), key=lambda s: s != last)
+    return [{'serial': s, 'model': models.get(s[:3], 'unknown model')} for s in serials]
+
+def discover(seconds=8.0, want=None):
+    """{serial: ip} of the Bambu printers announcing themselves on the LAN (SSDP notices on UDP 2021 / 1990)."""
+    socks, found = [], {}
+    for port in (2021, 1990):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(('', port))
+            try: s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, struct.pack('4sl', socket.inet_aton('239.255.255.250'), socket.INADDR_ANY))
+            except OSError: pass
+            s.settimeout(0.3); socks.append(s)
+        except OSError: pass
+    t0 = time.time()
+    while socks and time.time() - t0 < seconds and not (want and set(want) <= set(found)):
+        for s in socks:
+            try: data, addr = s.recvfrom(4096)
+            except OSError: continue
+            h = {k.strip().lower(): v.strip() for k, v in (l.split(':', 1) for l in data.decode('utf-8', 'replace').split('\r\n') if ':' in l)}
+            if h.get('usn'): found[h['usn']] = h.get('location') or addr[0]
+    for s in socks: s.close()
+    return found
+
+def printer_ip(serial, cfg, refresh=False):
+    """The printer's IP: config.json, else the last one seen, else its LAN announcement (asked for at most every 10 minutes)."""
+    fixed = cfg.get('printers', {}).get(serial, {}).get('ip')
+    if fixed: return fixed
+    state = load_state(); ips = state.get('ips', {})
+    if serial in ips and not refresh: return ips[serial]
+    if time.time() - state.get('discovered_at', 0) > (0 if serial not in ips else 600):
+        found = discover(want=[serial])
+        def change(st): st.setdefault('ips', {}).update(found); st['discovered_at'] = time.time(); return st['ips'].get(serial)
+        return update_state(change)
+    return ips.get(serial)
+
+def merge(a, b):
+    for k, v in b.items():
+        if isinstance(v, dict) and isinstance(a.get(k), dict): merge(a[k], v)
+        else: a[k] = v
+
+def printer_link(ip, serial, code, client_id, on_report, on_refused=None):
+    """A read-only link to the printer: it subscribes to the printer's status reports and asks once, at each
+    connection, for all of them (pushall). Everything else on this channel needs Developer Mode and is not used.
+    on_report gets the "print" part of every report, on the link's own thread. Returns the client; loop_stop() and
+    disconnect() end it."""
+    try: import paho.mqtt.client as mqtt
+    except ImportError: raise PrinterError('the Python package paho-mqtt is missing (pip install paho-mqtt)')
+    def on_connect(c, userdata, flags, rc, *rest):
+        if rc.is_failure if hasattr(rc, 'is_failure') else rc != 0:
+            if on_refused: on_refused(str(rc))
+            return
+        c.subscribe(f'device/{serial}/report')
+        c.publish(f'device/{serial}/request', json.dumps({'pushing': {'sequence_id': '0', 'command': 'pushall'}}))
+    def on_message(c, userdata, msg):
+        try: d = json.loads(msg.payload)
+        except ValueError: return
+        if isinstance(d.get('print'), dict): on_report(d['print'])
+    try: c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
+    except AttributeError: c = mqtt.Client(client_id=client_id)
+    c.username_pw_set('bblp', code)
+    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE      # the printer signs its own certificate
+    c.tls_set_context(ctx); c.on_connect = on_connect; c.on_message = on_message
+    try: c.connect(ip, 8883, keepalive=30)
+    except OSError as e: raise PrinterError(f'no connection to {ip} ({e.__class__.__name__})')
+    c.loop_start()
+    return c
+
+def read_status(ip, serial, code, wait=10.0):
+    """The printer's full status, read once."""
+    state, lock, full, refused = {}, threading.Lock(), threading.Event(), []
+    def on_report(d):
+        with lock: merge(state, d)
+        if 'gcode_state' in state: full.set()
+    # a name of its own for every link: a printer drops the older of two links with one name, and checks do overlap
+    c = printer_link(ip, serial, code, f'bambu-filament-guard-{os.getpid()}-{next(LINK_NUMBER)}', on_report, lambda rc: (refused.append(rc), full.set()))
+    try:
+        if not full.wait(wait): raise PrinterError(f'{ip} did not report its status')
+        if refused: raise PrinterError(f'{ip} refused the access code Bambu Studio holds for it')
+        for tenth in range(30):                           # the H2D sends its report in pieces: a second at least, three at most, for the spools
+            time.sleep(0.1)
+            with lock:
+                if tenth >= 9 and 'ams' in state: break
+        with lock: return json.loads(json.dumps(state))
+    finally:
+        c.loop_stop(); c.disconnect()
+
+def grams_left(t):
+    """Grams on a spool, or None when the printer does not know. Newer firmware reports grams (remain_g); older reports
+    a percentage of the spool weight; a spool without a tag and without a measured amount reports -1 or 0 of 0."""
+    def num(key):
+        try: return float(t.get(key))
+        except (TypeError, ValueError): return -1.0
+    g, pct, weight = num('remain_g'), num('remain'), num('tray_weight')
+    if g > 0: return g
+    if weight > 0 and pct >= 0: return weight * pct / 100.0
+    return None
+
+def trays_of(status):
+    """([{'label', 'type', 'fid', 'colour', 'name', 'grams', 'weight', 'nozzle'}], two_nozzles) for every loaded spool.
+    weight is the full spool's filament in grams (tray_weight), None when the printer does not know it.
+    label is the tray as Bambu Studio shows it (A1..D4, HT-A, Ext). nozzle is the one the tray's AMS feeds, where the
+    printer has two: the low half of the top byte of the AMS 'info' word, 1 = left, 0 = right (H2D, firmware 01.04);
+    the tray each nozzle has loaded confirms it. None = not known, and then the tray counts for either nozzle."""
+    extruders = status.get('device', {}).get('extruder', {}).get('info', []) or []
+    two = len(extruders) > 1
+    side = {}
+    for a in status.get('ams', {}).get('ams', []) or []:
+        try: side[int(a['id'])] = 'left' if (int(a.get('info', ''), 16) >> 24) & 0xF == 1 else 'right'
+        except (ValueError, KeyError): pass
+    for e in extruders:
+        for key in ('snow', 'spre'):
+            v = e.get(key)
+            if isinstance(v, int) and (v >> 8) < 0xFE and (v & 0xFF) < 0x10: side[v >> 8] = 'right' if e.get('id') == 0 else 'left'
+    out = []
+    def add(label, t, nozzle):
+        if not t.get('tray_type'): return
+        try: weight = float(t.get('tray_weight')) or None
+        except (TypeError, ValueError): weight = None
+        out.append({'label': label, 'type': t['tray_type'], 'fid': t.get('tray_info_idx', ''), 'colour': '#' + (t.get('tray_color') or '808080')[:6].upper(),
+                    'name': t.get('tray_sub_brands', ''), 'grams': grams_left(t), 'weight': weight, 'nozzle': nozzle if two else None})
+    for a in status.get('ams', {}).get('ams', []) or []:
+        aid = int(a.get('id', 0))
+        for t in a.get('tray', []) or []:
+            label = f'HT-{chr(65 + aid - 128)}' if aid >= 128 else f"{chr(65 + aid)}{int(t.get('id', 0)) + 1}"
+            add(label, t, side.get(aid))
+    external = status.get('vir_slot') or ([status['vt_tray']] if isinstance(status.get('vt_tray'), dict) else [])
+    for i, t in enumerate(external): add('Ext' if i == 0 else f'Ext{i + 1}', t, None)
+    return out, two
+
+
+# ---------------------------------------------------------------- need against left
+
+def colour_distance(a, b):
+    """0 (same) .. 765: the "redmean" distance, which follows the eye closer than plain RGB distance."""
+    try: r1, g1, b1 = (int(a[i:i + 2], 16) for i in (1, 3, 5)); r2, g2, b2 = (int(b[i:i + 2], 16) for i in (1, 3, 5))
+    except ValueError: return 765.0
+    rm = (r1 + r2) / 2.0
+    return (((512 + rm) * (r1 - r2) ** 2) / 256 + 4 * (g1 - g2) ** 2 + ((767 - rm) * (b1 - b2) ** 2) / 256) ** 0.5
+
+def assess(fil, trays, cfg, times=1):
+    """One filament of the print against the loaded spools.
+    OK       one spool holds the need plus the reserve (see DEFAULTS)
+    TIGHT    one spool holds the need, without the reserve
+    SPLIT    no single spool holds it, the matching spools together do (the AMS must refill from one to the next)
+    SHORT    the matching spools together hold less than the need
+    MISSING  no spool of this material is loaded where the print's nozzle can reach it
+    COLOUR   the material is loaded, this colour of it is not: the nearest spool is named, and counts for nothing
+    UNKNOWN  the matching spool reports no remaining amount
+    Matching: same material type, on the nozzle that prints it, of the project's colour (the same product first)."""
+    need = fil['grams'] * times
+    row = {'slot': fil['slot'], 'type': fil['type'], 'name': fil['name'], 'colour': fil['colour'], 'nozzle': fil['nozzle'], 'need': need,
+           'trays': [], 'best': None, 'total': None, 'note': ''}
+    same = [t for t in trays if t['type'].upper() == fil['type'].upper()]
+    reach = [t for t in same if not fil['nozzle'] or t['nozzle'] in (None, fil['nozzle'])]
+    if not reach:
+        row['status'] = 'MISSING'
+        row['note'] = (f"{fil['type']} is loaded only for the other nozzle ({', '.join(t['label'] for t in same)})" if same else f"no {fil['type']} is loaded")
+        return row
+    near = [t for t in reach if colour_distance(t['colour'], fil['colour']) <= cfg['colour_tolerance']]
+    if not near:                                             # the nearest spool does not stand in: blue once read "enough" on a terracotta spool
+        t = min(reach, key=lambda t: colour_distance(t['colour'], fil['colour']))
+        row['status'] = 'COLOUR'
+        row['note'] = (f"no {fil['type']} of this colour is loaded; the nearest is {t['label']} {t['name'] or t['type']} ({t['colour']})"
+                       + (f", {t['grams']:.0f} g" if t['grams'] is not None else ''))
+        return row
+    group = [t for t in near if fil['fid'] and t['fid'] == fil['fid']] or near
+    group.sort(key=lambda t: -(t['grams'] or 0))
+    row['trays'] = [{'label': t['label'], 'grams': t['grams'], 'colour': t['colour'], 'name': t['name'], 'type': t['type'],
+                     'entered': t.get('entered'), 'stale': t.get('stale')} for t in group]
+    known = [t['grams'] for t in group if t['grams'] is not None]
+    unknown = [t['label'] for t in group if t['grams'] is None]
+    if not known:
+        stale = [t['label'] for t in group if t.get('stale')]
+        row['status'] = 'UNKNOWN'
+        row['note'] = (f"the amount entered for {', '.join(stale)} is out of date: a print the guard could not count has drawn on it" if stale
+                       else f"{', '.join(unknown)} reports no remaining amount")
+        return row
+    row['best'], row['total'] = max(known), sum(known)
+    reserve = max(need * cfg['margin_pct'] / 100.0, (group[0].get('weight') or 0) * cfg['spool_reserve_pct'] / 100.0)   # group[0] is the fullest spool
+    if row['best'] >= need + reserve: row['status'] = 'OK'
+    elif row['best'] >= need: row['status'] = 'TIGHT'; row['note'] = f"{row['best'] - need:.0f} g to spare, and the AMS's figure can be {reserve:.0f} g out"
+    elif row['total'] >= need: row['status'] = 'SPLIT'; row['note'] = 'only across these spools: AMS auto refill must be on'
+    else: row['status'] = 'SHORT'; row['note'] = f"short by {need - row['total']:.0f} g"
+    if unknown and row['status'] in ('SHORT', 'SPLIT', 'TIGHT'): row['note'] += f"; {', '.join(unknown)} holds an unknown amount more"
+    entered = [t for t in group if t.get('entered')]         # a spool the printer cannot measure: the amount is the user's, less the prints since
+    if entered:
+        row['note'] += ('; ' if row['note'] else '') + ', '.join(f"{t['label']} as entered on {time.strftime('%d %b', time.localtime(t['entered']))}" for t in entered) + ', less the prints since'
+    alike = [t for t in near if t not in group]              # the same colour to the eye, another product: the user's call, so named, not counted
+    if alike and row['status'] in ('SHORT', 'SPLIT', 'TIGHT'):
+        row['note'] += '; similar colour: ' + ', '.join(f"{t['label']} {t['name'] or t['type']}" + (f" {t['grams']:.0f} g" if t['grams'] is not None else '') for t in alike)
+    return row
+
+def pick_printer(model, printers):
+    """The printer a plate is checked against: of the known printers of the model it was sliced for, the one selected
+    in Bambu Studio (known_printers lists it first)."""
+    return next((p for p in printers if p['model'] == model), None)
+
+def share_spools(rows, filaments, trays, cfg, times):
+    """Filaments that draw on the same spools (two slots of one colour) are judged on what they need together: each
+    alone can fit a spool that does not hold both."""
+    groups = {}
+    for row, fil in zip(rows, filaments):
+        if row['trays']: groups.setdefault(tuple(t['label'] for t in row['trays']), []).append((row, fil))
+    for labels, members in groups.items():
+        if len(members) < 2: continue
+        total = sum(fil['grams'] for _, fil in members)
+        joint = assess(dict(members[0][1], grams=total), trays, cfg, times)
+        for row, _ in members:
+            if SEVERITY[joint['status']] > SEVERITY[row['status']]: row['status'] = joint['status']
+            row['note'] = (f"filaments {', '.join(str(r['slot']) for r, _ in members)} share {' + '.join(labels)} and need {total * times:.0f} g together"
+                           + (f": {joint['note']}" if joint['note'] else ''))
+
+def evaluate(plate, cfg, title='', times=1, seen=None):
+    """{'title', 'model', 'time', 'times', 'plate', 'printer', 'rows', 'worst', 'error'}: the whole answer for one sliced plate.
+    seen: a dict that carries the printers' status from one call to the next, for several plates checked in one go."""
+    res = {'title': title, 'model': plate['printer_model'], 'time': plate['time'], 'times': times, 'plate': plate, 'printer': None, 'rows': [], 'worst': 'OK', 'error': None}
+    try:
+        conf = bs_conf()
+        printer = pick_printer(plate['printer_model'], known_printers(conf))
+        if not printer:                      # sliced for a printer that is not on this LAN (or not a Bambu printer): nothing to ask, so no card
+            res['quiet'] = True
+            raise PrinterError(f"Bambu Studio holds no LAN access code for a {plate['printer_model'] or 'printer of this kind'}")
+        status = (seen or {}).get(printer['serial'])
+        if status is None:
+            ip = printer_ip(printer['serial'], cfg)
+            if not ip: raise PrinterError(f"the {printer['model']} is not announcing itself on this network (is it on?)")
+            code = conf['access_code'][printer['serial']]
+            try: status = read_status(ip, printer['serial'], code)
+            except PrinterError:
+                new_ip = printer_ip(printer['serial'], cfg, refresh=True)       # the printer may have a new address
+                if not new_ip or new_ip == ip: raise
+                status = read_status(new_ip, printer['serial'], code)
+            if seen is not None: seen[printer['serial']] = status
+    except (PrinterError, OSError, ValueError, KeyError) as e:
+        res['error'] = str(e) if isinstance(e, PrinterError) else f'{e.__class__.__name__}: {e}'
+        return res
+    try:
+        import guard_ledger
+        trays, _ = trays_of(status)
+        guard_ledger.apply(trays, printer['serial'], 'ams' in status)   # spools the printer cannot measure get the amount entered for them
+        rows = [assess(f, trays, cfg, times) for f in plate['filaments']]
+        share_spools(rows, plate['filaments'], trays, cfg, times)
+    except Exception as e:                   # a status the guard does not understand must end as a card that says so, not as a line in the log
+        res['error'] = f"the {printer['model']}'s report could not be worked out ({e.__class__.__name__}: {e})"
+        return res
+    res['printer'] = {'model': printer['model'], 'serial': printer['serial'], 'state': status.get('gcode_state', '?'), 'job': status.get('subtask_name', ''),
+                      'percent': status.get('mc_percent')}
+    res['rows'] = rows
+    res['worst'] = max((r['status'] for r in rows), key=SEVERITY.get, default='OK')
+    return res
+
+def headline(res):
+    if res['error']: return 'Filament could not be checked'
+    sev = SEVERITY[res['worst']]
+    if sev == 4 and not any(r['status'] == 'SHORT' for r in res['rows']): return 'A filament of this print is not loaded'
+    return {0: 'Enough filament for this print', 1: 'Enough filament could not be confirmed', 2: 'Filament is tight for this print',
+            3: 'No single spool holds enough filament', 4: 'Not enough filament for this print'}[sev]
+
+STATUS_WORD = {'OK': 'enough', 'TIGHT': 'tight', 'SPLIT': 'two spools', 'SHORT': 'NOT ENOUGH', 'MISSING': 'NOT LOADED', 'COLOUR': 'COLOUR NOT LOADED', 'UNKNOWN': 'unknown'}
+
+def tray_text(row):
+    return ' + '.join(t['label'] for t in row['trays']) or '-'
+
+def has_text(row):
+    if row['best'] is None: return '?' if row['trays'] else '-'
+    return f"{row['best']:.0f} g" + (f" ({row['total']:.0f} g in all)" if row['total'] > row['best'] else '')
+
+def report_text(res):
+    lines = [headline(res) + (f": {res['title']}" if res['title'] else '') + (f" x {res['times']}" if res['times'] != 1 else '')]
+    if res['error']: return lines[0] + '\n  ' + res['error']
+    p = res['printer']
+    lines.append(f"  {p['model']}, {p['state']}" + (f" ({p['job']}, {p['percent']} %): its spools are still being used" if p['state'] in ('RUNNING', 'PREPARE', 'PAUSE') else ''))
+    for r in res['rows']:
+        lines.append(f"  {r['slot']:>2} {r['type']:<8} {r['colour']} {r['name'][:22]:<22} needs {r['need']:7.1f} g   {tray_text(r):<10} has {has_text(r):<22} {STATUS_WORD[r['status']]}"
+                     + (f"  ({r['note']})" if r['note'] else ''))
+    return '\n'.join(lines)
+
+def exit_code(res):
+    if res['error']: return 3
+    return {0: 0, 1: 1, 2: 1, 3: 1, 4: 2}[SEVERITY[res['worst']]]
+
+
+# ---------------------------------------------------------------- the watcher
+
+def temp_name(gcode_path):
+    return re.match(r'\.(\d+)\.(\d+)\.gcode$', os.path.basename(gcode_path))
+
+def studio_pid(gcode_path):
+    """The process id of the Bambu Studio copy that sliced a temporary G-code: it is in the file's name, .<pid>.<n>.gcode."""
+    m = temp_name(gcode_path)
+    return int(m.group(1)) if m else None
+
+def plate_number(gcode_path):
+    """The plate a temporary G-code belongs to, counted from 1 as Bambu Studio shows it (the name counts from 0)."""
+    m = temp_name(gcode_path)
+    return int(m.group(2)) + 1 if m else None
+
+def newest_gcode(pid=None):
+    """The temporary G-code written last (by the Bambu Studio copy with this process id, when one is given), or None."""
+    files = [p for p in temp_gcodes() if pid is None or studio_pid(p) == pid]
+    try: return max(files, key=os.path.getmtime) if files else None
+    except OSError: return None
+
+def studio_version():
+    try: return str(bs_conf().get('app', {}).get('version', ''))
+    except (OSError, ValueError): return ''
+
+def remember_slice(title, plate_no, plate):
+    """Notes a slice that was read: which Bambu Studio version wrote it (the self-test reports that), and what it
+    needs (guard_ledger counts a print down from it when the printer starts a job of that name)."""
+    version = studio_version()
+    def change(st):
+        st['verified'] = {'version': version, 'at': time.time()}
+        mine = {'title': title, 'plate': plate_no, 'layers': plate.get('layers'), 'at': time.time(),
+                'filaments': [{'slot': f['slot'], 'grams': f['grams']} for f in plate['filaments']]}
+        st['slices'] = ([mine] + [s for s in st.get('slices', []) if (s['title'], s.get('plate')) != (title, plate_no)])[:30]
+    update_state(change)
+
+class Watcher:
+    """Finds each newly sliced plate once: a temporary G-code that has stopped changing and carries its totals.
+    problems collects (path, why) for files Bambu Studio has finished and the guard cannot read."""
+    def __init__(self, skip_existing=True):
+        self.done, self.waiting, self.problems = {}, {}, []
+        if skip_existing:
+            for p in temp_gcodes(): self.done[p] = self.key(p)
+    @staticmethod
+    def key(path):
+        try: st = os.stat(path); return (st.st_mtime_ns, st.st_size)
+        except OSError: return None
+    def new_plates(self):
+        out = []
+        for path in temp_gcodes():
+            key = self.key(path)
+            if key is None or self.done.get(path) == key: continue
+            if self.waiting.get(path) != key or time.time() - key[0] / 1e9 < 2.0:
+                self.waiting[path] = key; continue                               # still being written: look again next round
+            try:
+                with open(path, 'rb') as f: plate = parse_plate(read_head(f))
+            except OSError: continue                                             # Bambu Studio has it open: look again next round
+            except ValueError as e:
+                self.done[path] = key; self.problems.append((path, str(e))); continue
+            if plate is None:                                                    # totals not written yet; after three quiet minutes they will not come
+                if time.time() - key[0] / 1e9 > 180: self.done[path] = key; self.problems.append((path, 'it carries no filament totals'))
+                continue
+            self.done[path] = key; self.waiting.pop(path, None)
+            out.append((path, plate))
+        return out
+
+
+class Guard:
+    """The running guard: it shows every answer, and does what the card and the icon ask for. Everything that
+    touches the card runs on the Tk thread, through `todo`; asking the printer takes seconds and runs on threads of
+    its own. standing = the watcher (icon, Send dialog, entered amounts); otherwise one card, for `check --popup`."""
+    def __init__(self, cfg, root, standing=True):
+        import guard_ui
+        self.cfg, self.root, self.standing = cfg, root, standing
+        self.todo, self.stopping = queue.Queue(), threading.Event()
+        self.last, self.paused, self.ticks, self.sending, self.jobs = None, False, 0, set(), {}
+        self.warning = None                                   # the warning on the full card: (title, plate, severity, when)
+        self.card = guard_ui.Card(root, act=self.act, on_close=None if standing else root.quit)
+        self.tray = guard_ui.Tray(self) if standing else None
+
+    # -- showing an answer
+    @staticmethod
+    def signature(res):
+        return json.dumps([[r['slot'], r['status']] for r in res['rows']])
+
+    def ignored(self, res):
+        return load_state().get('ignored', {}).get(res['title']) == self.signature(res)
+
+    def last_text(self):
+        if self.paused: return 'Checks are paused'
+        return f"{headline(self.last)} · {self.last['title']}" if self.last else 'No slice checked yet'
+
+    def deliver(self, res, full=False, beside=None):
+        """One answer: the full card for a warning (and whenever it is asked for), one line that goes away otherwise.
+        beside: the "Send print job" dialog, next to which only a warning is worth a card."""
+        import guard_ui
+        severity = -1 if res['error'] else SEVERITY[res['worst']]
+        if not full and not beside and self.warning and self.card.is_open():
+            title, plate_no, was, when = self.warning       # "slice all" brings the plates' answers seconds apart: a plate that is
+            if title == res['title'] and plate_no != res.get('plate_no') and severity < was and time.time() - when < 120: return   # fine does not wipe another plate's warning
+        self.last = res
+        if self.tray: self.tray.set(guard_ui.tone_of(res), self.last_text()); self.tray.refresh()
+        if res['error']:
+            if full or not res.get('quiet'): self.card.show(res, beside=beside, hold=not full)
+            self.warning = None
+            return
+        res['ignored'] = self.ignored(res)
+        if full or (res['worst'] in self.cfg['popup_on'] and not res['ignored']):
+            self.card.show(res, beside=beside, hold=not full)
+            self.warning = (res['title'], res.get('plate_no'), severity, time.time()) if severity >= 2 else None
+        elif not beside and self.cfg['ok_seconds']:
+            self.card.show(res, brief=self.cfg['ok_seconds'], hold=True); self.warning = None
+
+    # -- what the card and the icon ask for
+    def later(self, work, then, otherwise=None):
+        """work() on a thread of its own, then(its result) on the Tk thread; otherwise() there when work failed."""
+        def run():
+            try: out = work()
+            except Exception as e:
+                log(f'error: {e.__class__.__name__}: {e}')
+                if otherwise: self.todo.put(otherwise)
+                return
+            self.todo.put(lambda: then(out))
+        threading.Thread(target=run, daemon=True).start()
+
+    def act(self, name, res, arg=None):
+        import guard_ledger
+        if name == 'recheck': self.recheck(res, self.card.beside)
+        elif name == 'details': self.deliver(res, full=True)
+        elif name == 'ignore':
+            on = not res.get('ignored')
+            def change(st):
+                if on: st.setdefault('ignored', {})[res['title']] = self.signature(res)
+                else: st.get('ignored', {}).pop(res['title'], None)
+            update_state(change); log(f"{res['title']}: this finding is " + ('ignored from now on' if on else 'no longer ignored'))
+            if on: self.card.close()
+            else: self.deliver(res, full=True, beside=self.card.beside)
+        elif name == 'amount':
+            tray, grams = arg
+            guard_ledger.enter(res['printer']['serial'], tray, grams); self.recheck(res, self.card.beside)
+
+    def recheck(self, res, beside=None):
+        import guard_ui
+        where = lambda: beside if guard_ui.visible(beside) else None
+        def work():
+            new = evaluate(res['plate'], self.cfg, res['title'], res['times']); new['pid'], new['plate_no'] = res.get('pid'), res.get('plate_no')
+            log('checked again: ' + report_text(new).replace('\n', ' | ')); return new
+        self.later(work, lambda new: self.deliver(new, full=True, beside=where()), lambda: self.deliver(res, full=True, beside=where()))
+
+    def check_newest(self, pid=None, beside=None):
+        """From the icon: the newest slice, as a full card. At "Send print job" (beside): every plate of the project the
+        sending Bambu Studio has sliced, because which of them is being sent cannot be read; the worst answer shows,
+        when it is a warning, and names its plate."""
+        import guard_ui
+        newest = newest_gcode(pid)
+        if not newest:
+            if not beside: self.card.note('No sliced plate found', [(None, 'Slice a plate in Bambu Studio first.')])
+            return
+        folder = os.path.dirname(newest)
+        paths = sorted((p for p in temp_gcodes() if os.path.dirname(p) == folder), key=os.path.getmtime, reverse=True)[:8] if beside else [newest]
+        def work():
+            seen, out = {}, []
+            for path in paths:
+                with open(path, 'rb') as f: plate = parse_plate(read_head(f))
+                if not plate or not plate['filaments']: continue
+                res = evaluate(plate, self.cfg, project_title(path), seen=seen); res['pid'], res['plate_no'] = studio_pid(path), plate_number(path)
+                log(('at "Send print job": ' if beside else 'checked on request: ') + report_text(res).replace('\n', ' | ')); out.append(res)
+            return max(out, key=lambda r: -1 if r['error'] else SEVERITY[r['worst']]) if out else None     # the newest of the worst
+        def then(res):
+            if res is None or (beside and not guard_ui.visible(beside)): return   # nothing sliced, or the dialog has closed meanwhile
+            self.deliver(res, full=not beside, beside=beside)
+        self.later(work, then)
+
+    def show_last(self):
+        if self.last: self.deliver(self.last, full=True)
+        else: self.check_newest()
+
+    def run_selftest(self):
+        def then(lines):
+            bad = any(mark is False for mark, _ in lines)
+            self.card.note('Self-test found a problem' if bad else 'Self-test: the guard works', lines, 'danger' if bad else 'ok')
+        self.later(lambda: selftest(self.cfg), then)
+
+    def set_option(self, key, value):
+        self.cfg[key] = value; save_config(self.cfg); log(f'setting {key} = {value}')
+        if self.tray: self.tray.refresh()
+
+    def toggle_warning(self, status):
+        on = self.cfg['popup_on']
+        self.set_option('popup_on', [s for s in on if s != status] if status in on else on + [status])
+
+    def toggle_autostart(self):
+        if os.path.exists(STARTUP_LNK): os.remove(STARTUP_LNK)
+        else: make_shortcut()
+        if self.tray: self.tray.refresh()
+
+    def toggle_pause(self):
+        self.paused = not self.paused; log('checks paused' if self.paused else 'checks resumed')
+        if self.tray: self.tray.set('muted', self.last_text()); self.tray.refresh()
+
+    def open_log(self):
+        os.startfile(os.path.join(STATE_DIR, 'guard.log'))
+
+    def quit(self):
+        self.stopping.set()
+
+    # -- the two loops
+    def watch_slices(self):
+        """The watcher's own thread: every newly sliced plate is read, checked and handed to the Tk thread."""
+        watcher, stop_flag, told = Watcher(), os.path.join(STATE_DIR, 'stop'), set()
+        while not self.stopping.is_set():
+            if os.path.exists(stop_flag): self.stopping.set(); break
+            try:
+                for path, plate in watcher.new_plates():
+                    title = project_title(path); remember_slice(title, plate_number(path), plate)
+                    if self.paused or not plate['filaments']: continue
+                    res = evaluate(plate, self.cfg, title); res['pid'], res['plate_no'] = studio_pid(path), plate_number(path)
+                    log(report_text(res).replace('\n', ' | '))
+                    self.todo.put(lambda res=res: self.deliver(res))
+                for path, why in watcher.problems:
+                    version = studio_version(); log(f'cannot read the slice {path} of Bambu Studio {version}: {why}')
+                    if version not in told:                                      # said once for each Bambu Studio version, logged every time
+                        told.add(version)
+                        lines = [(False, f'Bambu Studio {version} wrote a slice the guard cannot read: {why}.'),
+                                 (None, 'Its prints are not checked until the guard is updated. The log has the file.')]
+                        self.todo.put(lambda lines=lines, pid=studio_pid(path): self.card.note('Filament is not being checked', lines, 'danger', pid))
+                watcher.problems.clear()
+            except Exception as e:                                               # the watcher outlives any one bad file or network hiccup
+                log(f'error: {e.__class__.__name__}: {e}')
+            self.stopping.wait(self.cfg['poll_seconds'])
+
+    def look_around(self):
+        """Every 0.4 s on the Tk thread: has "Send print job" opened? Is Bambu Studio running (then the icon shows)?
+        Does a printer with entered amounts need following?"""
+        import guard_ui, guard_ledger
+        dialogs = guard_ui.send_dialogs()
+        for handle, pid in dialogs.items():
+            if handle not in self.sending and self.cfg['at_send'] and not self.paused: self.check_newest(pid, beside=handle)
+        self.sending = set(dialogs)
+        if self.ticks % 5 == 0 and self.tray: self.tray.visible(bool(guard_ui.studio_windows()))
+        if self.ticks % 25 == 1:
+            for serial in guard_ledger.serials():
+                if serial not in self.jobs or not self.jobs[serial].is_alive():
+                    self.jobs[serial] = guard_ledger.JobWatch(serial, self.cfg); self.jobs[serial].start()
+
+    def pump(self):
+        if self.stopping.is_set(): self.root.quit(); return
+        self.ticks += 1
+        while True:
+            try: job = self.todo.get_nowait()
+            except queue.Empty: break
+            try: job()
+            except Exception as e: log(f'error: {e.__class__.__name__}: {e}')    # one failing request does not end the guard
+        for step in (self.card.follow, self.look_around if self.standing else None):
+            try: step and step()
+            except Exception as e:                                               # nor does one failing step stop the other; said once a minute at most
+                if self.ticks % 150 == 1: log(f'error: {e.__class__.__name__}: {e}')
+        self.root.after(400, self.pump)
+
+    def loop(self):
+        self.root.after(400, self.pump); self.root.mainloop()
+        if self.tray: self.tray.stop()
+        for job in self.jobs.values(): job.stopped.set()
+
+
+def watch():
+    import ctypes, guard_ui
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True); k32.CreateMutexW.restype = ctypes.c_void_p
+    handle = k32.CreateMutexW(None, False, MUTEX)
+    if ctypes.get_last_error() == 183: return 0                                   # ERROR_ALREADY_EXISTS: one guard is enough
+    os.makedirs(STATE_DIR, exist_ok=True)
+    stop_flag = os.path.join(STATE_DIR, 'stop')
+    if os.path.exists(stop_flag): os.remove(stop_flag)
+    with open(os.path.join(STATE_DIR, 'guard.pid'), 'w') as f: f.write(str(os.getpid()))
+    guard = Guard(load_config(), guard_ui.make_root())
+    log(f'watching for sliced plates (pid {os.getpid()}, guard {VERSION}, Bambu Studio {studio_version() or "not found"})')
+    threading.Thread(target=guard.watch_slices, daemon=True).start()
+    guard.loop()
+    log('stopped'); k32.CloseHandle(ctypes.c_void_p(handle))
+    return 0
+
+def is_running():
+    import ctypes
+    h = ctypes.windll.kernel32.OpenMutexW(0x00100000, False, MUTEX)                # SYNCHRONIZE
+    if h: ctypes.windll.kernel32.CloseHandle(h)
+    return bool(h)
+
+def stop():
+    if not is_running(): return False
+    open(os.path.join(STATE_DIR, 'stop'), 'w').close()
+    for _ in range(40):
+        if not is_running(): return True
+        time.sleep(0.25)
+    return not is_running()
+
+
+# ---------------------------------------------------------------- self-test
+
+def selftest(cfg):
+    """[(True = works, False = does not, None = cannot be told now, text)]: can the guard read this Bambu Studio and
+    reach its printers? Run it after a Bambu Studio update."""
+    import guard_ui, guard_ledger
+    try: conf = bs_conf()
+    except (OSError, ValueError) as e:
+        return [(False, f"Bambu Studio's configuration cannot be read ({e.__class__.__name__}): is Bambu Studio installed for this Windows user?")]
+    version = str(conf.get('app', {}).get('version', '?'))
+    out = [(True, f'Bambu Studio {version}: its configuration is readable')]
+    verified, newest = load_state().get('verified') or {}, newest_gcode()
+    if newest:
+        try:
+            with open(newest, 'rb') as f: plate = parse_plate(read_head(f))
+            if plate: out.append((True, f"Newest slice ({project_title(newest)}): {len(plate['filaments'])} filament(s), {sum(f['grams'] for f in plate['filaments']):.0f} g"))
+            else: out.append((None, 'Newest slice: Bambu Studio is still writing it'))
+        except (OSError, ValueError) as e: out.append((False, f'Newest slice cannot be read: {e}'))
+    elif verified.get('version') == version:
+        out.append((True, f"Slices of this version have been read, last on {time.strftime('%d %b %Y', time.localtime(verified['at']))}"))
+    else: out.append((None, 'No slice of this Bambu Studio version has been read yet: slice any plate to test it'))
+    printers = known_printers(conf)
+    if not printers: out.append((False, 'Bambu Studio holds no LAN access code for a printer: open the printer once on its Device tab'))
+    for p in printers:
+        try:
+            ip = printer_ip(p['serial'], cfg)
+            if not ip: raise PrinterError('it is not announcing itself on this network (is it on?)')
+            status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
+            trays, _ = trays_of(status); guard_ledger.apply(trays, p['serial'], 'ams' in status)
+            out.append((True, f"{p['model']}: {len(trays)} spool(s), {sum(t['grams'] is not None for t in trays)} with a known amount"))
+        except PrinterError as e: out.append((False if 'refused' in str(e) else None, f"{p['model']}: {e}"))
+    out.append((True, 'Bambu Studio is running: the card shows in its window') if guard_ui.studio_windows() else (None, 'Bambu Studio is not running: the card shows when it is'))
+    out.append((True, 'The guard is running') if is_running() else (False, 'The guard is not running: "install" starts it'))
+    out.append((True, 'It starts automatically') if os.path.exists(STARTUP_LNK) else (None, 'It does not start automatically'))
+    return out
+
+
+# ---------------------------------------------------------------- installing
+
+def pythonw():
+    exe = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+    return exe if os.path.exists(exe) else sys.executable
+
+def own_command(*args):
+    """The command line that runs this guard without a console: pythonw (the one beside the running Python) and this script."""
+    return [pythonw(), os.path.abspath(__file__), *args]
+
+def start():
+    if is_running(): return
+    subprocess.Popen(own_command('watch'), cwd=HERE, close_fds=True, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+
+def make_shortcut():
+    """The Startup shortcut. The guard starts with Windows and waits; its icon shows while Bambu Studio runs."""
+    cmd = own_command('watch')
+    env = dict(os.environ, FG_LNK=STARTUP_LNK, FG_EXE=cmd[0], FG_ARGS=subprocess.list2cmdline(cmd[1:]), FG_DIR=HERE)
+    subprocess.run(['powershell', '-NoProfile', '-Command',
+                    "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:FG_LNK); $s.TargetPath=$env:FG_EXE; $s.Arguments=$env:FG_ARGS; "
+                    "$s.WorkingDirectory=$env:FG_DIR; $s.Description='Warns when the loaded spools do not hold enough filament for a sliced print'; $s.Save()"],
+                   env=env, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+
+def install():
+    """Makes the guard start automatically, from where it is, and starts it."""
+    make_shortcut()
+    print('starts automatically:', STARTUP_LNK)
+    try:
+        conf, cfg = bs_conf(), load_config()
+        for p in known_printers(conf):
+            ip = printer_ip(p['serial'], cfg, refresh=True)
+            print(f"  {p['model']}: " + (ip or 'not announcing itself on this network now (it is looked for again when a plate is sliced)'))
+    except (OSError, ValueError): print("  Bambu Studio's configuration was not found: the guard waits for it")
+    if stop(): time.sleep(0.5)                                                   # a running copy may be an older version
+    start(); time.sleep(1.5)
+    print('watcher running' if is_running() else 'watcher did NOT start: run it with "watch" to see why')
+
+def uninstall():
+    if os.path.exists(STARTUP_LNK): os.remove(STARTUP_LNK)
+    print('stopped' if stop() else 'was not running'); print('shortcut removed')
+    print(f'settings and log stay in {STATE_DIR} and {CONFIG}: delete them, and this folder, to remove every trace')
+
+def setup():
+    """Install, and say so on a card: for someone who started the packaged guard with a double click and sees no console."""
+    import guard_ui
+    if sys.stdout is None: sys.stdout = sys.stderr = open(os.devnull, 'w')       # pythonw has no console to print to
+    install()
+    root = guard_ui.make_root(); card = guard_ui.Card(root, on_close=root.quit)
+    card.note('Bambu Filament Guard is installed' if is_running() else 'Bambu Filament Guard did not start', [
+        (True, "It checks every plate you slice in Bambu Studio and shows the answer in Bambu Studio's window."),
+        (True, 'Its icon, a spool, is in the notification area while Bambu Studio runs: settings, self-test, quit.'),
+        (None, f'It runs from this folder, so the folder has to stay: {os.path.dirname(HERE) if os.path.basename(HERE) == "app" else HERE}'),
+        (None, 'To remove it: Uninstall.cmd in that folder, then delete the folder.')], 'ok' if is_running() else 'danger')
+    def tick(): card.follow(); root.after(400, tick)
+    tick(); root.mainloop()
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0]); sub = ap.add_subparsers(dest='cmd')
+    c = sub.add_parser('check'); c.add_argument('file', nargs='?'); c.add_argument('--times', type=int, default=1)
+    c.add_argument('--popup', action='store_true'); c.add_argument('--json', action='store_true')
+    for name in ('watch', 'install', 'uninstall', 'setup', 'status', 'stop', 'trays', 'selftest'): sub.add_parser(name)
+    a = ap.parse_args(argv)
+    if a.cmd == 'watch': return watch()
+    if a.cmd == 'install': return install()
+    if a.cmd == 'uninstall': return uninstall()
+    if a.cmd == 'setup': return setup()
+    if a.cmd == 'stop': print('stopped' if stop() else 'was not running'); return 0
+    if a.cmd == 'status':
+        print('watcher running' if is_running() else 'watcher not running', '| starts automatically:', 'yes' if os.path.exists(STARTUP_LNK) else 'no', '| log:', os.path.join(STATE_DIR, 'guard.log'))
+        return 0
+    cfg = load_config()
+    if a.cmd == 'selftest':
+        lines = selftest(cfg)
+        for mark, text in lines: print({True: '[ok]', False: '[!!]', None: '[--]'}[mark], text)
+        return 1 if any(mark is False for mark, _ in lines) else 0
+    if a.cmd == 'trays':
+        import guard_ledger
+        conf = bs_conf()
+        for p in known_printers(conf):
+            ip = printer_ip(p['serial'], cfg)
+            try:
+                if not ip: raise PrinterError('not announcing itself on this network')
+                status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
+            except PrinterError as e: print(f"{p['model']}: {e}"); continue
+            trays, two = trays_of(status); guard_ledger.apply(trays, p['serial'], 'ams' in status)
+            print(f"{p['model']} ({ip}), {status.get('gcode_state')}")
+            for t in trays:
+                amount = 'entered amount out of date' if t.get('stale') else 'amount unknown' if t['grams'] is None else f"{t['grams']:.0f} g" + (' (entered by hand)' if t.get('entered') else '')
+                print(f"  {t['label']:<5} {t['type']:<8} {t['name'][:18]:<18} {t['colour']}  {amount}" + (f"  {t['nozzle']} nozzle" if two and t['nozzle'] else ''))
+        return 0
+    if a.cmd == 'check':
+        if a.file:
+            try: plates = [(os.path.basename(a.file) + (' ' + label if label else ''), plate) for label, plate in plates_of_file(a.file)]
+            except (OSError, ValueError) as e: print(f'{a.file}: {e}'); return 3
+        else:
+            newest = newest_gcode()
+            if not newest: print('no sliced plate found: slice in Bambu Studio first, or name a .gcode / .gcode.3mf file'); return 3
+            with open(newest, 'rb') as f: plate = parse_plate(read_head(f))
+            if not plate: print('Bambu Studio is still writing its newest slice'); return 3
+            plates = [(project_title(newest), plate)]
+        results = [evaluate(plate, cfg, title, a.times) for title, plate in plates]
+        if not a.file: results[0]['pid'], results[0]['plate_no'] = studio_pid(newest), plate_number(newest)
+        print(json.dumps(results, indent=1) if a.json else '\n'.join(report_text(r) for r in results))
+        if a.popup:
+            import guard_ui
+            guard = Guard(cfg, guard_ui.make_root(), standing=False)
+            guard.deliver(max(results, key=exit_code), full=True); guard.loop()
+        return max(exit_code(r) for r in results)
+    ap.print_help(); return 0
+
+if __name__ == '__main__':
+    import filament_guard                 # run as the module the other files import, so there is one copy of its state and its lock
+    sys.exit(filament_guard.main())

@@ -1,0 +1,8 @@
+# Local settings: holds only what this computer changed, and may name a printer's serial and IP.
+config.json
+
+# build.py output: the packaged folder and its zip (about 20 MB, an embedded Python).
+dist/
+
+__pycache__/
+.pytest_cache/

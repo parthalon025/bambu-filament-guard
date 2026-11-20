@@ -1,0 +1,2 @@
+# The sources are LF; keep them so on every checkout (core.autocrlf would turn them to CRLF on Windows).
+* text=auto eol=lf
