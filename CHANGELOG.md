@@ -4,6 +4,20 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added
+
+- Learning scores itself. When a print it followed ends, the guard keeps what it had forecast the tray's reading would fall by, by what it knew before that print, and what the reading fell. From 9 scored prints, and readings at empty that repeat within a tray, the reserve is measured from those errors (a one-sided 90 % conformal bound, per gram of print plus 20 g, never below 5 g or 2 % of the need) instead of the fixed one, and can be smaller: a tray that proves accurate is no longer called "tight" on 3 % of its spool. A new setting, "Measure the reserve from past prints" (`measured_reserve`, on), turns it off. Until it is earned, or with it off, no answer is looser than 1.3.0's.
+- "Weigh C3…" on the card, when weighing a spool the printer measures would settle the answer: at most once a week per tray and once a day in all. The spool is then counted with no more than it held; weighed near empty, it tells what the tray reads at empty.
+- A tray whose learned forecasts do clearly worse than the slicer's grams (a sign test over its last 10) has them set aside; a change in a tray's forecast errors (Bayesian online change-point detection) starts what is learned of it again.
+- `learned` shows the scores, the rate's 90 % interval, the evidence for what each tray reads at empty, which reserve is in use, any change noticed, and the rate by filament product.
+
+### Changed
+
+- The rate and the loss before the first layer are used from the first print, each tray's drawn toward the printer's own figure as far as its trays cannot be told apart, recent prints weighing more than old ones, and each print's ratio clipped first so that one odd print cannot set it. A rate above 1 now adds to the need.
+- What a tray reads with its spool empty is an upper bound from run-dries, spools weighed near empty, and spools seen still feeding at a reading (Kaplan-Meier), in place of the largest of the last 3 run-dries and the rule that dropped a run-dry at once when a later spool fed lower.
+- A filament's need takes the largest learned rate and loss of the trays it could be printed from.
+- `learned.json` keeps 100 records per tray (the newest 20 with their readings layer by layer), 20 run-dries and 20 weigh-ins. A 1.3.0 file reads as it is; its records are not scored, and scoring starts with the next print.
+
 ## [1.3.0] - 2026-11-20
 
 ### Added
