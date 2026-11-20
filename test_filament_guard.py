@@ -1172,3 +1172,44 @@ def test_with_learning_off_nothing_learned_is_read(state, monkeypatch):
     for name in ('corrections', 'reserve_words', 'weigh_offer', 'estimates', 'load'): monkeypatch.setattr(gn, name, never)
     running(monkeypatch, blue_reads(110)); res = fg.evaluate(BLUE, dict(CFG, learn=False), 'Benchy')
     assert res['rows'][0]['status'] == 'TIGHT' and res['printer']['reserve'] is None and 'weigh' not in res and not res['rows'][0]['measured']
+
+# ---------------------------------------------------------------- weigh-ins and the card (1.4.0)
+
+def test_a_weigh_in_is_asked_for_only_when_it_would_settle_the_answer(state):
+    row = fg.assess(fil(85.3), fg.credit([dict(tray('C3', 110, weight=1000), spool=TAG)], {}), CFG)
+    assert row['status'] == 'TIGHT' and gn.weigh_offer('S', [row], CFG, now=1e6)['label'] == 'C3'   # 25 g to spare: enough unless the reading runs high
+    for quiet in (dict(CFG, ok_seconds=0), dict(CFG, learn=False)): assert gn.weigh_offer('S', [row], quiet, now=1e6) is None
+    hopeless = fg.assess(fil(105.0), fg.credit([dict(tray('C3', 108, weight=1000), spool=TAG)], {}), CFG)
+    assert hopeless['status'] == 'TIGHT' and gn.weigh_offer('S', [hopeless], CFG, now=1e6) is None   # 3 g to spare even if the reading is true
+    entered = fg.assess(fil(85.3), fg.credit([dict(tray('C3', 110, weight=1000), entered=1.0)], {}), CFG)
+    assert gn.weigh_offer('S', [entered], CFG, now=1e6) is None                                         # an amount entered by hand: nothing to weigh against
+    gn.asked('S', 'C3', now=1e6)
+    other = fg.assess(fil(85.3), fg.credit([dict(tray('B1', 110, weight=1000))], {}), CFG)
+    assert gn.weigh_offer('S', [other], CFG, now=1e6 + 3600) is None                                    # once a day in all
+    assert gn.weigh_offer('S', [row], CFG, now=1e6 + 2 * 86400) is None and gn.weigh_offer('S', [other], CFG, now=1e6 + 2 * 86400)['label'] == 'B1'   # once a week a tray
+    assert gn.weigh_offer('S', [row], CFG, now=1e6 + 8 * 86400)['label'] == 'C3'
+
+def test_a_weighed_spool_is_counted_with_no_more_than_it_held(state):
+    spool = {'id': TAG, 'type': 'PLA', 'colour': '#0A2989', 'fid': 'GFA00', 'weight': 1000.0}
+    c3 = lambda g, tag=TAG: gn.corrections('SERIAL', [dict(tray('C3', g, colour='#0A2989', weight=1000.0), spool=tag)]).get('C3', {})
+    gn.weigh('SERIAL', 'C3', 300.0, 280.0, spool, now=1e6)
+    assert c3(250)['credited'] == 230 and 'its spool held 20 g less than it read' in c3(250)['evidence'] and c3(250, 'ANOTHER SPOOL') == {}
+    assert gn.estimates(gn.load()['SERIAL'])['trays']['C3']['exact'] == []                    # weighed half full: says nothing of the reading at empty
+    gn.weigh('SERIAL', 'C3', 300.0, 320.0, spool, now=1e6 + 1)
+    assert c3(250) == {}                                                                       # it held more than it read: never counted above the reading
+    gn.weigh('SERIAL', 'C3', 200.0, 190.0, spool, now=1e6 + 2)                                 # a quarter full or less: the reading at empty, 10 g
+    assert [(k, v) for k, v, _ in gn.estimates(gn.load()['SERIAL'])['trays']['C3']['exact']] == [('weighed', 10.0)] and c3(250)['credited'] == 240
+
+def test_the_card_offers_a_weigh_in_records_it_and_checks_again(state, monkeypatch):
+    running(monkeypatch, blue_reads(110))
+    res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['rows'][0]['status'] == 'TIGHT' and res['weigh']['label'] == 'C3' and res['weigh']['reading'] == 110
+    assert res['printer']['reserve'] == 'the reserve is the fixed one: 9 more scored prints and 2 more readings at empty in a tray that has one measure it'
+    guard, again = guard_with(), []
+    monkeypatch.setattr(guard, 'recheck', lambda res, beside=None: again.append(res['title']))
+    guard.act('asked', res, res['weigh'])
+    assert fg.load_state()['weigh_asked']['SERIAL']['C3'] == pytest.approx(time.time(), abs=60) and 'weigh' not in fg.evaluate(BLUE, CFG, 'Benchy')
+    guard.act('weigh', res, (res['weigh'], 92.0))
+    [w] = gn.load()['SERIAL']['C3']['weighs']
+    assert (w['reading'], w['weight'], w['spool']['type'], w['spool']['colour']) == (110, 92.0, 'PLA', '#0A2989') and again == ['Benchy']
+    assert fg.evaluate(BLUE, CFG, 'Benchy')['rows'][0]['trays'][0]['grams'] == 92.0            # weighed near empty: 18 g the tray reads at empty, and the spool's own

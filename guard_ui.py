@@ -109,7 +109,8 @@ def work_area(hwnd):
 
 class Card:
     """One card at a time; each newer answer replaces it. act(name, res, arg) is told what its buttons ask for:
-    'recheck', 'ignore', 'details', and 'amount' with arg (tray, grams or None)."""
+    'recheck', 'ignore', 'details', 'amount' with arg (tray, grams or None), 'weigh' with arg (tray, grams), and 'asked'
+    with the tray a weigh-in is offered for."""
     def __init__(self, root, act=None, on_close=None):
         self.root, self.win, self.act, self.on_close = root, None, act or (lambda *a: None), on_close
         self.owner, self.beside, self.spot, self.held = None, None, None, False
@@ -242,6 +243,9 @@ class Card:
                     f" It is printing now{fg.job_text(p)}: that job is still drawing from these spools, and the guard could not count what it still needs."
                     if p['state'] in fg.BUSY else '')
             spools += ''.join(f" The print running now needs {g:.0f} g more of {label}'s filament than the loaded spools hold." for label, g in (p.get('beyond') or {}).items())
+            if p.get('reserve'): spools += f" {p['reserve'][:1].upper()}{p['reserve'][1:]}."
+            if res.get('weigh'):
+                spools += f" Weighing the spool in {res['weigh']['label']} would settle it: the guard then counts that spool by what it held."
             ignored = ' Ignored for this project: it shows as one line until the finding changes.' if res.get('ignored') else ''
             self._label(w, spools + ignored, 'muted', 9, wrap=620, row=4, column=0, pady=(2 * SPACE, 0))
         bar = tk.Frame(w, bg=t['surface']); bar.grid(row=5, column=0, sticky='w', pady=(2 * SPACE, 0))
@@ -257,6 +261,10 @@ class Card:
                     if tray['label'] in seen or not (tray['grams'] is None or tray.get('entered')): continue
                     seen.add(tray['label'])
                     self._button(bar, f"Amount in {tray['label']}…", lambda tray=tray: self.ask_amount(res, tray), row=0, column=col, padx=(0, SPACE)); col += 1
+            if res.get('weigh') and not res['error']:
+                tray = res['weigh']
+                self._button(bar, f"Weigh {tray['label']}…", lambda: self.ask_amount(res, tray, weigh=True), row=0, column=col, padx=(0, SPACE)); col += 1
+                self.act('asked', res, tray)                        # offered: not again for a week (this tray) or a day (any)
         self._place()
 
     def note(self, headline, lines, tone='muted', pid=None):
@@ -276,28 +284,31 @@ class Card:
         self._place()
         return w
 
-    def ask_amount(self, res, tray):
-        """Asks for the grams left on a spool the printer cannot measure. An ordinary small window: it has to take the keyboard."""
+    def ask_amount(self, res, tray, weigh=False):
+        """Asks for the grams left on a spool the printer cannot measure, or (weigh) on one it measures, to set its reading
+        against. An ordinary small window: it has to take the keyboard."""
         import tkinter as tk
         t = self.t; d = tk.Toplevel(self.root, bg=t['surface'], padx=3 * SPACE, pady=3 * SPACE)
         d.title('Bambu Filament Guard'); d.attributes('-topmost', True); d.resizable(False, False)
-        self._label(d, f"Filament left in {tray['label']} ({tray['name'] or tray['type']}), in grams", size=10, bold=True, row=0, column=0, columnspan=3)
-        self._label(d, 'Weigh the spool and take off the empty spool (a Bambu spool: about 250 g). The guard counts down from this with every print it sees start; '
-                       'a print it cannot count makes the amount unknown again.', 'muted', 9, wrap=420, row=1, column=0, columnspan=3, pady=(SPACE, 2 * SPACE))
-        value = tk.StringVar(value=f"{tray['grams']:.0f}" if tray['grams'] is not None else '')
+        self._label(d, f"Filament {'on the spool' if weigh else 'left'} in {tray['label']} ({tray['name'] or tray['type']}), in grams", size=10, bold=True, row=0, column=0, columnspan=3)
+        self._label(d, (f"Weigh the spool and take off the empty spool (a Bambu spool: about 250 g). The printer reads {tray['reading']:.0f} g; from now on the guard "
+                        'counts this spool with no more than it held, and a spool weighed near empty teaches it what the tray reads at empty.') if weigh else
+                       ('Weigh the spool and take off the empty spool (a Bambu spool: about 250 g). The guard counts down from this with every print it sees start; '
+                        'a print it cannot count makes the amount unknown again.'), 'muted', 9, wrap=420, row=1, column=0, columnspan=3, pady=(SPACE, 2 * SPACE))
+        value = tk.StringVar(value='' if weigh else f"{tray['grams']:.0f}" if tray['grams'] is not None else '')
         entry = tk.Entry(d, textvariable=value, width=10, bg=t['raised'], fg=t['text'], insertbackground=t['text'], relief='flat', font=('Segoe UI', 11),
                          highlightthickness=1, highlightbackground=t['border'], highlightcolor=t['ok'])
         entry.grid(row=2, column=0, sticky='w', ipady=SPACE // 2)
         wrong = self._label(d, '', 'danger', 9, row=3, column=0, columnspan=3)
         def done(grams):
-            d.destroy(); self.act('amount', res, (tray, grams))
+            d.destroy(); self.act('weigh' if weigh else 'amount', res, (tray, grams))
         def accept(*_):
             try: grams = float(value.get().replace(',', '.').replace('g', '').strip())
             except ValueError: grams = -1
             if not 0 < grams <= 10000: wrong.configure(text='A number of grams between 1 and 10000.'); return
             done(grams)
         self._button(d, 'Save', accept, row=2, column=1, padx=(2 * SPACE, 0))
-        if tray.get('entered') or tray.get('stale'): self._button(d, 'Forget this amount', lambda: done(None), row=2, column=2, padx=(SPACE, 0))
+        if not weigh and (tray.get('entered') or tray.get('stale')): self._button(d, 'Forget this amount', lambda: done(None), row=2, column=2, padx=(SPACE, 0))
         entry.bind('<Return>', accept); d.bind('<Escape>', lambda e: d.destroy())
         d.update_idletasks()
         x, y = (self.spot or (200, 200)); d.geometry(f'+{max(0, x)}+{max(0, y - d.winfo_reqheight() - 48)}')
@@ -346,6 +357,7 @@ class Tray:
                 warns("Warn when a spool's amount is unknown", 'UNKNOWN'),
                 option('Check again at "Send print job"', 'at_send', True, False),
                 option('Learn from prints, tray by tray', 'learn', True, False),
+                option('Measure the reserve from past prints', 'measured_reserve', True, False),
                 Item('Reserve', Menu(*[Item(f'{p} % of the full spool', do(lambda p=p: g.set_option('spool_reserve_pct', p)),
                                             checked=lambda item, p=p: g.cfg['spool_reserve_pct'] == p, radio=True) for p in (2, 3, 5)])),
                 Item('Start automatically', do(g.toggle_autostart), checked=lambda item: os.path.exists(fg.STARTUP_LNK)))),
