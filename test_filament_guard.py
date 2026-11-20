@@ -453,7 +453,7 @@ def test_profiles_are_kept_beside_the_state_file_and_go_with_their_slice(state):
 
 class Card:
     """The card, as the guard sees it: what it was asked to show, in order."""
-    def __init__(self): self.win, self.one_line, self.shown = None, False, []
+    def __init__(self): self.win, self.one_line, self.shown, self.beside = None, False, [], None
     def is_open(self): return self.win is not None
     def line(self, text, tone='muted', seconds=0, pid=None, hold=False):
         self.win, self.one_line = object(), True; self.shown.append(('line', text, hold)); return self.win
@@ -660,7 +660,7 @@ def test_a_record_that_is_not_sound_is_kept_and_marked(state, fault, end, why):
     benchy(); rec = gn.Recorder('SERIAL'); run_job(rec, fault=fault, end=end)
     job = gn.load()['SERIAL']['C3']['jobs'][0]
     assert not job['sound'] and why in job['why']
-    assert all(not m[x]['used'] for x in ('rate', 'pre') for m in [gn.model({'jobs': [job] * 10})])           # and nothing is learned from it
+    assert all(not m[x]['used'] for x in ('rate', 'pre') for m in [gn.rules({'jobs': [job] * 10})])           # and nothing is learned from it
 
 def test_a_spool_that_runs_dry_is_recorded_and_one_taken_out_half_full_is_not(state):
     benchy(); rec = gn.Recorder('SERIAL')
@@ -682,16 +682,16 @@ def whole(start, end, printed=100.0, purge=0.0, before=None, layer0=1.0, sound=T
 
 def test_each_number_is_used_only_past_its_threshold():
     at = time.mktime((2026, 11, 19, 14, 0, 0, 0, 0, -1))
-    assert not gn.model({})['dry']['used'] and gn.model({'dry': [{'at': at, 'reading': 20.0}]})['dry']['value'] == 20.0         # dry: from the first
-    assert gn.model({'dry': [{'at': at, 'reading': r} for r in (30.0, 10.0, 25.0, 15.0)]})['dry']['value'] == 25.0              # the largest of the last 3
-    rate = lambda jobs: gn.model({'jobs': jobs})['rate']
+    assert not gn.rules({})['dry']['used'] and gn.rules({'dry': [{'at': at, 'reading': 20.0}]})['dry']['value'] == 20.0         # dry: from the first
+    assert gn.rules({'dry': [{'at': at, 'reading': r} for r in (30.0, 10.0, 25.0, 15.0)]})['dry']['value'] == 25.0              # the largest of the last 3
+    rate = lambda jobs: gn.rules({'jobs': jobs})['rate']
     assert not rate([whole(500, 320, 200)] * 2)['used'] and rate([whole(500, 320, 200)] * 2)['why'] == '2 of 3 prints'
     assert rate([whole(500, 419, 90)] * 3)['why'] == '270 of 300 g'
     assert not rate([whole(500, 350.5, 150)] * 3)['used']                                                                       # 0.997: noise
     assert rate([whole(500, 365, 150)] * 3)['used'] and rate([whole(500, 365, 150)] * 3)['value'] == pytest.approx(0.9)
     assert not rate([whole(500, 365, 150)] * 2 + [whole(500, 365, 150, sound=False)])['used']                                   # unsound jobs do not count
     assert rate([whole(500, 365, 150)] * 3 + [whole(500, 499, 4)])['jobs'] == 3                                                 # nor jobs of less than 5 g
-    pre = lambda jobs: gn.model({'jobs': jobs})['pre']
+    pre = lambda jobs: gn.rules({'jobs': jobs})['pre']
     assert not pre([whole(498, 458, before=501)])['used'] and pre([whole(498, 458, before=501)])['why'] == '1 of 2 prints'
     assert pre([whole(498, 458, before=501), whole(498, 458, before=500)])['used'] and pre([whole(498, 458, before=501), whole(498, 458, before=500)])['value'] == 2.0
     assert pre([whole(498, 458, before=498)] * 2)['value'] == 0.0                                                               # never below 0
@@ -791,10 +791,12 @@ def test_learned_says_what_was_learned_and_forget_empties_it(state, monkeypatch,
     gn.keep('SERIAL', 'C3', 'dry', {'at': time.mktime((2026, 11, 19, 14, 0, 0, 0, 0, -1)), 'job': 'Benchy', 'reading': 20.0, 'layer': 9, 'needed': 1.0, 'spool': {}}, gn.KEEP_DRY)
     assert fg.main(['learned']) == 0
     out = capsys.readouterr().out
-    assert out.startswith('Learning from prints is on\nSERIAL\n  C3: 1 print recorded, 1 sound; 1 run-dry\n')
-    assert 'dry   20.0 g' in out and 'used: it read 20 g when a spool ran dry in it on 19 Nov' in out and 'rate  1.000 g per gram' in out
-    assert 'not used: 1 of 3 prints, 40 of 300 g' in out and 'pre   1.0 g' in out and 'not used: 1 of 2 prints' in out
+    assert out.startswith('Learning from prints is on\nSERIAL\n  reserve: the reserve is the fixed one: 8 more scored prints and 2 more readings at empty in a tray that has one measure it\n')
+    assert '  C3: 1 print recorded, 1 sound, 1 scored; 1 run-dry\n    forecast of the fall, off by on average: learned 1.0 g, without learning 1.0 g\n' in out
+    assert 'rate  1.000 g per sliced gram (its own 1.000 over 1 print)' in out and 'pre   1.0 g (its own 1.0 g over 1 print)' in out
+    assert 'empty 20 g: the most it reads with its spool empty (from its own spools); seen: 20 g ran dry; 1 spool still feeding at 462 g or more' in out
     assert 'ran dry 19 Nov 14:00 at layer 9 of "Benchy", reading 20 g, 1.0 g still to go' in out and 'per gram printed / purged: not enough to tell' in out
+    assert 'margin not in use: 8 more scored prints on the printer, 2 more readings at empty in a tray that has one' in out
     assert fg.main(['learned', '--forget']) == 0 and gn.load() == {}
 
 def test_printed_and_purged_are_told_apart_only_when_the_jobs_differ_enough():
@@ -880,19 +882,6 @@ def test_a_low_spool_taken_out_is_not_a_run_dry(state):
         t += 3; rec.look(dict(h2d(st, n, g), subtask_name='Sent from the phone'), t)
     assert gn.load() == {} and 'C3 emptied during "Sent from the phone", a print not sliced on this computer' in (state / 'guard.log').read_text()
 
-def test_a_run_dry_keeps_the_printers_codes_and_is_dropped_when_a_later_print_contradicts_it(state, monkeypatch, capsys):
-    benchy()
-    dry_at_7 = from_layer(6, lambda s, t: (dict(h2d(s['gcode_state'], s['layer_num'], 20.0 if s['layer_num'] == 6 else None), print_error=50348044, hms=[{'attr': 1, 'code': 2}]), t))
-    run_job(gn.Recorder('SERIAL'), fault=dry_at_7)
-    [dry] = gn.load()['SERIAL']['C3']['dry']
-    assert (dry['reading'], dry['print_error'], dry['hms']) == (20.0, 50348044, [{'attr': 1, 'code': 2}]) and gn.model(gn.load()['SERIAL']['C3'])['dry']['used']
-    run_job(gn.Recorder('SERIAL'), before=40.0, lost=1.0, per_layer=3.0, t=time.mktime((2026, 11, 21, 12, 0, 0, 0, 0, -1)))        # a later spool in C3 still feeds at 39, 36, ... 9 g
-    [dry] = gn.load()['SERIAL']['C3']['dry']
-    assert dry['contradicted']['reading'] == 12.0 and not gn.model(gn.load()['SERIAL']['C3'])['dry']['used']
-    def no_studio(): raise OSError('no Bambu Studio here')
-    monkeypatch.setattr(fg, 'bs_conf', no_studio); fg.main(['learned'])
-    assert '; no longer used: on 21 Nov a spool in it still gave filament at 12 g' in capsys.readouterr().out
-
 def test_forget_takes_one_tray_and_asks_which_printer_when_two_have_it(state):
     for serial, label in (('S1', 'C3'), ('S1', 'B2'), ('S2', 'C3')): gn.keep(serial, label, 'jobs', whole(500, 400), gn.KEEP_JOBS)
     assert gn.forget('B2', None, {'S1': 'Bambu Lab H2D'}) == 'what was learned of B2 on Bambu Lab H2D' and 'B2' not in gn.load()['S1']
@@ -930,8 +919,8 @@ def test_a_follower_says_each_failure_once(state, monkeypatch):
     assert log.count('refused the access code') == 1 and log.count('held elsewhere for more than 10 s; tried again at the next look') == 1
 
 def test_a_rate_below_0_9_is_readings_that_lagged_and_is_not_used():
-    assert not gn.model({'jobs': [whole(500, 372.5, 150)] * 3})['rate']['used']                                               # 0.85
-    assert gn.model({'jobs': [whole(500, 372.5, 150)] * 3})['rate']['why'] == '0.85 g per gram is too far out to believe'
+    assert not gn.rules({'jobs': [whole(500, 372.5, 150)] * 3})['rate']['used']                                               # 0.85
+    assert gn.rules({'jobs': [whole(500, 372.5, 150)] * 3})['rate']['why'] == '0.85 g per gram is too far out to believe'
 
 def test_the_spools_a_print_goes_on_with_are_taken_in_the_order_without_learning():
     """B owes 65 g more than it holds; A and C hold the same filament. Learning that counts A lower must not leave A
@@ -998,3 +987,188 @@ def test_the_spread_from_spool_to_spool_bounds_one_more_spool():
     assert gs.pooled_spread([[20.0, 22.0, 18.0], [5.0]]) == (2.0, 2) and gs.pooled_spread([[1.0], [2.0]]) == (None, 0)
     assert gs.prediction_bound([5.0], 2.0, 2, 0.9) == pytest.approx(5 + 1.8856 * 2 * 2 ** 0.5, abs=1e-3)
     assert gs.quantile([1, 2, 3, 4], 0.5) == 2.5 and gs.quantile([], 0.5) is None
+
+
+# ---------------------------------------------------------------- learning with statistics (guard_learn, 1.4.0)
+
+def scored(fell, n=100.0, at=0.0, learned=None, before=402.0):
+    """A sound whole record of a print of n sliced grams (1 g of it in layer 0) from a tray whose reading fell `fell` from
+    before layer 1 to the end, 2 g of it before layer 1 (1 g beyond layer 0), with its score."""
+    return {'at': at, 'job': f'J{at:g}', 'sound': True, 'whole': True, 'before': before, 'start': before - 2.0, 'end': before - fell, 'layer0': 1.0,
+            'sliced': {'from': 1, 'to': None, 'printed': n - 1.0, 'purge': 0.0}, 'spool': {}, 'fed': None,
+            'score': {'n': n, 'fell': fell, 'learned': learned or n, 'applied': learned or n}}
+
+def empty_at(reading, at=50.0, spool='S0'):
+    return {'at': at, 'job': 'J', 'reading': reading, 'layer': 5, 'needed': 5.0, 'spool': {'id': spool}}
+
+def blue_reads(g):
+    return dict(BLUE_JOB, gcode_state='IDLE', ams={'ams': [{'id': '2', 'tray': [{'id': '2', 'tray_type': 'PLA', 'tray_color': '0A2989FF', 'tray_info_idx': 'GFA00', 'remain_g': g, 'tray_weight': '1000'}]}]})
+
+def test_a_learned_file_of_1_3_0_loads_and_counts_as_1_3_0_did(state, monkeypatch, capsys):
+    """The owner's installed 1.3.0 is writing learned.json now: records without scores, run-dries marked contradicted."""
+    old = {'SERIAL': {'C3': {'jobs': [dict(whole(500, 365, 150, before=503.0), at=float(i), job='Benchy', spool={'id': TAG}, samples=[[1, 500], [10, 365]], end_first=365, why=[]) for i in range(3)],
+                             'dry': [empty_at(20.0, 0.5, ''), dict(empty_at(45.0, 0.1, ''), contradicted={'at': 0.2, 'job': 'Benchy', 'reading': 30.0})]}}}
+    (state / 'learned.json').write_text(json.dumps(old))
+    trays = [dict(tray('C3', 500, weight=1000), spool=TAG)]
+    now, then = gn.corrections('SERIAL', trays)['C3'], gn.corrections('SERIAL', trays, plain_rules=True)['C3']
+    assert now['credited'] == then['credited'] == pytest.approx(1000 - 500 / 0.9) and now['evidence'] == then['evidence'] and now['pre'] == then['pre'] == 2.0
+    monkeypatch.setattr(fg, 'bs_conf', lambda: (_ for _ in ()).throw(OSError('no Bambu Studio here')))
+    assert fg.main(['learned']) == 0 and '  C3: 3 prints recorded, 3 sound, 0 scored; 2 run-dries' in capsys.readouterr().out
+    benchy(); run_job(gn.Recorder('SERIAL'), t=10.0)
+    h = gn.load()['SERIAL']['C3']
+    assert len(h['jobs']) == 4 and h['jobs'][-1]['score']['n'] == pytest.approx(41.0) and h['seen'][0]['reading'] == 462.0 and h['dry'] == old['SERIAL']['C3']['dry']
+
+def test_every_whole_print_is_scored_by_the_model_as_it_stood_before(state):
+    benchy(); rec = gn.Recorder('SERIAL'); t = run_job(rec)
+    [job] = gn.load()['SERIAL']['C3']['jobs']
+    assert job['score'] == {'n': pytest.approx(41.0), 'fell': 42.0, 'learned': pytest.approx(41.0), 'applied': pytest.approx(41.0)} and job['fed'] == 462.0
+    t = run_job(rec, per_layer=4.4, t=t + 100)                                             # this print takes 10 % more reading per gram
+    second = gn.load()['SERIAL']['C3']['jobs'][1]['score']
+    assert (second['learned'], second['fell']) == (pytest.approx(41.0 * 1.0 + 1.0), pytest.approx(46.0))   # forecast from the first alone: rate 1, 1 g before layer 1
+    run_job(rec, end='FAILED', t=t + 100)
+    assert 'score' not in gn.load()['SERIAL']['C3']['jobs'][2]
+
+def test_the_reserve_is_measured_once_there_are_nine_scored_prints_and_repeated_readings_at_empty(state, monkeypatch):
+    errors = (0, 1, -1, 0, 2, 0, -1, 1, 0)
+    gn.save({'SERIAL': {'C3': {'jobs': [scored(101.0 + e, at=float(i)) for i, e in enumerate(errors)], 'dry': [empty_at(r, 50.0 + i, f'S{i}') for i, r in enumerate((20.0, 22.0, 18.0))]}}})
+    running(monkeypatch, blue_reads(130)); res = fg.evaluate(BLUE, CFG, 'Benchy'); row = res['rows'][0]
+    a = 20 + gs.t_quantile(0.9, 2) * 2 * (4 / 3) ** 0.5                                       # three readings at empty, 2 g apart: one more spool's bound
+    assert row['status'] == 'OK' and row['measured'] and row['reserve'] == 5.0 and row['trays'][0]['grams'] == pytest.approx(130 - a)
+    assert res['printer']['reserve'] == 'the reserve is measured from 9 scored prints and 3 readings at empty' and row['need'] > 85.3 + 1.0
+    assert "C3: its reading falls 1.002 g per sliced gram (9 of its prints, drawn to the printer's), which the need is counted by" in row['note']
+    off = fg.evaluate(BLUE, dict(CFG, measured_reserve=False), 'Benchy')                     # the setting off: the fixed reserve, 30 g
+    assert off['rows'][0]['status'] == 'TIGHT' and not off['rows'][0]['measured'] and off['printer']['reserve'] == 'the reserve is the fixed one (measuring it is off)'
+    gn.save({'SERIAL': {'C3': {'jobs': [scored(110.0 + e, at=float(i)) for i, e in enumerate(errors)], 'dry': [empty_at(r, 50.0 + i, f'S{i}') for i, r in enumerate((20.0, 22.0, 18.0))]}}})
+    row = fg.evaluate(BLUE, CFG, 'Benchy')['rows'][0]                                          # forecasts that fell up to 12 g short of 100 g
+    assert row['measured'] and row['reserve'] == pytest.approx(12 / 120 * (85.3 + gn.MARGIN_K))
+    running(monkeypatch, blue_reads(125)); row = fg.evaluate(BLUE, CFG, 'Benchy')['rows'][0]
+    assert row['status'] == 'TIGHT' and 'g to spare, and past prints put the figure up to 11 g out' in row['note']
+    gn.save({'SERIAL': {'C3': {'jobs': [scored(90.0, at=float(i)) for i in range(9)], 'dry': [empty_at(r, 50.0 + i, f'S{i}') for i, r in enumerate((20.0, 22.0, 18.0))]}}})
+    assert fg.evaluate(BLUE, CFG, 'Benchy')['rows'][0]['reserve'] == 5.0                     # forecasts that fell long: never below the floor
+    gn.save({'SERIAL': {'C3': {'jobs': [scored(101.0, at=float(i)) for i in range(9)]}, 'B1': {'dry': [empty_at(r, 50.0 + i, f'S{i}') for i, r in enumerate((20.0, 22.0, 18.0))]}}})
+    assert not fg.evaluate(BLUE, CFG, 'Benchy')['rows'][0]['measured']                         # readings at empty of another tray only: the fixed reserve
+
+def random_history_14(rnd, labels):
+    out = {}
+    for label in labels:
+        if rnd.random() < 0.3: continue
+        jobs = [dict(scored(n * rnd.uniform(0.85, 1.2) + rnd.uniform(-3, 3), n, at=float(i)), sound=rnd.random() < 0.9)
+                for i, n in enumerate(rnd.uniform(5, 300) for _ in range(rnd.randint(0, 14)))]
+        spool = lambda: {'id': str(rnd.randint(0, 5))}
+        out[label] = {'jobs': jobs, 'dry': [dict(empty_at(rnd.uniform(-5, 50), rnd.uniform(0, 20)), spool=spool()) for _ in range(rnd.randint(0, 4))],
+                      'weighs': [{'at': rnd.uniform(0, 20), 'reading': rnd.uniform(0, 400), 'weight': rnd.uniform(0, 400), 'spool': spool()} for _ in range(rnd.randint(0, 3))],
+                      'seen': [{'at': rnd.uniform(0, 20), 'reading': rnd.uniform(0, 100), 'spool': {'id': str(rnd.randint(0, 9))}} for _ in range(rnd.randint(0, 6))]}
+    return out
+
+def test_no_answer_is_looser_than_1_3_0s_until_the_reserve_is_measured():
+    """Over random histories: a tray is never counted above its reading, a need never below the slicer's, a measured
+    reserve never below its floor; and until the printer has earned the measured reserve, or with it off, no result is
+    looser than 1.3.0's own rules give."""
+    rnd = random.Random(1889)
+    for _ in range(600):
+        labels = rnd.sample(['A1', 'A2', 'B1', 'B2'], rnd.randint(1, 3))
+        trays = [dict(tray(label, rnd.choice([None, rnd.randint(0, 600)]), weight=rnd.choice([None, 1000])), spool=str(rnd.randint(0, 5))) for label in labels]
+        history, cfg = {'S': random_history_14(rnd, labels)}, dict(CFG, measured_reserve=rnd.random() < 0.7)
+        est = gn.estimates(history['S'])
+        earned = cfg['measured_reserve'] and est['printer']['scored'] >= gn.SCORED_MIN and est['printer']['df'] >= gn.SPREAD_DF
+        plain = fg.credit([dict(t) for t in trays], {})
+        old = fg.credit([dict(t) for t in trays], {}, gn.corrections('S', trays, history, plain_rules=True))
+        new = fg.credit([dict(t) for t in trays], {}, gn.corrections('S', trays, history, cfg))
+        for p, q in zip(plain, new): assert (p['grams'] is None and q['grams'] is None) or 0 <= q['grams'] <= p['grams']
+        need = fil(max(1.0, rnd.choice([rnd.uniform(1, 400), max(t['grams'] or 0 for t in trays) - rnd.uniform(0, 40)])))
+        for times in (1, 3):
+            a, b = fg.assess(need, old, cfg, times), fg.assess(need, new, cfg, times)
+            assert b.get('sliced') is None or b['need'] >= b['sliced'] == need['grams'] * times
+            if b.get('measured'): assert earned and b['reserve'] >= max(5.0, 0.02 * b['need']) - 1e-9
+            if not earned: assert fg.SEVERITY[b['status']] >= fg.SEVERITY[a['status']] and b['need'] >= a['need'] - 1e-9
+
+def test_a_tray_borrows_the_printers_rate_from_its_first_print_and_one_odd_print_is_clipped():
+    h = {'A1': {'jobs': [scored(107.0, at=float(i)) for i in range(3)]}}                     # reading fell 105 g for 99 g sliced from layer 1
+    w = sum(gn.DISCOUNT ** i for i in range(3))
+    assert gn.estimates(h)['blank']['rho'] == pytest.approx((105 * w + 50) / (99 * w + 50))   # a tray with no print yet: the printer's, drawn to 1 by 50 g
+    h['A2'] = {'jobs': [scored(101.0, at=5.0)]}                                                # one print of its own that fell true
+    est = gn.estimates(h)
+    assert est['printer']['k_rho'] == 1.0 and est['trays']['A2']['rho'] == pytest.approx((1.0 + est['printer']['rho']) / 2)
+    h['A1']['jobs'].append(scored(200.0, at=3.0))                                              # an odd print: the reading fell twice what was sliced
+    assert gn.estimates(h)['trays']['A1']['ratio'][-1][1] == gn.CLIP_FIXED[1]
+
+def test_old_prints_count_for_less_than_new_ones():
+    jobs = [scored(111.0, at=float(i)) for i in range(20)] + [scored(101.0, at=20.0 + i) for i in range(20)]   # a rate of 1.10, then of 1.00
+    assert gn.estimates({'A1': {'jobs': jobs}})['trays']['A1']['rho_own'][0] == pytest.approx(1.0264, abs=1e-3)   # equal weights: 1.05
+
+def test_a_learned_forecast_that_does_worse_is_set_aside_and_taken_back_only_when_it_no_longer_does():
+    worse = [{'n': 100.0, 'fell': 100.0, 'learned': 105.0}] * 5
+    better = [{'n': 100.0, 'fell': 103.0, 'learned': 103.0}]
+    assert gn.reference(worse) == (True, 5, 5)                                                # 5 of 5: p = 1/32
+    assert gn.reference(worse + better * 3) == (True, 5, 8)                                   # 5 of 8 is p = 0.36: still aside
+    assert gn.reference(worse + better * 5) == (False, 5, 10)                                 # 5 of 10: p = 0.62, back
+    h = {'C3': {'jobs': [dict(scored(101.0, at=float(i)), score={'n': 100.0, 'fell': 101.0, 'learned': 110.0, 'applied': 110.0}) for i in range(5)]
+                         + [scored(111.0, at=10.0 + i) for i in range(5)]}}
+    fix = gn.corrections('S', [tray('C3', 500)], {'S': h})['C3']                               # the rate the forecasts did worse with is not applied
+    assert 'rho' not in fix and gn.estimates(h)['trays']['C3']['aside']
+
+def test_a_change_in_a_trays_readings_restarts_what_is_learned_of_it(state, monkeypatch, capsys):
+    benchy(); rec, t = gn.Recorder('SERIAL'), 0.0
+    for k in range(12): t = run_job(rec, t=t + 100, task=str(k))
+    assert 'changes' not in gn.load()['SERIAL']['C3']
+    for k in range(3): t = run_job(rec, per_layer=3.6, t=t + 100, task=str(20 + k))          # serviced: the reading now falls 10 % less
+    h = gn.load()['SERIAL']['C3']
+    [change] = h['changes']
+    assert change['at'] == h['jobs'][12]['at'] and gn.estimates({'C3': h})['trays']['C3']['start'] == change['at']
+    assert len(gn.estimates({'C3': h})['trays']['C3']['rated']) == 3
+    monkeypatch.setattr(fg, 'bs_conf', lambda: (_ for _ in ()).throw(OSError('no Bambu Studio here')))
+    fg.main(['learned']); assert 'a change in its readings was noticed on' in capsys.readouterr().out
+
+def test_a_gauge_that_counts_too_little_is_counted_lower_even_with_a_reading_at_empty():
+    """Found by the simulation: a reading at empty from before says nothing of a spool fed since by a gauge that
+    counts 5 % short; W - (W - G) / rho stays a floor under a."""
+    h = {'C3': {'jobs': [scored(0.95 * 99 + 2, at=float(i)) for i in range(2)], 'dry': [empty_at(5.0)]}}
+    rho = gn.estimates(h)['trays']['C3']['rho']
+    fix = gn.corrections('S', [tray('C3', 500, weight=1000)], {'S': h})['C3']
+    assert rho < 0.99 and fix['credited'] == pytest.approx(1000 - 500 / rho) and 'reads more than the spool holds' in fix['evidence']
+
+def test_the_largest_of_a_few_readings_at_empty_does_not_measure_the_reserve():
+    """Found by the simulation: with n readings at empty the largest covers one more spool n / (n + 1) of the time, so
+    spools that differ ran dry after "enough". The reserve is measured only once readings repeat within a tray, which
+    gives their spread, and a is then a bound for one more spool."""
+    base = [scored(101.0, at=float(i)) for i in range(9)]
+    apart = {'A1': {'jobs': base, 'dry': [empty_at(20.0)]}, 'A2': {'dry': [empty_at(22.0)]}, 'A3': {'dry': [empty_at(18.0)]}}
+    est = gn.estimates(apart)
+    assert est['printer']['df'] == 0 and not gn.measured(est, est['trays']['A1'])
+    together = {'A1': {'jobs': base, 'dry': [empty_at(r, 50.0 + i, f'S{i}') for i, r in enumerate((20.0, 22.0, 18.0))]}}
+    t = gn.estimates(together)['trays']['A1']
+    assert gn.measured(gn.estimates(together), t) and t['a'] == pytest.approx(20 + gs.t_quantile(0.9, 2) * 2 * (4 / 3) ** 0.5) and t['a'] > 22
+
+def test_spools_seen_feeding_lower_outweigh_a_run_dry_once_there_are_enough(state):
+    """1.3.0 dropped a run-dry at once when a later spool fed lower; 1.4.0 weighs the two (Kaplan-Meier): a few keep
+    the run-dry, enough spools seen feeding lower outweigh it."""
+    benchy()
+    dry_at_7 = from_layer(6, lambda s, t: (dict(h2d(s['gcode_state'], s['layer_num'], 20.0 if s['layer_num'] == 6 else None), print_error=50348044, hms=[{'attr': 1, 'code': 2}]), t))
+    run_job(gn.Recorder('SERIAL'), fault=dry_at_7)
+    [dry] = gn.load()['SERIAL']['C3']['dry']
+    assert (dry['reading'], dry['print_error'], dry['hms']) == (20.0, 50348044, [{'attr': 1, 'code': 2}])
+    run_job(gn.Recorder('SERIAL'), before=50.0, lost=1.0, per_layer=4.0, t=time.mktime((2026, 11, 21, 12, 0, 0, 0, 0, -1)))        # a later spool in C3 still feeds at 49, 45, ... 13 g
+    h = gn.load()['SERIAL']['C3']
+    assert not gn.rules(h)['dry']['used'] and 'on 21 Nov a spool in it still gave filament at 13 g' in gn.contradicted(h['dry'][0], h)   # 1.3.0's rule
+    assert gn.estimates({'C3': h})['trays']['C3']['a'] == 20.0                                 # two observations: the run-dry stands
+    for i in range(10): gn.keep('SERIAL', 'C3', 'seen', {'at': 2e9 + i, 'reading': 8.0 + i, 'spool': {'id': f'LATER{i}'}, 'job': 'Benchy'})
+    h = gn.load()['SERIAL']['C3']
+    assert gn.estimates({'C3': h})['trays']['C3']['a'] is None and gn.corrections('SERIAL', [dict(tray('C3', 105, weight=1000), spool=TAG)], {'SERIAL': {'C3': h}}) == {}
+
+
+def test_a_tray_with_no_reading_at_empty_of_its_own_takes_the_printers():
+    est = gn.estimates({'A1': {'dry': [empty_at(20.0)]}, 'A2': {'jobs': [scored(101.0)]}, 'A3': {'dry': [empty_at(25.0, spool='S9')]}})
+    assert (est['trays']['A2']['a'], est['trays']['A2']['a_from']) == (25.0, 'printer') and est['blank']['a'] == 25.0
+    assert (est['trays']['A3']['a'], est['trays']['A1']['a']) == (25.0, 25.0)                # never less than the printer's while it has few of its own
+
+def test_one_odd_print_is_not_a_change_and_two_that_agree_are():
+    steady = [{'n': 100.0, 'fell': 100.0 + e, 'learned': 100.0} for e in (0, 1, -1, 0, 1, 0, -1, 0, 1, 0, 0, -1)]
+    odd = {'n': 100.0, 'fell': 110.0, 'learned': 100.0}
+    assert gn.change_found(steady + [odd]) is None and gn.change_found(steady + [odd] + steady[:2]) is None
+    assert gn.change_found(steady + [odd, odd]) == len(steady)
+
+def test_with_learning_off_nothing_learned_is_read(state, monkeypatch):
+    def never(*a, **k): raise AssertionError('learning was read')
+    for name in ('corrections', 'reserve_words', 'weigh_offer', 'estimates', 'load'): monkeypatch.setattr(gn, name, never)
+    running(monkeypatch, blue_reads(110)); res = fg.evaluate(BLUE, dict(CFG, learn=False), 'Benchy')
+    assert res['rows'][0]['status'] == 'TIGHT' and res['printer']['reserve'] is None and 'weigh' not in res and not res['rows'][0]['measured']

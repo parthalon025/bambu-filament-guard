@@ -39,7 +39,7 @@ file, a window or the output. Settings: the icon's menu, or config.json (see DEF
 import sys, os, re, json, ssl, time, glob, math, ctypes, hashlib, itertools, contextlib, zipfile, socket, struct, threading, queue, subprocess, argparse, tempfile
 
 APP = 'BambuFilamentGuard'
-VERSION = '1.3.0'
+VERSION = '1.4.0'
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_DIR = os.path.join(os.environ.get('LOCALAPPDATA') or HERE, APP)
 CONFIG = os.path.join(HERE, 'config.json')
@@ -65,9 +65,13 @@ DEFAULTS = {
     'printers': {},              # optional, per serial: {"ip": "192.168.1.50"} when the printer is not announced on this LAN
     # Learn from previous prints, per tray, how far its reading can be trusted (guard_learn.py): the guard follows a
     # printer it has checked while it prints (read only, as for entered amounts), and a check counts a tray with less
-    # where the tray's history shows its reading runs high. It can only make a check stricter. Off: nothing is followed
-    # or corrected for it; what was learned is kept.
+    # where the tray's history shows its reading runs high, and a print with more where it shows prints take more. Off:
+    # nothing is followed or corrected for it; what was learned is kept.
     'learn': True,
+    # With learning on: once the printer has enough scored prints and readings at empty, the reserve is measured from the
+    # guard's own past forecast errors instead of the fixed one above, and may be smaller (never below 5 g or 2 % of the
+    # need). Off: the fixed reserve, and no answer looser than learning without it.
+    'measured_reserve': True,
 }
 SEVERITY = {'OK': 0, 'UNKNOWN': 1, 'TIGHT': 2, 'SPLIT': 3, 'SHORT': 4, 'MISSING': 4, 'COLOUR': 4}
 BUSY = ('RUNNING', 'PAUSE', 'PREPARE')                    # a job is on the printer: it draws, or is about to draw, on the spools
@@ -591,10 +595,15 @@ def assess(fil, trays, cfg, times=1):
     group = [t for t in near if fil['fid'] and t['fid'] == fil['fid']] or near
     plainest = max(group, key=lambda t: t.get('plain', t['grams']) or 0)   # the fullest spool had nothing been learned: taken before the sort by learned grams, so a tie goes as it would
     group.sort(key=lambda t: -(t['grams'] or 0))
-    need = row['need'] = need + (group[0].get('pre') or 0) * times     # what the tray judged on was seen to lose before layer 1 (guard_learn)
+    row['sliced'] = need                                     # what the slicer says; the need below never falls under it
+    # What was learned of the trays (guard_learn): the largest rate and loss before layer 1 of the matching spools, as
+    # which of them the print draws on first cannot be read; so learning another tray first never lowers the need.
+    rho, pre = max(group, key=lambda t: t.get('rho') or 0), max(group, key=lambda t: t.get('pre') or 0)
+    need = row['need'] = need * max(1.0, rho.get('rho') or 1.0) + (pre.get('pre') or 0) * times
     row['trays'] = [{'label': t['label'], 'grams': t['grams'], 'colour': t['colour'], 'name': t['name'], 'type': t['type'], 'entered': t.get('entered'),
                      'stale': t.get('stale'), 'reads': t.get('reads'), 'reserved': t.get('reserved'), 'credited': t.get('credited'), 'evidence': t.get('evidence'),
-                     'pre': t.get('pre'), 'owes': t.get('owes'), 'refills': t.get('refills'), 'beyond': t.get('beyond')} for t in group]
+                     'pre': t.get('pre'), 'owes': t.get('owes'), 'refills': t.get('refills'), 'beyond': t.get('beyond'), 'reading': t.get('reading'),
+                     'spool': t.get('spool'), 'fid': t.get('fid'), 'weight': t.get('weight')} for t in group]
     known = [t['grams'] for t in group if t['grams'] is not None]
     unknown = [t['label'] for t in group if t['grams'] is None]
     if not known:
@@ -607,13 +616,20 @@ def assess(fil, trays, cfg, times=1):
     # The reserve is a share of the fullest spool's full weight. Learning may make another spool the fullest: the larger
     # of the two weights is taken, so that the reserve is never smaller for having learned (see credit).
     reserve = max(need * cfg['margin_pct'] / 100.0, max(group[0].get('weight') or 0, plainest.get('weight') or 0) * cfg['spool_reserve_pct'] / 100.0)
+    if group[0].get('margin') is not None:                   # measured from the guard's own past forecasts (guard_learn), within its floor
+        import guard_learn
+        floor_g, floor_share = guard_learn.RESERVE_FLOOR
+        reserve = max(floor_g, floor_share * need, group[0]['margin'] * (row['sliced'] + guard_learn.MARGIN_K))
+    row['reserve'], row['measured'] = reserve, group[0].get('margin') is not None
     if row['best'] >= need + reserve: row['status'] = 'OK'
-    elif row['best'] >= need: row['status'] = 'TIGHT'; row['note'] = f"{row['best'] - need:.0f} g to spare, and the AMS's figure can be {reserve:.0f} g out"
+    elif row['best'] >= need: row['status'] = 'TIGHT'; row['note'] = (f"{row['best'] - need:.0f} g to spare, and " + (
+        f"past prints put the figure up to {reserve:.0f} g out" if group[0].get('margin') is not None else f"the AMS's figure can be {reserve:.0f} g out"))
     elif row['total'] >= need: row['status'] = 'SPLIT'; row['note'] = 'only across these spools: AMS auto refill must be on'
     else: row['status'] = 'SHORT'; row['note'] = f"short by {need - row['total']:.0f} g"
     if unknown and row['status'] in ('SHORT', 'SPLIT', 'TIGHT'): row['note'] += f"; {', '.join(unknown)} holds an unknown amount more"
     said = [x for x in (tray_note(t) for t in group) if x]
-    if group[0].get('pre'): said.append(f"{group[0]['label']} {group[0]['pre_note']}, which is added to the need")
+    if rho.get('rho'): said.append(f"{rho['label']}: {rho['rho_note']}, which the need is counted by")
+    if pre.get('pre'): said.append(f"{pre['label']} {pre['pre_note']}, which is added to the need")
     if said: row['note'] += ('; ' if row['note'] else '') + '; '.join(said)
     entered = [t for t in group if t.get('entered')]         # a spool the printer cannot measure: the amount is the user's, less the prints since
     if entered:
@@ -673,8 +689,10 @@ def credit(trays, owed, learned=None, running=None, order=None):
         if not t.get('entered'): fix = (learned or {}).get(t['label'], {})
         elif not running or (t.get('accounted') == running and t.get('missed') != running): share = 0.0
         base = fix.get('credited', raw)
+        t['reading'] = raw
         if 'credited' in fix: t['credited'], t['evidence'] = base, fix['evidence']
-        if fix.get('pre'): t['pre'], t['pre_note'] = fix['pre'], fix['pre_note']
+        for key in ('pre', 'rho', 'margin'):
+            if fix.get(key) is not None: t[key], t[key + '_note'] = fix[key], fix[key + '_note']
         if share or base < raw: t['reads'] = raw
         if share: t['owes'], t['reserved'] = share, min(base, share)
         t['grams'] = t['left'] = base - t.get('reserved', 0.0)
@@ -756,16 +774,19 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         running = guard_ledger.job_key(status) if status.get('gcode_state') in BUSY else None
         if cfg.get('learn'):
             import guard_learn
-            credit(trays, owed, guard_learn.corrections(printer['serial'], trays), running)
+            credit(trays, owed, guard_learn.corrections(printer['serial'], trays, cfg=cfg), running)
         else: credit(trays, owed, running=running)
         rows = [assess(f, trays, cfg, times) for f in plate['filaments']]
         share_spools(rows, plate['filaments'], trays, cfg, times)
+        reserve = None
+        if cfg.get('learn'):
+            reserve = guard_learn.reserve_words(printer['serial'], cfg=cfg)
     except Exception as e:                   # a status the guard does not understand must end as a card that says so, not as a line in the log
         res['error'] = f"the {printer['model']}'s report could not be worked out ({e.__class__.__name__}: {e})"
         return res
     res['printer'] = {'model': printer['model'], 'serial': printer['serial'], 'state': status.get('gcode_state', '?'), 'job': status.get('subtask_name', ''),
                       'percent': status.get('mc_percent'), 'layer': status.get('layer_num'), 'layers': status.get('total_layer_num'), 'counted': counted,
-                      'beyond': {t['label']: t['beyond'] for t in trays if round(t.get('beyond') or 0)}}
+                      'beyond': {t['label']: t['beyond'] for t in trays if round(t.get('beyond') or 0)}, 'reserve': reserve}
     res['rows'] = rows
     res['worst'] = max((r['status'] for r in rows), key=SEVERITY.get, default='OK')
     return res
@@ -807,7 +828,7 @@ def report_text(res):
         busy = f"{job_text(p)}: " + ('the running print is counted: what it still needs is taken off its spools' if p.get('counted') else
                                                     "its spools are still being used, and the guard could not count that print: the amounts are the spools' amounts now")
         busy += beyond_text(p)
-    lines.append(f"  {p['model']}, {p['state']}" + busy)
+    lines.append(f"  {p['model']}, {p['state']}" + busy + (f"; {p['reserve']}" if p.get('reserve') else ''))
     for r in res['rows']:
         lines.append(f"  {r['slot']:>2} {r['type']:<8} {r['colour']} {r['name'][:22]:<22} needs {r['need']:7.1f} g   {tray_text(r):<10} has {has_text(r):<22} {STATUS_WORD[r['status']]}"
                      + (f"  ({r['note']})" if r['note'] else ''))
@@ -1352,7 +1373,7 @@ def main(argv=None):
         if a.forget is not None:
             try: print(guard_learn.forget(a.forget or None, a.printer, names), 'is forgotten'); return 0
             except ValueError as e: print(e); return 1
-        print('\n'.join(guard_learn.report(guard_learn.load(), names, cfg.get('learn')))); return 0
+        print('\n'.join(guard_learn.report(guard_learn.load(), names, cfg.get('learn'), cfg))); return 0
     if a.cmd == 'trays':
         import guard_ledger
         conf = bs_conf()
