@@ -4,6 +4,8 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-20
+
 ### Added
 
 - Counts the print that is running. From each spool the guard first takes off what the print on the printer still needs from it, from the layer the printer is on to the end, so the answer is for the moment the checked print could start. What it needs beyond its tray comes off the other loaded spools of that filament, as AMS auto refill would; when none holds it, the card warns that the running print needs more than is loaded. In batch printing the next plate is sliced while one prints; until now it was checked against spools the running print was still emptying.
@@ -42,5 +44,6 @@ The first public release.
 - A notification-area icon with the last result and the settings; `check`, `status`, `trays`, `selftest`, `install` and `uninstall` commands, with exit codes a script can gate on.
 - A packaged folder and zip with a Python of its own (`python build.py`), for a computer that has none.
 
-[Unreleased]: https://github.com/parthalon025/bambu-filament-guard/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/parthalon025/bambu-filament-guard/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/parthalon025/bambu-filament-guard/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/parthalon025/bambu-filament-guard/releases/tag/v1.2.0
