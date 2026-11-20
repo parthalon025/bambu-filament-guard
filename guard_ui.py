@@ -4,7 +4,7 @@ The card is a window of the guard that Bambu Studio's window owns: it is above t
 moves, minimises and closes with it, follows its dark or light mode, and never takes the keyboard. After a slice it
 sits in the bottom right corner of the preview, under the slicing result; when "Send print job" opens with a warning
 standing, it sits beside that dialog."""
-import os, time, ctypes, ctypes.wintypes as wt
+import os, ctypes, ctypes.wintypes as wt
 import filament_guard as fg
 
 # Colour tokens: every colour of the card and the icon is named here once, for Bambu Studio's dark and light mode, and used by name.
@@ -200,8 +200,8 @@ class Card:
         if brief:
             line = tk.Frame(w, bg=t['surface']); line.grid(row=2, column=0, sticky='ew'); line.columnconfigure(0, weight=1)
             p = res['printer']
-            text = ('Ignored for this project' if res.get('ignored') else f"{len(res['rows'])} filament{'s' if len(res['rows']) != 1 else ''} against the spools on the {p['model']}"
-                    + (', which is printing and still draws on them' if p['state'] in ('RUNNING', 'PREPARE', 'PAUSE') else ''))
+            busy = (', less what the print running there still needs' if p.get('counted') else ', which is printing a job the guard could not count') if p['state'] in fg.BUSY else ''
+            text = 'Ignored for this project' if res.get('ignored') else f"{len(res['rows'])} filament{'s' if len(res['rows']) != 1 else ''} against the spools on the {p['model']}" + busy
             self._label(line, text, 'muted', 9, row=0, column=0)
             self._button(line, 'Details', lambda: self.act('details', res), row=0, column=1, padx=(3 * SPACE, 0))
             w.after(int(brief * 1000), lambda: self.close() if self.win is w else None)
@@ -224,9 +224,14 @@ class Card:
                     self._label(table, text, c, 10, bold, row=2 * i, column=col, padx=(0, 3 * SPACE))
                 if r['note']: self._label(table, r['note'][:1].upper() + r['note'][1:], 'muted', 9, wrap=600, row=2 * i + 1, column=1, columnspan=5, pady=(0, SPACE // 2))
             p = res['printer']
-            busy = f" It is printing now ({p['job']}, {p['percent']} %): that job is still drawing from these spools." if p['state'] in ('RUNNING', 'PREPARE', 'PAUSE') else ''
+            if p['state'] in fg.BUSY and p.get('counted'):
+                spools = f"Spools as the {p['model']} reports them, less what the print running there ({p['job']}, {fg.job_stage(p)}) still needs; the amounts are the AMS's estimate."
+            else:
+                spools = f"Spools as the {p['model']} reports them now; the amounts are the AMS's estimate." + (
+                    f" It is printing now ({p['job']}, {fg.job_stage(p)}): that job is still drawing from these spools, and the guard could not count what it still needs."
+                    if p['state'] in fg.BUSY else '')
             ignored = ' Ignored for this project: it shows as one line until the finding changes.' if res.get('ignored') else ''
-            self._label(w, f"Spools as the {p['model']} reports them now; the amounts are the AMS's estimate." + busy + ignored, 'muted', 9, wrap=620, row=4, column=0, pady=(2 * SPACE, 0))
+            self._label(w, spools + ignored, 'muted', 9, wrap=620, row=4, column=0, pady=(2 * SPACE, 0))
         bar = tk.Frame(w, bg=t['surface']); bar.grid(row=5, column=0, sticky='w', pady=(2 * SPACE, 0))
         again = self._button(bar, 'Check again', None, row=0, column=0, padx=(0, SPACE))
         again.configure(command=lambda: (again.configure(text='Checking…', state='disabled'), self.act('recheck', res)))
