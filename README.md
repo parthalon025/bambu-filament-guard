@@ -1,6 +1,48 @@
 # Bambu Filament Guard
 
-Warns, for every filament of a print, when the spools on the printer do not hold enough of it. Works for any project sliced in Bambu Studio; nothing is set in the project.
+Warns, for every filament of a print sliced in Bambu Studio, when the spools on the printer do not hold enough of it.
+
+[![tests](https://github.com/parthalon025/bambu-filament-guard/actions/workflows/tests.yml/badge.svg)](https://github.com/parthalon025/bambu-filament-guard/actions/workflows/tests.yml)
+[![latest release](https://img.shields.io/github/v/release/parthalon025/bambu-filament-guard)](https://github.com/parthalon025/bambu-filament-guard/releases/latest)
+[![licence: MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
+![platform: Windows](https://img.shields.io/badge/platform-Windows-blue)
+![Python 3.13](https://img.shields.io/badge/python-3.13-blue)
+
+![The guard's "Filament check" card: "Not enough filament for this print", plate 1 on a Bambu Lab H2D. Five filaments, each with what it needs, its spool, what that spool has and the result: blue and red not enough, green tight, white and grey enough. Under each row a note gives the spool's reading and what the print running on the printer still needs of it.](docs/card-warning.png)
+
+A plate checked while the same plate prints: after the running print, two of its filaments would not have enough, and one would be tight. The figures in the pictures are invented, after the print of 2026-11-19 described under "The running print".
+
+- Checks every filament of every plate you slice, in any project, against what the spools on the printer hold, purge and prime tower included: as soon as the slice is done, and again for all the project's sliced plates when "Send print job" opens.
+- Counts the print that is running, when it was sliced on this computer: a plate sliced while another prints is checked against what the spools will hold when it can start.
+- Learns, per tray, how far the AMS's reading can be trusted, from the prints it follows. It can only make a check stricter.
+- Read-only, on your LAN: it reads the printer's status and the files Bambu Studio writes while it slices, and sets nothing in the project.
+
+## Does it work with my printer?
+
+| Printer | Sliced files | On the printer |
+|---|---|---|
+| H2D | Tried | Tried, with an AMS (firmware 01.04.20.00): prints run with the guard |
+| A1 mini | Tried | Answered a status request; it had no AMS, so no spool amounts were seen |
+| A1, P1P, P1S, X1, X1 Carbon, X1E, P2S, H2S, H2D Pro, H2C, A2L, X2D, H3C | Tried | Not tried |
+
+Sliced files: for every model above, the grams per layer the guard counts from Bambu Studio 02.09.01.70 slices add up to Bambu Studio's own totals, each filament to within 0.005 g (see "The running print"). Reading the spools has been tried on the H2D only; on the other models it has not been tried on a machine. A report from one, whether it works or not, is welcome: [Printer report](https://github.com/parthalon025/bambu-filament-guard/issues/new?template=printer_report.yml).
+
+On any of them the guard needs Windows 10 or 11, Bambu Studio (not OrcaSlicer), and the printer reachable on the local network with its LAN access code in Bambu Studio. It reads the amounts of spools the printer can measure: Bambu spools with an RFID tag, in an AMS. For any other spool the amount is entered by hand (see "Spools without a reading"). Which nozzle an AMS feeds is decoded for the H2D; where that cannot be read, a spool counts for either nozzle.
+
+## Install
+
+Without Python: download `BambuFilamentGuard-<version>.zip` from the repository's [Releases](https://github.com/parthalon025/bambu-filament-guard/releases), unzip it where it can stay, and open `Install.cmd`. It runs from that folder; `Uninstall.cmd` removes it. `python build.py` makes the same zip in `dist\`.
+
+From source, with Python 3.13 or later:
+
+```powershell
+pip install -r requirements.txt       # paho-mqtt, pystray and Pillow
+python filament_guard.py install      # start automatically, and now
+```
+
+The guard starts with Windows and waits. Its icon, a spool, is in the notification area while Bambu Studio runs.
+
+## How it works
 
 Bambu Studio has no plugin interface (v02.09.01.70: the `plugins` folder holds its network libraries only), so the guard runs beside it:
 
@@ -12,21 +54,17 @@ Bambu Studio has no plugin interface (v02.09.01.70: the `plugins` folder holds i
 
 The card belongs to Bambu Studio's window: it is above that window and no other, moves and minimises with it, follows its dark or light mode, and never takes the keyboard. It is still drawn by the guard, which must be running.
 
-## Install
-
-With Python 3 (`pip install paho-mqtt pystray pillow`):
-
-```powershell
-python filament_guard.py install      # start automatically, and now
-```
-
-Without Python: download `BambuFilamentGuard-<version>.zip` from the repository's [Releases](https://github.com/parthalon025/bambu-filament-guard/releases), unzip it where it can stay, and open `Install.cmd`. It runs from that folder; `Uninstall.cmd` removes it. `python build.py` makes the same zip in `dist\`.
-
-The guard starts with Windows and waits. Its icon, a spool, is in the notification area while Bambu Studio runs.
-
 ## The card
 
-A check takes a second or three, because the guard asks the printer each time. While one runs that you are waiting for (a plate you just sliced, or one you asked for from the icon) the card says so at once in one line, "Checking the spools on the Bambu Lab H2D…", and the answer takes its place. For a new slice the line does not cover a full card that is still open; asked for from the icon, it takes the place of any card, as its answer will. Beside "Send print job" nothing shows until there is a warning.
+With enough of everything the card is one line:
+
+![The one-line card: "Enough filament for this print", 5 filaments against the spools on the Bambu Lab H2D, with a Details button.](docs/card-enough.png)
+
+A check takes a second or three, because the guard asks the printer each time. While one runs that you are waiting for (a plate you just sliced, or one you asked for from the icon) the card says so at once in one line, "Checking the spools on the Bambu Lab H2D…", and the answer takes its place.
+
+![The one-line card while a check runs: "Checking the spools on the Bambu Lab H2D…".](docs/card-checking.png)
+
+For a new slice the line does not cover a full card that is still open; asked for from the icon, it takes the place of any card, as its answer will. Beside "Send print job" nothing shows until there is a warning.
 
 When the guard starts, the first time Bambu Studio runs it shows one line, "Bambu Filament Guard 1.3.0 is watching for sliced plates", which goes away by itself; after `Install.cmd` the install card says it instead. A one-line card that comes while Bambu Studio is minimised waits for its window, and its seconds count from when it shows. With "One line when there is enough" turned off, quiet was asked for: a new slice shows no "Checking…" line, and the guard no start line.
 
@@ -135,7 +173,7 @@ python filament_guard.py uninstall    # remove the shortcut and stop
 - Which nozzle an AMS feeds is read as on the H2D (firmware 01.04.20.00). Where that cannot be read, a spool counts for either nozzle.
 - How a job names an external spool in its tray mapping has not been seen on a print; a tray the guard cannot name makes the entered amounts out of date, never wrong.
 - Learning learns nothing from a print not sliced on this computer. From a print it followed only from its middle (the guard started during it) it learns a run-dry but no rate and no loss before the first layer, which need the print's start. A spool moved to another tray starts again there: what is learned belongs to the tray, not the spool.
-- Learning takes the readings the printer reports to follow the spool between the guard's looks, 3 seconds apart. Not yet seen on a print, and recorded so that the history will show them: how often a tray's reading changes during a print (a reading that lags shows as a low rate, and a rate below 0.5 is not used); what a tray looks like in the status when its spool runs out (counted as a run-dry only when the tray is reported without a spool in two looks in a row; a tray still reported, reading 0 g, makes the print's record unsound instead, with the reading before it); whether the AMS, refilling from a second spool, changes the job's tray mapping (the record then says at which layer, and is not used); and whether the reading settles after the print ends (both the first reading at the end and the one a minute later are kept).
+- Learning takes the readings the printer reports to follow the spool between the guard's looks, 3 seconds apart. Not yet seen on a print, and recorded so that the history will show them: how often a tray's reading changes during a print (a reading that lags shows as a low rate, and a rate below 0.9 is not used); what a tray looks like in the status when its spool runs out (counted as a run-dry only when the tray is reported without a spool in two looks in a row; a tray still reported, reading 0 g, makes the print's record unsound instead, with the reading before it); whether the AMS, refilling from a second spool, changes the job's tray mapping (the record then says at which layer, and is not used); and whether the reading settles after the print ends (both the first reading at the end and the one a minute later are kept).
 - The packaged guard is a folder, not one program. A single self-installing `.exe` was built first; Windows Defender removed it at its first start as `Trojan:Win32/Bearfoos.A!ml`, as it does with many unsigned packed programs that add themselves to Startup. The folder runs on python.org's signed `pythonw.exe` and is left alone.
 
 ## Files
@@ -148,9 +186,22 @@ python filament_guard.py uninstall    # remove the shortcut and stop
 | `guard_learn.py` | learning from previous prints, per tray: the record, the three numbers, what they change, `learned` |
 | `build.py` | makes the packaged folder and its zip |
 | `test_filament_guard.py` | `python -m pytest test_filament_guard.py` (needs no printer and no Bambu Studio) |
+| `docs/` | the pictures in this README |
 
 Log and state: `%LOCALAPPDATA%\BambuFilamentGuard\`, with the grams per layer of the last 30 slices in `profiles\` and what was learned in `learned.json`. The LAN access code is read from Bambu Studio's configuration each time and goes to the printer only.
 
+## Privacy and security
+
+The guard makes no internet connection, and it sends the printer no command that changes it: no print, pause, stop, temperature or motion command. What it reads, sends and keeps, and how to report a vulnerability, is in [SECURITY.md](SECURITY.md).
+
+## Contributing
+
+How to run the tests, the conventions a change follows and what a useful report holds are in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Changes
+
+What each version changed is in [CHANGELOG.md](CHANGELOG.md).
+
 ## Licence
 
-MIT: see `LICENSE`. The packaged zip also holds Python, Tcl/Tk, paho-mqtt, pystray and Pillow, each under its own licence. Those are in the zip: `LICENSE.txt` (Python), `tcl\tk8.6\license.terms` (Tcl/Tk) and the `dist-info` folders in `Lib\site-packages`.
+MIT: see [LICENSE](LICENSE). The packaged zip also holds Python, Tcl/Tk, paho-mqtt, pystray and Pillow, each under its own licence. Those are in the zip: `LICENSE.txt` (Python), `tcl\tk8.6\license.terms` (Tcl/Tk) and the `dist-info` folders in `Lib\site-packages`.
