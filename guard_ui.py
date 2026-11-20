@@ -53,10 +53,6 @@ def studio_windows(windows=None):
     """{process id: handle of the main window} of the Bambu Studio copies that are running."""
     return {pid: h for h, pid, cls, title in (windows or top_windows()) if cls.startswith('wxWindow') and title.endswith('BambuStudio')}
 
-def studio_on_screen():
-    """The process id of a Bambu Studio copy whose main window is on screen (shown, not minimised), or None."""
-    return next((pid for pid, h in studio_windows().items() if not u32.IsIconic(wt.HWND(h))), None)
-
 def studio_window(pid=None):
     """The handle of Bambu Studio's main window (of the copy with this process id, when it has one), or None."""
     found = studio_windows()
@@ -118,6 +114,7 @@ class Card:
         self.root, self.win, self.act, self.on_close = root, None, act or (lambda *a: None), on_close
         self.owner, self.beside, self.spot, self.held = None, None, None, False
         self.one_line = False                                                # the card open is one line, which a new line may replace
+        self.closes_after = 0                                                # seconds the open card stays once it is on screen; 0 = until closed
 
     def is_open(self):
         return bool(self.win and self.win.winfo_exists())
@@ -152,7 +149,7 @@ class Card:
         if self.is_open(): self.win.destroy()
         t = self.t = theme()
         self.beside = beside if visible(beside) else None
-        self.owner, self.spot, self.held = self.beside or studio_window(pid), None, False
+        self.owner, self.spot, self.held, self.closes_after = self.beside or studio_window(pid), None, False, 0
         if self.owner and u32.IsIconic(wt.HWND(self.owner)) and not hold: self.owner = None      # Bambu Studio is minimised and this card was asked for: a window of its own
         w = self.win = tk.Toplevel(self.root, bg=t['surface'], padx=3 * SPACE, pady=2 * SPACE, highlightthickness=1, highlightbackground=t['border'])
         w.withdraw(); w.title('Bambu Filament Guard'); w.protocol('WM_DELETE_WINDOW', self.close)
@@ -180,7 +177,7 @@ class Card:
         """Puts the finished card on the screen: inside the window that owns it, without activating it."""
         w = self.win; w.update_idletasks()
         if not self.owner:
-            w.geometry(f'+{w.winfo_screenwidth() - w.winfo_reqwidth() - 48}+72'); w.deiconify(); return
+            w.geometry(f'+{w.winfo_screenwidth() - w.winfo_reqwidth() - 48}+72'); w.deiconify(); self._shown(); return
         if u32.IsIconic(wt.HWND(self.owner)): self.held = True; return     # minimised, and the card can wait (hold): shown when the window is back
         self._attach()
 
@@ -193,6 +190,13 @@ class Card:
         setlong(hwnd, -8, self.owner)                                                    # GWLP_HWNDPARENT: Bambu Studio's window owns the card
         setlong(hwnd, -20, (getlong(hwnd, -20) or 0) | 0x08000000 | 0x00000080)          # GWL_EXSTYLE: never activated, no taskbar button
         u32.SetWindowPos(hwnd, wt.HWND(0), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)         # to the top of its owner's windows: no move, no size, no activation
+        self._shown()
+
+    def _shown(self):
+        """The card is on screen. One that closes itself counts its seconds from now: from when it was made, a card held
+        while Bambu Studio was minimised could go before anyone saw it."""
+        seconds, self.closes_after, w = self.closes_after, 0, self.win
+        if seconds: w.after(int(seconds * 1000), lambda: self.close() if self.win is w else None)
 
     # -- the cards
     def show(self, res, brief=0, beside=None, hold=False):
@@ -210,7 +214,7 @@ class Card:
             text = 'Ignored for this project' if res.get('ignored') else f"{len(res['rows'])} filament{'s' if len(res['rows']) != 1 else ''} against the spools on the {p['model']}" + busy
             self._label(line, text, 'muted', 9, row=0, column=0)
             self._button(line, 'Details', lambda: self.act('details', res), row=0, column=1, padx=(3 * SPACE, 0))
-            w.after(int(brief * 1000), lambda: self.close() if self.win is w else None)
+            self.closes_after = brief
             return self._place()
         if res['error']:
             self._label(w, res['error'][:1].upper() + res['error'][1:] + '.', wrap=560, row=2, column=0)
@@ -266,7 +270,7 @@ class Card:
         after them; 0 = it stays until something replaces or closes it. Returns its window."""
         w = self._open(pid, None, hold); self.one_line = True
         self._label(w, text, tone, 12, True, row=1, column=0)
-        if seconds: w.after(int(seconds * 1000), lambda: self.close() if self.win is w else None)
+        self.closes_after = seconds
         self._place()
         return w
 

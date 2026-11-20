@@ -10,7 +10,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - Keeps, for each plate it sees sliced, the grams of each filament every layer takes, counted the way Bambu Studio counts its totals: the moves along X or Y that extrude, and the purge at each filament change (moves in `FLUSH` blocks, or `;VG1` comments in `VFLUSH` blocks), of which as much as the nozzle holds counts for the filament pushed out. Measured on Bambu Studio 02.09.01.70 slices for the A1, P1, X1, H2, P2S, A2L, X2D and H3C families: every filament within 0.005 g of Bambu Studio's total. A slice that does not add up gets no profile, and the log says by how much. The last 30 are kept in `%LOCALAPPDATA%\BambuFilamentGuard\profiles\`, the purge apart from the rest.
 - The card, the text report and `--json` say whether the running print was counted, and a filament's note names the spool's reading and what the running print still needs of it.
 - A line that says a check is under way ("Checking the spools on the Bambu Lab H2D…") as soon as one starts that you are waiting for: a new slice, or a check from the icon. The answer takes its place.
-- A line when the guard starts, the first time Bambu Studio is on screen: "Bambu Filament Guard 1.3.0 is watching for sliced plates".
+- A line when the guard starts, the first time Bambu Studio runs: "Bambu Filament Guard 1.3.0 is watching for sliced plates". After `Install.cmd` its own card says it instead.
 
 ### Changed
 
@@ -22,6 +22,8 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - A click on the icon while its check was running started another check, five in one second in one log; now it shows the "Checking…" line and starts nothing.
 - A plate whose check failed ended that round of the watcher, and plates sliced with it went unchecked.
 - The printer's job showed "None %" when the printer gave no percentage.
+- At "Send print job", one sliced plate of the project that could not be read stopped the check of all of them; it is now left out, and logged.
+- A one-line card that came while Bambu Studio was minimised counted its seconds from then, and could go before it was ever seen; it now counts from when it shows.
 
 ## [1.2.0] - 2026-11-19
 

@@ -490,13 +490,50 @@ def test_the_checking_line_never_stays(state, tmp_path, monkeypatch):
 
 def test_the_guard_says_once_that_it_is_running(state, monkeypatch):
     import guard_ui
-    on_screen = [None]; monkeypatch.setattr(guard_ui, 'studio_on_screen', lambda: on_screen[0])
+    windows = {}; monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: windows)
     guard = guard_with(); guard.greet()
-    assert guard.card.shown == []                                                          # Bambu Studio not open, or minimised: later
-    on_screen[0] = 1234; guard.greet(); guard.card.close(); guard.greet()
-    assert guard.card.shown == [('line', f'Bambu Filament Guard {fg.VERSION} is watching for sliced plates', True), ('close',)]
+    assert guard.card.shown == []                                                          # Bambu Studio not open: later
+    windows[1234] = 99; guard.greet(); guard.card.close(); guard.greet()
+    assert guard.card.shown == [('line', f'Bambu Filament Guard {fg.VERSION} is watching for sliced plates', True), ('close',)]   # held while minimised
     quiet = guard_with(dict(CFG, ok_seconds=0)); quiet.greet()
     assert quiet.card.shown == []
+
+def test_setup_starts_the_guard_without_its_start_line(monkeypatch):
+    """Setup shows a card of its own in the corner where the start line would stand."""
+    started = []
+    monkeypatch.setattr(fg, 'is_running', lambda: False); monkeypatch.setattr(fg.subprocess, 'Popen', lambda cmd, **how: started.append(cmd[2:]))
+    fg.start(); fg.start(start_line=False)
+    assert started == [['watch'], ['watch', '--no-start-line']]
+
+def test_a_card_held_while_bambu_studio_is_minimised_counts_its_seconds_from_when_it_shows(monkeypatch):
+    import guard_ui
+    class Win:
+        def __init__(self): self.timers = []
+        def after(self, ms, then): self.timers.append(ms)
+        def update_idletasks(self): pass
+        def winfo_exists(self): return True
+    minimised = [True]
+    monkeypatch.setattr(guard_ui, 'u32', type('User32', (), {'IsIconic': staticmethod(lambda hwnd: minimised[0])})())
+    monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True)
+    def opened(card, pid=None, beside=None, hold=False):
+        card.win, card.owner, card.held, card.closes_after = Win(), 1234, False, 0; return card.win
+    monkeypatch.setattr(guard_ui.Card, '_open', opened); monkeypatch.setattr(guard_ui.Card, '_label', lambda *a, **k: None)
+    monkeypatch.setattr(guard_ui.Card, '_attach', lambda card: card._shown())             # on screen: no window here to move
+    card = guard_ui.Card(None)
+    win = card.line(f'Bambu Filament Guard {fg.VERSION} is watching for sliced plates', 'ok', 8, hold=True)
+    card.follow()
+    assert card.held and win.timers == []                                                  # held, and not counting
+    minimised[0] = False; card.follow(); card._shown()
+    assert not card.held and win.timers == [8000]                                          # shown: its 8 seconds start, once
+
+def test_a_plate_that_cannot_be_read_at_send_print_job_leaves_the_others_checked(state, tmp_path, monkeypatch):
+    import guard_ui
+    good = slice_file(tmp_path, gcode()); bad = good.with_name('.1.1.gcode'); bad.write_text(gcode(used=None))   # its totals cannot be placed
+    monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: str(bad)); monkeypatch.setattr(fg, 'temp_gcodes', lambda: [str(bad), str(good)])
+    monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True); running(monkeypatch, ENOUGH)
+    guard = guard_with(); guard.check_newest(1, beside=4321); guard.todo.get(timeout=5)()
+    log = (state / 'guard.log').read_text()
+    assert guard.last['plate_no'] == 1 and log.count('at "Send print job"') == 1 and f'cannot read the slice {bad}: ValueError' in log
 
 def test_a_plate_that_fails_does_not_cost_the_others_their_check(state, monkeypatch):
     guard, taken = guard_with(), []

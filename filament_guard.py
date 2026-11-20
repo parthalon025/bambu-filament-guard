@@ -14,7 +14,7 @@ short. The card comes back beside the "Send print job" dialog while a warning st
                                        Exit code 0 enough, 1 tight / unknown, 2 short, 3 not checked.
   filament_guard.py trays              the spools every known printer reports
   filament_guard.py selftest           can the guard read this Bambu Studio and reach the printers? Exit code 1 = no
-  filament_guard.py watch              the guard itself (what the shortcut runs)
+  filament_guard.py watch              the guard itself (what the shortcut runs; --no-start-line: setup's card says it)
   filament_guard.py setup              install, and say so on a card (what Install.cmd of the packaged guard runs)
 Run with "python" in front. build.py packs the guard with a Python of its own, for a computer that has none.
 
@@ -872,7 +872,10 @@ class Guard:
         def work():
             seen, out = {}, []
             for path in paths:
-                with open(path, 'rb') as f: plate = parse_plate(read_head(f))
+                try:
+                    with open(path, 'rb') as f: plate = parse_plate(read_head(f))
+                except (OSError, ValueError) as e:                       # one plate that cannot be read does not cost the others their check
+                    log(f'cannot read the slice {path}: {e.__class__.__name__}: {e}'); continue
                 if not plate or not plate['filaments']: continue
                 res = evaluate(plate, self.cfg, project_title(path), seen=seen); res['pid'], res['plate_no'] = studio_pid(path), plate_number(path)
                 log(('at "Send print job": ' if beside else 'checked on request: ') + report_text(res).replace('\n', ' | ')); out.append(res)
@@ -898,10 +901,11 @@ class Guard:
         if shown is not None and self.card.win is shown and self.card.is_open(): self.card.close()
 
     def greet(self):
-        """Once in a run of the guard, the first time Bambu Studio is on screen (not minimised): a line saying that the
-        guard is running, which goes by itself. Not when one line for "enough" is turned off: quiet was asked for."""
+        """Once in a run of the guard, the first time Bambu Studio runs: a line saying that the guard is running, which
+        goes by itself (held, like every such line, while Bambu Studio is minimised). Not when one line for "enough" is
+        turned off: quiet was asked for. greeted is set from the start when setup started the guard: its card says so."""
         import guard_ui
-        pid = None if self.greeted else guard_ui.studio_on_screen()
+        pid = None if self.greeted else next(iter(guard_ui.studio_windows()), None)
         if pid is None: return
         self.greeted = True
         if self.cfg['ok_seconds'] and not self.card.is_open():
@@ -1021,7 +1025,7 @@ class Guard:
         for job in self.jobs.values(): job.stopped.set()
 
 
-def watch():
+def watch(start_line=True):
     import ctypes, guard_ui
     k32 = ctypes.WinDLL('kernel32', use_last_error=True); k32.CreateMutexW.restype = ctypes.c_void_p
     handle = k32.CreateMutexW(None, False, MUTEX)
@@ -1030,7 +1034,7 @@ def watch():
     stop_flag = os.path.join(STATE_DIR, 'stop')
     if os.path.exists(stop_flag): os.remove(stop_flag)
     with open(os.path.join(STATE_DIR, 'guard.pid'), 'w') as f: f.write(str(os.getpid()))
-    guard = Guard(load_config(), guard_ui.make_root())
+    guard = Guard(load_config(), guard_ui.make_root()); guard.greeted = not start_line
     log(f'watching for sliced plates (pid {os.getpid()}, guard {VERSION}, Bambu Studio {studio_version() or "not found"})')
     threading.Thread(target=guard.watch_slices, daemon=True).start()
     guard.loop()
@@ -1099,9 +1103,9 @@ def own_command(*args):
     """The command line that runs this guard without a console: pythonw (the one beside the running Python) and this script."""
     return [pythonw(), os.path.abspath(__file__), *args]
 
-def start():
+def start(start_line=True):
     if is_running(): return
-    subprocess.Popen(own_command('watch'), cwd=HERE, close_fds=True, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+    subprocess.Popen(own_command('watch', *([] if start_line else ['--no-start-line'])), cwd=HERE, close_fds=True, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
 def make_shortcut():
     """The Startup shortcut. The guard starts with Windows and waits; its icon shows while Bambu Studio runs."""
@@ -1112,8 +1116,9 @@ def make_shortcut():
                     "$s.WorkingDirectory=$env:FG_DIR; $s.Description='Warns when the loaded spools do not hold enough filament for a sliced print'; $s.Save()"],
                    env=env, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
 
-def install():
-    """Makes the guard start automatically, from where it is, and starts it."""
+def install(start_line=True):
+    """Makes the guard start automatically, from where it is, and starts it. start_line: the guard says so on a card of
+    its own, once Bambu Studio is open; setup, which says it on its card, turns that off."""
     make_shortcut()
     print('starts automatically:', STARTUP_LNK)
     try:
@@ -1123,7 +1128,7 @@ def install():
             print(f"  {p['model']}: " + (ip or 'not announcing itself on this network now (it is looked for again when a plate is sliced)'))
     except (OSError, ValueError): print("  Bambu Studio's configuration was not found: the guard waits for it")
     if stop(): time.sleep(0.5)                                                   # a running copy may be an older version
-    start(); time.sleep(1.5)
+    start(start_line); time.sleep(1.5)
     print('watcher running' if is_running() else 'watcher did NOT start: run it with "watch" to see why')
 
 def uninstall():
@@ -1135,7 +1140,7 @@ def setup():
     """Install, and say so on a card: for someone who started the packaged guard with a double click and sees no console."""
     import guard_ui
     if sys.stdout is None: sys.stdout = sys.stderr = open(os.devnull, 'w')       # pythonw has no console to print to
-    install()
+    install(start_line=False)                                                    # this card says it, in the same corner as the guard's start line would
     root = guard_ui.make_root(); card = guard_ui.Card(root, on_close=root.quit)
     card.note('Bambu Filament Guard is installed' if is_running() else 'Bambu Filament Guard did not start', [
         (True, "It checks every plate you slice in Bambu Studio and shows the answer in Bambu Studio's window."),
@@ -1151,9 +1156,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0]); sub = ap.add_subparsers(dest='cmd')
     c = sub.add_parser('check'); c.add_argument('file', nargs='?'); c.add_argument('--times', type=int, default=1)
     c.add_argument('--popup', action='store_true'); c.add_argument('--json', action='store_true')
-    for name in ('watch', 'install', 'uninstall', 'setup', 'status', 'stop', 'trays', 'selftest'): sub.add_parser(name)
+    sub.add_parser('watch').add_argument('--no-start-line', action='store_true')
+    for name in ('install', 'uninstall', 'setup', 'status', 'stop', 'trays', 'selftest'): sub.add_parser(name)
     a = ap.parse_args(argv)
-    if a.cmd == 'watch': return watch()
+    if a.cmd == 'watch': return watch(start_line=not a.no_start_line)
     if a.cmd == 'install': return install()
     if a.cmd == 'uninstall': return uninstall()
     if a.cmd == 'setup': return setup()
