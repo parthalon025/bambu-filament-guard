@@ -13,7 +13,11 @@ print:
     another job than the last one counted, every entry of that printer is out of date: more than one print may
     have come and gone.
 Not seen: a print started and finished while the printer was not followed, when the printer names it exactly like
-the print before it (LAN-only mode gives every job the id 0)."""
+the print before it (LAN-only mode gives every job the id 0).
+
+For the check of the next print, owed() tells what the job the printer runs still needs from each tray: the per-layer
+profile of the slice it was made from, from the printer's layer to the end. filament_guard takes that off the trays the
+printer measures, and not off an entered amount, which had the whole job taken off when the job started."""
 import threading, time
 import filament_guard as fg
 
@@ -89,23 +93,48 @@ def match_slice(name, layers, slices):
         return s
     return None
 
-def draws(status, slices, all_labels):
-    """({tray label: grams} the job the printer shows draws, the trays whose draw cannot be told)."""
+def paired(status, slices, all_labels):
+    """The job the printer shows, filament by filament: (the slice it was made from, [(tray label, filament of that
+    slice)], the trays whose draw cannot be told). The pairs are [] when they cannot be told, and the trays in doubt are
+    then every loaded tray (the mapping cannot be read) or the mapped ones (the slice or a filament's tray is unknown)."""
     labels = mapped_labels(status)
-    if labels is None and len(all_labels) != 1: return {}, set(all_labels)   # no mapping and several trays: any of them may be in use
-    if labels is not None and None in labels: return {}, set(all_labels)     # a tray that cannot be named: none is certain
+    if labels is None and len(all_labels) != 1: return None, [], set(all_labels)   # no mapping and several trays: any of them may be in use
+    if labels is not None and None in labels: return None, [], set(all_labels)     # a tray that cannot be named: none is certain
     used = set(all_labels) if labels is None else {l for l in labels if l}
     s = match_slice(status.get('subtask_name') or '', status.get('total_layer_num'), slices)
-    if not s: return {}, used                                                # not sliced on this computer: the trays are known, the grams are not
+    if not s: return None, [], used                                                # not sliced on this computer: the trays are known, the grams are not
     fils = s['filaments']
-    if labels is None: return {all_labels[0]: sum(f['grams'] for f in fils)}, set()
-    if all(labels) and len(labels) == len(fils): pairs = list(zip(labels, fils))                     # one entry per filament in use
+    if labels is None: pairs = [(all_labels[0], f) for f in fils]
+    elif all(labels) and len(labels) == len(fils): pairs = list(zip(labels, fils))                     # one entry per filament in use
     else: pairs = [(labels[f['slot'] - 1] if 0 < f['slot'] <= len(labels) else '', f) for f in fils]  # one entry per filament of the project
+    if not all(label for label, _ in pairs): return s, [], used                     # a filament without a tray: the mapping is not read right
+    return s, pairs, set()
+
+def draws(status, slices, all_labels):
+    """({tray label: grams} the job the printer shows draws, the trays whose draw cannot be told)."""
+    _, pairs, unknown = paired(status, slices, all_labels)
     drawn = {}
-    for label, f in pairs:
-        if not label: return {}, used                                        # a filament without a tray: the mapping is not read right
-        drawn[label] = drawn.get(label, 0.0) + f['grams']
-    return drawn, set()
+    for label, f in pairs: drawn[label] = drawn.get(label, 0.0) + f['grams']
+    return drawn, unknown
+
+def owed(status, slices):
+    """({tray label: grams the job the printer shows still needs from it}, counted). counted: None when no job is on
+    the printer; False when one is and what it still needs cannot be told (not sliced on this computer while the guard
+    watched, no profile, a tray that cannot be named), and then nothing is guessed; True with the grams. Still needed is
+    the slice's per-layer profile from the printer's layer to the end, that layer counted whole: a figure too low loses
+    a print, one too high only warns early. In PREPARE, or without a layer, all of it: a printer that prepares a job may
+    still show the last layer of the job before."""
+    if status.get('gcode_state') not in fg.BUSY: return {}, None
+    trays, _ = fg.trays_of(status)
+    s, pairs, _ = paired(status, slices, [t['label'] for t in trays])
+    profile = fg.load_profile(s) if pairs else None
+    if not profile or any(f['slot'] not in profile for _, f in pairs): return {}, False
+    try: layer = int(status.get('layer_num'))
+    except (TypeError, ValueError): layer = 0
+    start = layer if status['gcode_state'] != 'PREPARE' and layer >= 1 else 0
+    out = {}
+    for label, f in pairs: out[label] = out.get(label, 0.0) + sum(profile[f['slot']][start:])
+    return out, True
 
 def count(serial, status):
     """Takes the job the printer shows off the entered amounts of the trays it uses."""

@@ -6,7 +6,7 @@ Bambu Studio has no plugin interface (v02.09.01.70: the `plugins` folder holds i
 
 1. Bambu Studio writes the G-code of each plate it slices to `%TEMP%\bamboo_model\<day>\<time>#<pid>#<id>\Metadata\.<pid>.<n>.gcode`. The guard watches that folder.
 2. From the G-code it reads the grams each filament needs (purge and prime tower included), and its material, colour, product and nozzle.
-3. It asks the printer the plate was sliced for what is left on every spool (read-only status over the LAN).
+3. It asks the printer the plate was sliced for what is left on every spool (read-only status over the LAN). When the printer is running a print, it first takes off each spool what that print still needs from it: the answer is for the moment the new print could start. See "The running print".
 4. The answer appears as a "Filament check" card inside Bambu Studio's window, bottom right, under the slicing result. With enough of everything it is one line that goes away after 8 seconds; when a filament falls short it is the full table, and it stays until closed or until the next slice.
 5. When "Send print job" opens, the guard checks every sliced plate of the project again. The worst answer shows beside that dialog when it is a warning, and names its plate.
 
@@ -61,6 +61,15 @@ A spool matches a filament when it is the same material, on the nozzle that prin
 
 **The reserve.** The AMS's figure is an estimate: it counts what it has fed, so its error grows as the spool empties. On 2026-11-19 a 1 kg spool reported at 105 g ran dry after 84-85 g, one gram before the end of a print that needed 85.3 g. So "enough" asks for the need plus the larger of 10 % of the need (`margin_pct`) and 3 % of the spool's full weight (`spool_reserve_pct`: 30 g on a 1 kg spool). Below that the result is "tight", and the full card shows.
 
+## The running print
+
+In batch printing the next plate is sliced while one prints. On 2026-11-19 a plate needing 85.3 g of blue was printing from a spool that read 105 g; the same plate, sliced again for the next run, was checked against those 105 g, although after the running print the spool would hold about 20 g. So every check counts the print that is running:
+
+- For each plate it sees sliced, the guard keeps how many grams of each filament every layer takes, read from the extrusion moves of the G-code. The printer purges by itself at each filament change, and that purge is in Bambu Studio's total but not in the moves, so what the moves leave out is spread evenly over that filament's changes; each filament's layers add up to its total.
+- The job the printer runs is matched to its slice (project name and layer count) and to the trays it uses (the job's tray mapping). What it still needs is its grams from the layer the printer is on to the end, that layer counted whole; while the printer prepares a job, all of it.
+- That is taken off each spool's reading before the check. The note of a filament says so: "C3 reads 105 g, of which the running print still needs 85 g". The card says whether the running print was counted.
+- An amount entered by hand is not reduced again: the whole job came off it when the job started (see below).
+
 ## Spools without a reading
 
 A spool without an RFID tag, or on an external holder, reports no amount. Enter it on the card ("Amount in …"): weigh the spool and take off the empty spool. The guard then counts down, erring to the low side:
@@ -89,7 +98,9 @@ python filament_guard.py uninstall    # remove the shortcut and stop
 
 ## Limits
 
-- The check is against what is loaded **now**. A print that is running is still drawing from the same spools; the card says so.
+- A running print is counted only when it was sliced on this computer while the guard (1.3.0 or later) was watching. Otherwise the card says it could not count it, and the amounts are what the spools hold now.
+- A job is matched to its slice by project name and layer count. Re-slicing a plate replaces its slice: from then on, a print still running from the earlier slice is counted with the new slice's amounts, or not at all when the layer count changed. Two plates of one project with the same number of layers are not told apart; the newer slice is taken.
+- What the running print still needs from a tray that has run out (taken out, or left for the AMS to refill from another spool) is not taken off any other spool.
 - Each plate is checked on its own. "Print all plates" needs the sum; check the exported file with `check`.
 - Which plate "Send print job" is sending, and which tray you pick there, cannot be read: the card beside it is the worst of the project's sliced plates, against every matching spool. Bambu Studio's own warning there ("The filament in … may be insufficient for this print") covers the chosen tray.
 - Two slots of one colour draw on the same spools and are judged on what they need together.
@@ -103,13 +114,13 @@ python filament_guard.py uninstall    # remove the shortcut and stop
 
 | File | Holds |
 |---|---|
-| `filament_guard.py` | G-code, printer status, the assessment, the watcher, the commands |
+| `filament_guard.py` | G-code (totals and grams per layer), printer status, the assessment, the watcher, the commands |
 | `guard_ui.py` | the card and the icon |
-| `guard_ledger.py` | entered amounts and the prints that draw on them |
+| `guard_ledger.py` | the prints that draw on the spools: entered amounts counted down, what the running print still needs |
 | `build.py` | makes the packaged folder and its zip |
 | `test_filament_guard.py` | `python -m pytest test_filament_guard.py` (needs no printer and no Bambu Studio) |
 
-Log and state: `%LOCALAPPDATA%\BambuFilamentGuard\`. The LAN access code is read from Bambu Studio's configuration each time and goes to the printer only.
+Log and state: `%LOCALAPPDATA%\BambuFilamentGuard\`, with the grams per layer of the last 30 slices in `profiles\`. The LAN access code is read from Bambu Studio's configuration each time and goes to the printer only.
 
 ## Licence
 

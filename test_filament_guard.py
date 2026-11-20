@@ -7,14 +7,14 @@ CFG = dict(fg.DEFAULTS)
 
 
 def gcode(weights='9.99,10.87', used='1,3', types='PLA;PETG;PLA', colours='#0A2989;#FFFFFF;#C12E1F', ids='GFA00;GFG02;GFA00',
-          nozzles='0.4', fmap='1,1,1', complete=True):
-    """The head of a Bambu Studio G-code as 02.09.01.70 writes it, cut down to the lines that are read."""
+          nozzles='0.4', fmap='1,1,1', complete=True, body=('G1 X1',)):
+    """A Bambu Studio G-code as 02.09.01.70 writes it, cut down to the lines that are read."""
     return '\n'.join([
         '; HEADER_BLOCK_START', '; BambuStudio 02.09.01.70', '; model printing time: 1h 2m 3s; total estimated time: 1h 9m 0s',
-        f'; total filament weight [g] : {weights}', '; filament_density: 1.26,1.27,1.26'] + ([f'; filament: {used}'] if used else []) + [
+        f'; total filament weight [g] : {weights}', '; filament_density: 1.26,1.27,1.26', '; filament_diameter: 1.75,1.75,1.75'] + ([f'; filament: {used}'] if used else []) + [
         '; HEADER_BLOCK_END', '', '; CONFIG_BLOCK_START', f'; filament_colour = {colours}', f'; filament_ids = {ids}', f'; filament_map = {fmap}',
         '; filament_settings_id = "Bambu PLA Basic @BBL H2D";"Bambu PETG HF @BBL H2D 0.4 nozzle";"Bambu PLA Basic @BBL H2D"',
-        f'; filament_type = {types}', f'; nozzle_diameter = {nozzles}', '; printer_model = Bambu Lab H2D'] + (['; CONFIG_BLOCK_END'] if complete else []) + ['G1 X1'])
+        f'; filament_type = {types}', f'; nozzle_diameter = {nozzles}', '; printer_model = Bambu Lab H2D'] + (['; CONFIG_BLOCK_END'] if complete else []) + list(body))
 
 def tray(label, grams, colour='#C12E1F', typ='PLA', fid='GFA00', nozzle=None, name='PLA Basic', weight=None):
     return {'label': label, 'type': typ, 'fid': fid, 'colour': colour, 'name': name, 'grams': grams, 'weight': weight, 'nozzle': nozzle}
@@ -118,7 +118,7 @@ def test_watcher_reports_a_finished_plate_once(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- settings, state, entered amounts (guard_ledger)
 
-import json, time
+import json
 import guard_ledger as gl
 
 @pytest.fixture
@@ -236,3 +236,127 @@ def test_a_fine_plate_does_not_wipe_another_plates_warning(state):
     assert guard.card.shown == [(1, 0)] and guard.last['plate_no'] == 1
     guard.deliver(answer(1, 'OK'))                                                      # plate 1 sliced again, and fine now
     assert guard.card.shown[-1] == (1, CFG['ok_seconds'])
+
+
+# ---------------------------------------------------------------- the print that is running (1.3.0)
+
+import math, os
+
+K = math.pi * 0.875 ** 2 * 1.26 / 1000                                                  # grams in a mm of 1.75 mm filament at 1.26 g/cm3
+
+def sliced(body, weights, layers=3):
+    """A whole G-code with two filaments, slots 1 and 3 (T0 and T2), of 1.26 g/cm3."""
+    return gcode(weights=weights, body=body).replace('; filament_density', f'; total layer number: {layers}\n; filament_density')
+
+def profile_of(body, weights, layers=3):
+    text = sliced(body, weights, layers)
+    return fg.layer_profile(io.BytesIO(text.encode()), fg.parse_plate(text))
+
+def test_profile_adds_up_to_the_header_totals_layer_by_layer():
+    """The printer purges at each filament change by itself: in the header's total, not in the moves. What the moves
+    leave out goes to the layers in which that filament is loaded."""
+    body = ['T0', 'G1 X1 E100', 'M73 L1', 'G1 X2 E1000', 'T2 H-1', 'G1 X3 E500', 'M73 L2', 'G1 X4 E700', 'T0', 'G1 X5 E300', 'M73 L3', 'G1 X6 E400']
+    p = profile_of(body, '6.00,4.00')
+    short1, short3 = 6.0 - 1800 * K, 4.0 - 1200 * K
+    assert p[1] == pytest.approx([100 * K + short1 / 2, 1000 * K, 300 * K + short1 / 2, 400 * K]) and sum(p[1]) == pytest.approx(6.0)
+    assert p[3] == pytest.approx([0, 500 * K + short3, 700 * K, 0]) and sum(p[3]) == pytest.approx(4.0)
+    assert profile_of(body[:4], '6.00,4.00') is None                                       # ends before its last layer: being rewritten
+    resliced = io.BytesIO(sliced(body, '6.00,4.10').encode())
+    assert fg.layer_profile(resliced, fg.parse_plate(sliced(body, '6.00,4.00'))) is None   # not the file the plate was read from
+
+def test_profile_counts_only_the_moves_that_extrude():
+    body = ['T0', 'M73 L1', 'G1 X1 Y2 ; E99 in a comment', 'G1 X1 E10 ; then E99',
+            'T1000', 'G1 X2 E20', 'T65535', 'G1 X2 E5',                                    # not filaments: slot 1 goes on
+            'M82', 'G92 E0', 'G1 X3 E50', 'G2 X4 Y4 I1 J0 E80', 'G3 X5 Y5 I1 J0 E90', 'G92 E0', 'G1 X6 E5',   # absolute: 50 + 30 + 10 + 5
+            'M83 ; relative again', 'G1 E-1', 'G1 E1', '    G1 X7 E4',                     # a retraction undone; an indented line counts
+            'T2', 'G1 X8 E100', 'M73 L2', 'G1 X9 E100', 'M73 L3', 'G1 X1 E100']
+    p = profile_of(body, '0.50,1.00')
+    assert p[1] == pytest.approx([0.5 - 134 * K, 134 * K, 0, 0])
+    assert p[3] == pytest.approx([0, 100 * K + 1.0 - 300 * K, 100 * K, 100 * K])
+
+def test_profile_beyond_the_header_total_is_refused_and_within_it_scaled():
+    body = ['T0', 'M73 L1', 'G1 X1 E5000', 'T2', 'G1 X2 E100', 'M73 L2', 'T0', 'G1 X3 E5000']   # slot 1: 30.31 g of moves
+    assert profile_of(body, '29.60,0.40', layers=2) is None                                # 0.71 g over: more than 2 % of 29.6 g
+    p = profile_of(body, '29.80,0.40', layers=2)                                           # 0.51 g over, under 2 %: scaled
+    assert p[1] == pytest.approx([0, 14.9, 14.9]) and sum(p[3]) == pytest.approx(0.4)
+
+def test_the_running_print_owes_what_it_has_not_printed(state):
+    plate = {'layers': 3, 'filaments': [{'slot': 1, 'grams': 6.0}, {'slot': 2, 'grams': 3.0}]}
+    fg.remember_slice('Benchy', 1, plate, {1: [1.0, 2.0, 2.0, 1.0], 2: [0.0, 0.0, 1.0, 2.0]})
+    job, slices = dict(H2D_JOB, subtask_name='Benchy', total_layer_num=3, layer_num=2), fg.load_state()['slices']     # slot 1 prints from C3, slot 2 from B2
+    assert gl.owed(job, slices) == ({'C3': 3.0, 'B2': 3.0}, True)                          # layers 2 and 3: the one it is on counts whole
+    assert gl.owed(dict(job, gcode_state='PREPARE'), slices) == ({'C3': 6.0, 'B2': 3.0}, True)   # the layer shown may be the job before's
+    assert gl.owed(dict(job, layer_num=0), slices) == ({'C3': 6.0, 'B2': 3.0}, True)
+    assert gl.owed(dict(job, gcode_state='FINISH'), slices) == ({}, None) and gl.owed(dict(job, gcode_state='IDLE'), slices) == ({}, None)
+    assert gl.owed(dict(job, subtask_name='Sent from the phone'), slices) == ({}, False)   # not sliced on this computer: never guessed
+    assert gl.owed(dict(job, mapping=[9999, 257]), slices) == ({}, False)                 # a tray that cannot be named
+    fg.remember_slice('Benchy', 1, plate)                                                  # sliced again, and its G-code could not be read
+    assert gl.owed(job, fg.load_state()['slices']) == ({}, False)
+
+def running(monkeypatch, status):
+    """The printer the guard asks: SERIAL, an H2D, reporting status."""
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {'SERIAL': 'code'}}); monkeypatch.setattr(fg, 'model_by_serial_prefix', lambda: {'SER': 'Bambu Lab H2D'})
+    monkeypatch.setattr(fg, 'printer_ip', lambda *a, **k: 'printer'); monkeypatch.setattr(fg, 'read_status', lambda *a, **k: status)
+
+BLUE = {'printer_model': 'Bambu Lab H2D', 'time': '', 'layers': 27,
+        'filaments': [{'slot': 1, 'type': 'PLA', 'fid': 'GFA00', 'colour': '#0A2989', 'name': 'Bambu PLA Basic', 'grams': 85.3, 'nozzle': None}]}
+BLUE_JOB = {'gcode_state': 'RUNNING', 'subtask_name': 'Benchy', 'layer_num': 1, 'total_layer_num': 27, 'mc_percent': 0, 'mapping': [514],
+            'ams': {'ams': [{'id': '2', 'tray': [{'id': '2', 'tray_type': 'PLA', 'tray_color': '0A2989FF', 'tray_info_idx': 'GFA00', 'remain_g': 105, 'tray_weight': '1000'}]}]}}
+
+def test_the_running_print_is_taken_off_its_spool_first(state, monkeypatch):
+    """2026-11-19: a 9-up plate needing 85.3 g of blue was printing at 0 % from C3, read at 105 g. The same plate, sliced
+    again for the next run, read "enough"; after the running print C3 held about 20 g, and blue ran dry."""
+    fg.remember_slice('Benchy', 1, BLUE, {1: [0.0] + [3.2] * 26 + [2.1]})
+    running(monkeypatch, BLUE_JOB); res = fg.evaluate(BLUE, CFG, 'Benchy'); row = res['rows'][0]
+    assert row['status'] == 'SHORT' and 'C3 reads 105 g, of which the running print still needs 85 g' in row['note']
+    assert row['trays'][0]['grams'] == pytest.approx(19.7) and row['trays'][0]['reads'] == 105 and res['printer']['counted'] is True
+    assert 'RUNNING (Benchy, layer 1 of 27): the running print is counted' in fg.report_text(res)
+    running(monkeypatch, dict(BLUE_JOB, gcode_state='FINISH')); res = fg.evaluate(BLUE, CFG, 'Benchy'); row = res['rows'][0]
+    assert row['status'] == 'TIGHT' and 'reads' not in row['note'] and row['trays'][0]['grams'] == 105 and res['printer']['counted'] is None
+    running(monkeypatch, dict(BLUE_JOB, subtask_name='Sent from the phone')); res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['rows'][0]['status'] == 'TIGHT' and res['printer']['counted'] is False and 'the guard could not count that print' in fg.report_text(res)
+
+def test_an_entered_amount_is_not_reduced_twice(state, monkeypatch):
+    """guard_ledger takes the whole job off an entered amount when the job starts: the running print is not taken off it again."""
+    gl.enter('SERIAL', {'label': 'C3', 'type': 'PETG', 'colour': '#101010'}, 400)
+    fg.remember_slice('Benchy', 1, SLICE, {1: [0.0] + [0.5] * 240, 2: [0.0] + [0.125] * 240})
+    running(monkeypatch, H2D_JOB)                                                          # slot 1 (120 g) prints from C3, slot 2 (30 g) from B2
+    plate = {'printer_model': 'Bambu Lab H2D', 'time': '', 'layers': 10, 'filaments': [
+        {'slot': 1, 'type': 'PETG', 'fid': '', 'colour': '#101010', 'name': 'PETG', 'grams': 100.0, 'nozzle': None},
+        {'slot': 2, 'type': 'PLA', 'fid': 'GFA00', 'colour': '#C12E1F', 'name': 'PLA Basic', 'grams': 40.0, 'nozzle': None}]}
+    petg, pla = fg.evaluate(plate, CFG, 'Other')['rows']
+    assert petg['trays'][0]['grams'] == 400 and not petg['trays'][0]['reserved'] and 'reads' not in petg['note']
+    assert pla['trays'][0]['grams'] == 51 and 'B2 reads 81 g, of which the running print still needs 30 g' in pla['note']
+
+def test_profiles_are_kept_beside_the_state_file_and_go_with_their_slice(state):
+    plate = dict(SLICE, layers=3)
+    fg.remember_slice('Benchy', 1, plate, {1: [0.0, 40.0, 40.0, 40.0], 2: [0.0, 10.0, 10.0, 10.0]})
+    entry = fg.load_state()['slices'][0]
+    assert set(entry) == {'title', 'plate', 'layers', 'at', 'filaments', 'profile'} and os.listdir(state / 'profiles') == [entry['profile']]
+    assert fg.load_profile(entry) == {1: [0.0, 40.0, 40.0, 40.0], 2: [0.0, 10.0, 10.0, 10.0]}
+    again = dict(plate, filaments=[{'slot': 1, 'grams': 110.0}, {'slot': 2, 'grams': 30.0}])
+    fg.remember_slice('Benchy', 1, again, {1: [0.0, 30.0, 40.0, 40.0], 2: [0.0, 10.0, 10.0, 10.0]})   # the plate sliced again
+    slices = fg.load_state()['slices']
+    assert len(slices) == 1 and slices[0]['profile'] != entry['profile'] and os.listdir(state / 'profiles') == [slices[0]['profile']]
+    for n in range(30): fg.remember_slice(f'Other {n}', 1, plate)                         # thirty newer slices: this one drops out
+    assert os.listdir(state / 'profiles') == []
+
+def test_a_reslice_of_the_plate_that_is_printing_is_checked_against_that_print(state, tmp_path, monkeypatch):
+    """The check comes before the new slice replaces the one the running print was made from, and before the profile is read."""
+    meta = tmp_path / 'bamboo_model' / 'Thu_Nov_19' / '01_02_03#1#9' / 'Metadata'; meta.mkdir(parents=True)
+    (meta.parent / 'origin.txt').write_text(r'C:\prints\Benchy.3mf')
+    f = meta / '.1.0.gcode'; f.write_text(sliced(['T0', 'M73 L1', 'G1 X1 E600', 'T2', 'G1 X1 E400', 'M73 L2', 'M73 L3'], '2.00,1.30'))
+    plate = fg.parse_plate(f.read_text())
+    fg.remember_slice('Benchy', 1, plate, {1: [0.0, 2.0, 2.0, 2.0], 3: [0.0, 1.0, 1.0, 2.0]})   # the slice the running print was made from
+    running(monkeypatch, {'gcode_state': 'RUNNING', 'subtask_name': 'Benchy', 'layer_num': 1, 'total_layer_num': 3, 'mapping': [514, 257],
+                          'ams': {'ams': [{'id': '1', 'tray': [{'id': '1', 'tray_type': 'PLA', 'tray_color': 'C12E1FFF', 'remain_g': 81}]},
+                                          {'id': '2', 'tray': [{'id': '2', 'tray_type': 'PLA', 'tray_color': '0A2989FF', 'remain_g': 7}]}]}})
+    guard = fg.Guard(dict(CFG), type('Root', (), {'quit': None})(), standing=False)
+    queued, read = [], fg.layer_profile
+    monkeypatch.setattr(fg, 'layer_profile', lambda stream, plate: (queued.append(guard.todo.qsize()), read(stream, plate))[1])
+    guard.take_slice(str(f), plate)
+    delivered = []; guard.deliver = delivered.append; guard.todo.get_nowait()()
+    assert queued == [1]                                                                    # the card was on its way before the profile was read
+    assert delivered[0]['printer']['counted'] and 'C3 reads 7 g, of which the running print still needs 6 g' in delivered[0]['rows'][0]['note']
+    fresh = read(io.BytesIO(f.read_bytes()), plate)                                       # and the new slice now has its own
+    assert fg.load_profile(fg.load_state()['slices'][0]) == {s: pytest.approx(g, abs=1e-4) for s, g in fresh.items()} and sum(fresh[3]) == pytest.approx(1.3)
