@@ -53,6 +53,10 @@ def studio_windows(windows=None):
     """{process id: handle of the main window} of the Bambu Studio copies that are running."""
     return {pid: h for h, pid, cls, title in (windows or top_windows()) if cls.startswith('wxWindow') and title.endswith('BambuStudio')}
 
+def studio_on_screen():
+    """The process id of a Bambu Studio copy whose main window is on screen (shown, not minimised), or None."""
+    return next((pid for pid, h in studio_windows().items() if not u32.IsIconic(wt.HWND(h))), None)
+
 def studio_window(pid=None):
     """The handle of Bambu Studio's main window (of the copy with this process id, when it has one), or None."""
     found = studio_windows()
@@ -113,6 +117,7 @@ class Card:
     def __init__(self, root, act=None, on_close=None):
         self.root, self.win, self.act, self.on_close = root, None, act or (lambda *a: None), on_close
         self.owner, self.beside, self.spot, self.held = None, None, None, False
+        self.one_line = False                                                # the card open is one line, which a new line may replace
 
     def is_open(self):
         return bool(self.win and self.win.winfo_exists())
@@ -196,6 +201,7 @@ class Card:
         hold: while Bambu Studio is minimised, wait unshown until it is back (the answer to a slice nobody asked to see now)."""
         import tkinter as tk
         w, t = self._open(res.get('pid'), beside, hold), self.t
+        self.one_line = bool(brief)
         self._label(w, fg.headline(res), tone_of(res), 12, True, row=1, column=0)
         if brief:
             line = tk.Frame(w, bg=t['surface']); line.grid(row=2, column=0, sticky='ew'); line.columnconfigure(0, weight=1)
@@ -225,10 +231,10 @@ class Card:
                 if r['note']: self._label(table, r['note'][:1].upper() + r['note'][1:], 'muted', 9, wrap=600, row=2 * i + 1, column=1, columnspan=5, pady=(0, SPACE // 2))
             p = res['printer']
             if p['state'] in fg.BUSY and p.get('counted'):
-                spools = f"Spools as the {p['model']} reports them, less what the print running there ({p['job']}, {fg.job_stage(p)}) still needs; the amounts are the AMS's estimate."
+                spools = f"Spools as the {p['model']} reports them, less what the print running there{fg.job_text(p)} still needs; the amounts are the AMS's estimate."
             else:
                 spools = f"Spools as the {p['model']} reports them now; the amounts are the AMS's estimate." + (
-                    f" It is printing now ({p['job']}, {fg.job_stage(p)}): that job is still drawing from these spools, and the guard could not count what it still needs."
+                    f" It is printing now{fg.job_text(p)}: that job is still drawing from these spools, and the guard could not count what it still needs."
                     if p['state'] in fg.BUSY else '')
             ignored = ' Ignored for this project: it shows as one line until the finding changes.' if res.get('ignored') else ''
             self._label(w, spools + ignored, 'muted', 9, wrap=620, row=4, column=0, pady=(2 * SPACE, 0))
@@ -249,11 +255,20 @@ class Card:
 
     def note(self, headline, lines, tone='muted', pid=None):
         """A card that says something other than a result: the self-test, the welcome after installing."""
-        w = self._open(pid)
+        w = self._open(pid); self.one_line = False
         self._label(w, headline, tone, 12, True, row=1, column=0, pady=(0, SPACE))
         for i, (mark, text) in enumerate(lines):
             self._label(w, {True: '✓  ', False: '✗  ', None: '–  '}[mark] + text, {True: 'text', False: 'danger', None: 'muted'}[mark], 9, wrap=620, row=2 + i, column=0)
         self._place()
+
+    def line(self, text, tone='muted', seconds=0, pid=None, hold=False):
+        """A card of one line that is not a result: a check under way, the guard's start. seconds: it closes itself
+        after them; 0 = it stays until something replaces or closes it. Returns its window."""
+        w = self._open(pid, None, hold); self.one_line = True
+        self._label(w, text, tone, 12, True, row=1, column=0)
+        if seconds: w.after(int(seconds * 1000), lambda: self.close() if self.win is w else None)
+        self._place()
+        return w
 
     def ask_amount(self, res, tray):
         """Asks for the grams left on a spool the printer cannot measure. An ordinary small window: it has to take the keyboard."""
