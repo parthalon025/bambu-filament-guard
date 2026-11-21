@@ -17,7 +17,7 @@ From the repository root:
 
 ```powershell
 python -m pytest                          # everything, as CI runs it
-python -m pytest -m "not simulation"      # without the simulated printer: about a second
+python -m pytest -m "not simulation"      # without the simulated printer: a second or two
 python -m pytest tests/test_learning.py   # one area
 ```
 
