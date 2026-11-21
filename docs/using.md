@@ -1,0 +1,76 @@
+# Using the guard
+
+[← README](../README.md) · **Using the guard** · [The running print](running-print.md) · [Learning](learning.md) · [Spools without a reading](manual-amounts.md) · [Limits](limits.md)
+
+What the guard does from the moment a plate is sliced, what its card and icon show, and what each result means.
+
+- [How it works](#how-it-works)
+- [The card](#the-card)
+- [The icon and its settings](#the-icon-and-its-settings)
+- [What the results mean](#what-the-results-mean)
+
+## How it works
+
+Bambu Studio has no plugin interface (v02.09.01.70: the `plugins` folder holds its network libraries only), so the guard runs beside it:
+
+1. Bambu Studio writes the G-code of each plate it slices to `%TEMP%\bamboo_model\<day>\<time>#<pid>#<id>\Metadata\.<pid>.<n>.gcode`. The guard watches that folder.
+2. From the G-code it reads the grams each filament needs (purge and prime tower included), and its material, colour, product and nozzle.
+3. It asks the printer the plate was sliced for what is left on every spool (read-only status over the LAN). When the printer is running a print, it first takes off each spool what that print still needs from it: the answer is for the moment the new print could start. See [The running print](running-print.md).
+4. The answer appears as a "Filament check" card inside Bambu Studio's window, bottom right, under the slicing result. With enough of everything it is one line that goes away after 8 seconds; when a filament falls short it is the full table, and it stays until closed or until the next slice.
+5. When "Send print job" opens, the guard checks every sliced plate of the project again. The worst answer shows beside that dialog when it is a warning, and names its plate.
+
+The card belongs to Bambu Studio's window: it is above that window and no other, moves and minimises with it, follows its dark or light mode, and never takes the keyboard. It is still drawn by the guard, which must be running.
+
+## The card
+
+With enough of everything the card is one line:
+
+![The one-line card: "Enough filament for this print", 5 filaments against the spools on the Bambu Lab H2D, with a Details button.](card-enough.png)
+
+A check takes a second or three, because the guard asks the printer each time. While one runs that you are waiting for (a plate you just sliced, or one you asked for from the icon) the card says so at once in one line, "Checking the spools on the Bambu Lab H2D…", and the answer takes its place.
+
+![The one-line card while a check runs: "Checking the spools on the Bambu Lab H2D…".](card-checking.png)
+
+For a new slice the line does not cover a full card that is still open; asked for from the icon, it takes the place of any card, as its answer will. Beside "Send print job" nothing shows until there is a warning.
+
+When the guard starts, the first time Bambu Studio runs it shows one line, "Bambu Filament Guard 1.4.0 is watching for sliced plates", which goes away by itself; after `Install.cmd` the install card says it instead. A one-line card that comes while Bambu Studio is minimised waits for its window, and its seconds count from when it shows. With "One line when there is enough" turned off, quiet was asked for: a new slice shows no "Checking…" line, and the guard no start line.
+
+| Button | Does |
+|---|---|
+| Check again | Asks the printer again, for the same slice: after swapping a spool, no re-slice is needed. |
+| Ignore for this project | This finding shows as one line from now on, until it changes. "Stop ignoring" on the full card (Details) undoes it. |
+| Amount in A3… | For a spool the printer cannot measure: enter the grams left. See [Spools without a reading](manual-amounts.md). |
+| Weigh C3… | Offered when weighing that spool would settle the answer: enter the grams on it. See [Learning, weigh-ins](learning.md#weigh-ins). |
+| Details | On the one-line card: the full table. |
+
+## The icon and its settings
+
+Its colour and tooltip are the last result. A click shows that result again; before there is one, it checks the newest slice. A click while that check runs shows the "Checking…" line again and starts no second check. The menu: check the newest slice now, pause, self-test, the log, forget what was learned, and the settings:
+
+- One line when there is enough (`ok_seconds`)
+- Warn when a colour is not loaded / when a spool's amount is unknown (`popup_on`)
+- Check again at "Send print job" (`at_send`)
+- Reserve: 2, 3 or 5 % of the full spool (`spool_reserve_pct`)
+- Learn from prints, tray by tray (`learn`, on; see [Learning](learning.md))
+- Measure the reserve from past prints (`measured_reserve`, on)
+- Start automatically
+
+Settings are saved to `config.json` beside the script, which holds only what was changed. The keys, their defaults and their meaning are `DEFAULTS` at the top of [`filament_guard.py`](../filament_guard.py).
+
+## What the results mean
+
+| Result | Meaning |
+|---|---|
+| Enough | One matching spool holds the need plus the reserve. |
+| Tight | One spool holds the need, without the reserve. |
+| Needs two spools | No single spool holds it; the matching spools together do. AMS auto refill must be on. |
+| Not enough | The matching spools together hold less than the need. |
+| Not loaded | No spool of that material is loaded where the print's nozzle can reach it. |
+| Colour not loaded | The material is loaded, this colour of it is not. The nearest spool is named and counts for nothing. |
+| Unknown | The matching spool reports no remaining amount. Shown as one line, like "enough", unless `popup_on` names it. |
+
+A spool matches a filament when it is the same material, on the nozzle that prints it, in the project's colour; spools of the same product come first. A spool of similar colour but another product is named in the note and not counted.
+
+### The reserve
+
+The AMS's figure is an estimate: it counts what it has fed, so its error grows as the spool empties. On 2026-11-19 a 1 kg spool reported at 105 g ran dry after 84-85 g, one gram before the end of a print that needed 85.3 g. So "enough" asks for the need plus the larger of 10 % of the need (`margin_pct`) and 3 % of the spool's full weight (`spool_reserve_pct`: 30 g on a 1 kg spool). Below that the result is "tight", and the full card shows. With learning, once it has the evidence, the reserve is measured from the guard's own past forecasts instead (see [Learning, the reserve](learning.md#the-reserve)).

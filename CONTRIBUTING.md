@@ -21,9 +21,22 @@ python -m pytest test_filament_guard.py
 
 They need no printer and no Bambu Studio. The same command runs on every push and pull request.
 
+## Code layout
+
+| File | Holds |
+|---|---|
+| `filament_guard.py` | G-code (totals and grams per layer), printer status, the assessment, the watcher, the commands |
+| `guard_ui.py` | the card and the icon |
+| `guard_ledger.py` | the prints that draw on the spools: entered amounts counted down, what the running print still needs; the link that follows a printer |
+| `guard_learn.py` | learning from previous prints, per tray: the record, the model and its scores, what they change, weigh-ins, `learned` |
+| `guard_stats.py` | the estimators learning uses: shrinkage, the conformal bound, Kaplan-Meier, change points, Fieller's interval; plain arithmetic |
+| `build.py` | makes the packaged folder and its zip |
+| `test_filament_guard.py` | `python -m pytest test_filament_guard.py` (needs no printer and no Bambu Studio) |
+| `docs/` | the documentation beyond the README, and its pictures |
+
 ## Conventions
 
-- Every claim the README makes about what the guard does is true of the code. If a change makes a claim false, change the README in the same pull request.
+- Every claim the README and the pages in `docs/` make about what the guard does is true of the code. If a change makes a claim false, change them in the same pull request.
 - A comment states a constraint and why it holds. It does not say what the next line does.
 - A fix comes with a test, and the test's name states the behaviour it checks.
 - No new dependency without a reason, given in the pull request. The packaged zip carries every dependency, so each one adds to it.
