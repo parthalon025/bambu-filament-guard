@@ -1,6 +1,6 @@
 # Bambu Filament Guard
 
-Warns, for every filament of a print sliced in Bambu Studio, when the spools on the printer do not hold enough of it.
+**Know, before you print, whether the spools on your Bambu Lab printer hold enough filament.**
 
 [![tests](https://github.com/parthalon025/bambu-filament-guard/actions/workflows/tests.yml/badge.svg)](https://github.com/parthalon025/bambu-filament-guard/actions/workflows/tests.yml)
 [![latest release](https://img.shields.io/github/v/release/parthalon025/bambu-filament-guard)](https://github.com/parthalon025/bambu-filament-guard/releases/latest)
@@ -8,21 +8,28 @@ Warns, for every filament of a print sliced in Bambu Studio, when the spools on 
 ![platform: Windows](https://img.shields.io/badge/platform-Windows-blue)
 ![Python 3.13](https://img.shields.io/badge/python-3.13-blue)
 
+Bambu Filament Guard is a Windows companion to Bambu Studio. Each time you slice a plate, it works out how many grams of each filament the print needs, purge and prime tower included. It then asks the printer how much each spool has left, takes off what the print already running still needs, and shows the result in a card inside Bambu Studio's window. You see the answer before you send the job. It does not change the project or the printer: it only reads the printer's status over your local network, and it makes no internet connection.
+
 ![The guard's "Filament check" card: "Not enough filament for this print", plate 1 on a Bambu Lab H2D. Five filaments, each with what it needs, its spool, what that spool has and the result: blue and red not enough, green tight, white and grey enough. Under each row a note gives the spool's reading and what the print running on the printer still needs of it.](docs/card-warning.png)
 
-*A plate checked while the same plate prints: after the running print, two of its filaments would not have enough, and one would be tight. The picture is the guard's own card. The job in it is made up, with figures modelled on the print of 2026-11-19 described in [The running print](docs/running-print.md).*
+*The guard's own card, for a plate checked while the same plate prints. After the running print, two of its filaments would not have enough, and one would be tight. The job is made up, with figures modelled on the print described in [The running print](docs/running-print.md).*
 
-## Features
+## Why
 
-- **Checks every filament of every plate you slice**, in any project, against what the spools on the printer hold, purge and prime tower included: as soon as the slice is done, and again for all the project's sliced plates when "Send print job" opens.
-- **Counts the print that is running**, when it was sliced on this computer: a plate sliced while another prints is checked against what the spools will hold when it can start. See [The running print](docs/running-print.md).
-- **Learns, per tray, how far the AMS's reading can be trusted**, from the prints it follows, and scores its own forecasts against what each print took. Until they have earned it, it only makes a check stricter; then the reserve is measured instead of fixed, and is smaller for a tray that proves accurate. See [Learning from previous prints](docs/learning.md).
-- **Read-only, on your LAN**: it reads the printer's status and the files Bambu Studio writes while it slices, and sets nothing in the project. See [Privacy and security](#privacy-and-security).
+The AMS's remaining-filament figure is an estimate. It counts what it has fed, so its error grows as the spool empties. On 2026-11-19 a 1 kg spool reported 105 g and ran dry after 84–85 g, one gram before the end of a print that needed 85.3 g. Bambu Studio's own warning covers only the tray you pick. The guard checks every filament against every matching spool, with a reserve, and accounts for the print that is already running.
+
+## Key features
+
+- **Every filament, every plate.** Checks each plate as soon as it is sliced, and all the project's sliced plates again when "Send print job" opens.
+- **Batch-printing aware.** A plate sliced while another prints is checked against what the spools will hold when it can start. See [The running print](docs/running-print.md).
+- **Learns each tray's accuracy.** Scores its own forecasts against what each print took. Until they have earned it, learning only makes a check stricter. After that, the reserve is measured instead of fixed, and it is smaller for a tray that proves accurate. See [Learning from previous prints](docs/learning.md).
+- **Spools without RFID.** Enter a weighed amount once, and the guard counts it down as prints use it. See [Spools without a reading](docs/manual-amounts.md).
+- **Scriptable.** `check` gives a plain-text or JSON result for any sliced file, with exit codes a script can act on. See [Commands](#commands).
+- **Read-only and local.** Sends the printer no command that changes it. See [Privacy and security](#privacy-and-security).
 
 ## Contents
 
-- [Requirements](#requirements)
-- [Does it work with my printer?](#does-it-work-with-my-printer)
+- [Compatibility](#compatibility)
 - [Install](#install)
 - [Usage](#usage)
 - [Commands](#commands)
@@ -32,15 +39,18 @@ Warns, for every filament of a print sliced in Bambu Studio, when the spools on 
 - [Changelog](#changelog)
 - [Licence](#licence)
 
-## Requirements
+## Compatibility
 
-- Windows 10 or 11.
-- Bambu Studio (not OrcaSlicer).
-- The printer reachable on the local network, with its LAN access code in Bambu Studio.
-- Spools the printer can measure (Bambu spools with an RFID tag, in an AMS) for amounts read automatically. For any other spool the amount is entered by hand: see [Spools without a reading](docs/manual-amounts.md).
-- From source only: Python 3.13 or later.
+### Requirements
 
-## Does it work with my printer?
+- Windows 10 or 11
+- Bambu Studio (not OrcaSlicer)
+- The printer reachable on the local network, with its LAN access code entered in Bambu Studio
+- Python 3.13 or later, only when running from source
+
+The amount on a spool is read automatically for Bambu spools with an RFID tag, in an AMS. For any other spool, you enter the amount by hand.
+
+### Tested printers
 
 | Printer | Sliced files | On the printer |
 |---|---|---|
@@ -48,9 +58,9 @@ Warns, for every filament of a print sliced in Bambu Studio, when the spools on 
 | A1 mini | Tried | Answered a status request; it had no AMS, so no spool amounts were seen |
 | A1, P1P, P1S, X1, X1 Carbon, X1E, P2S, H2S, H2D Pro, H2C, A2L, X2D, H3C | Tried | Not tried |
 
-**Sliced files:** for every model above, the grams per layer the guard counts from Bambu Studio 02.09.01.70 slices add up to Bambu Studio's own totals, each filament to within 0.005 g (see [The running print](docs/running-print.md)).
+**Sliced files:** for every model above, the grams per layer the guard counts from Bambu Studio 02.09.01.70 slices add up to Bambu Studio's own totals, each filament to within 0.005 g.
 
-**On the printer:** reading the spools has been tried on the H2D only. Which nozzle an AMS feeds is decoded for the H2D; where that cannot be read, a spool counts for either nozzle.
+**On the printer:** reading the spools has been tried on the H2D only. Which nozzle an AMS feeds is decoded for the H2D. Where that cannot be read, a spool counts for either nozzle.
 
 A report from any other model, whether it works or not, is welcome: [Printer report](https://github.com/parthalon025/bambu-filament-guard/issues/new?template=printer_report.yml).
 
