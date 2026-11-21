@@ -1,0 +1,111 @@
+"""Reading a sliced plate: the G-code header and the grams each layer takes (filament_guard)."""
+import io
+
+import pytest
+
+import filament_guard as fg
+from helpers import gcode, sliced, e
+
+
+def profile_of(body, weights, layers=3, why=None, **more):
+    text = sliced(body, weights, layers, **more)
+    return fg.layer_profile(io.BytesIO(text.encode()), fg.parse_plate(text), why)
+
+# Bambu Studio's header total of a filament is its moves along X or Y that extrude, and its purge; measured on 02.09.01.70.
+FLUSH_FORM = ['M83', 'T0', 'G1 E30 F300',                         # A1, P1, X1: the load is a move of the filament alone, not counted
+              f'G1 X10 Y10 E{e(0.10)}', 'G1 E-.8',                 # the prime line counts, the retraction does not
+              'M73 L1', 'G1 E.8', f'G1 X20 Y20 E{e(0.50)}',        # nor does the unretraction
+              'M620 S2A', 'T2', 'M620.11 S1 E-10 F600',            # an E on another command is not a move
+              '; FLUSH_START', f'G1 E{e(0.30)}', f'G1 E{e(0.05)} F50', '; FLUSH_END',   # the purge is these moves of the filament alone
+              'G1 E-2 F1800', 'G1 E2 F300', f'G1 X30 Y30 E{e(0.40)}',
+              'M73 L2', f'G1 X1 Y1 E{e(0.25)}',
+              'T0', '; FLUSH_START', f'G1 X5 E{e(0.20)}', '; FLUSH_END',                  # a move along X inside a purge is purge
+              'M73 L3', f'G1 X2 Y2 E{e(0.20)}']
+
+VFLUSH_FORM = ['T0 H-1', f'G1 X1 Y1 E{e(0.10)}', 'M73 L1', f'G1 X2 Y2 E{e(0.40)}',
+               'M620 S2A H-1', 'T2 H-1', 'M73 E51', ';VG1 E4 F997', ';VG1 E4 F498',    # H2, P2S, A2L, X2D, H3C: the printer purges by itself;
+               '; VFLUSH_START', f';VG1 E{e(0.30)} F997', f';VG1 E{e(0.10)} F997', '; VFLUSH_END',   # only the comments inside the block count
+               f'G1 X3 Y3 E{e(0.30)}', 'M73 L2', f'G1 X4 Y4 E{e(0.30)}',
+               'T0 H-1', '; VFLUSH_START', f';VG1 E{e(0.20)} F997', '; VFLUSH_END', f'G1 X5 Y5 E{e(0.10)}', 'M73 L3', f'G1 X6 Y6 E{e(0.20)}']
+
+def test_totals_belong_to_the_slots_in_use():
+    plate = fg.parse_plate(gcode())
+    assert [(f['slot'], f['type'], f['colour'], f['grams']) for f in plate['filaments']] == [(1, 'PLA', '#0A2989', 9.99), (3, 'PLA', '#C12E1F', 10.87)]
+    assert plate['printer_model'] == 'Bambu Lab H2D' and plate['time'] == '1h 9m 0s'
+    assert plate['filaments'][0]['name'] == 'Bambu PLA Basic'
+
+def test_file_still_being_written_is_not_read():
+    assert fg.parse_plate(gcode(complete=False)) is None
+    assert fg.parse_plate(fg.read_head(io.BytesIO(b'; HEADER_BLOCK_START\n'))) is None
+
+def test_totals_that_cannot_be_placed_are_refused():
+    with pytest.raises(ValueError): fg.parse_plate(gcode(used=None))                 # 2 totals, 3 filaments, no slot list
+    with pytest.raises(ValueError): fg.parse_plate(gcode(used='1,2,3'))
+
+def test_nozzle_only_on_a_two_nozzle_printer():
+    assert [f['nozzle'] for f in fg.parse_plate(gcode(fmap='2,1,1'))['filaments']] == [None, None]
+    assert [f['nozzle'] for f in fg.parse_plate(gcode(fmap='2,1,1', nozzles='0.4,0.4'))['filaments']] == ['right', 'left']
+
+def test_layer_count_is_read():
+    assert fg.parse_plate(gcode().replace('; filament_density', '; total layer number: 27\n; filament_density'))['layers'] == 27
+    assert fg.parse_plate(gcode())['layers'] is None
+
+def test_profile_adds_up_to_the_header_with_the_purge_in_moves():
+    p = profile_of(FLUSH_FORM, '1.00,1.00')
+    assert p['layers'][1] == pytest.approx([0.10, 0.50, 0.20, 0.20], abs=1e-6) and p['purge'][1] == pytest.approx([0, 0, 0.20, 0], abs=1e-6)
+    assert p['layers'][3] == pytest.approx([0, 0.75, 0.25, 0], abs=1e-6) and p['purge'][3] == pytest.approx([0, 0.35, 0, 0], abs=1e-6)
+    assert [sum(p['layers'][s]) for s in (1, 3)] == pytest.approx([1.0, 1.0], abs=1e-12)
+
+def test_profile_adds_up_to_the_header_with_the_purge_in_comments():
+    p = profile_of(VFLUSH_FORM, '1.00,1.00')
+    assert p['layers'][1] == pytest.approx([0.10, 0.40, 0.30, 0.20], abs=1e-6) and p['purge'][1] == pytest.approx([0, 0, 0.20, 0], abs=1e-6)
+    assert p['layers'][3] == pytest.approx([0, 0.70, 0.30, 0], abs=1e-6) and p['purge'][3] == pytest.approx([0, 0.40, 0, 0], abs=1e-6)
+    assert [sum(p['layers'][s]) for s in (1, 3)] == pytest.approx([1.0, 1.0], abs=1e-12)
+    assert profile_of(VFLUSH_FORM[:4], '1.00,1.00') is None                               # ends before its last layer: being rewritten
+    resliced = io.BytesIO(sliced(VFLUSH_FORM, '1.00,1.10').encode())
+    assert fg.layer_profile(resliced, fg.parse_plate(sliced(VFLUSH_FORM, '1.00,1.00'))) is None   # not the file the plate was read from
+
+def test_of_a_purge_as_much_as_the_nozzle_holds_is_the_filament_pushed_out():
+    """Bambu Studio counts that much of each change's purge for the filament leaving the nozzle (nozzle_volume, mm3).
+    It shows when a nozzle ends on another filament than it began with: one nozzle-full more for the first, less for the last."""
+    held = 107 * 1.26 / 1000                                                              # grams of PLA in a 107 mm3 nozzle
+    body = ['T0', f'G1 X1 Y1 E{e(0.5)}', 'M73 L1', f'G1 X2 Y2 E{e(0.5 - held)}',
+            'T2', '; FLUSH_START', f'G1 E{e(0.35)}', '; FLUSH_END', f'G1 X3 Y3 E{e(0.40)}', 'M73 L2', f'G1 X4 Y4 E{e(0.25 + held)}']
+    p = profile_of(body, '1.00,1.00', layers=2, settings=['; nozzle_volume = 107'])
+    assert p['layers'][1] == pytest.approx([0.5, 0.5, 0], abs=1e-6) and p['purge'][1] == pytest.approx([0, held, 0], abs=1e-6)
+    assert p['layers'][3] == pytest.approx([0, 0.75 - held, 0.25 + held], abs=1e-6) and p['purge'][3] == pytest.approx([0, 0.35 - held, 0], abs=1e-6)
+    assert p['pushed'] == {1: pytest.approx([0, held, 0], abs=1e-6), 3: pytest.approx([0, -held, 0], abs=1e-6)}   # kept apart: slot 3's spool gave all 0.35 g
+    assert [sum(p['layers'][s]) for s in (1, 3)] == pytest.approx([1.0, 1.0], abs=1e-12)
+    why = []
+    assert profile_of(body, '1.00,1.00', layers=2, why=why) is None and why[0].startswith('filament 1 adds up to 0.865 g')   # without the nozzle's volume
+
+def test_a_purge_smaller_than_the_nozzle_is_all_the_filament_pushed_out():
+    """Two nozzles, both filaments on the left one (133 mm3); its first filament pushes nothing out."""
+    full = 133 * 1.26 / 1000
+    body = ['T0 H-1', f'G1 X1 Y1 E{e(0.5)}', 'M73 L1',
+            'T2 H-1', '; VFLUSH_START', f';VG1 E{e(0.05)} F997', '; VFLUSH_END', f'G1 X2 Y2 E{e(1 - full)}',   # 40 mm3: all of it slot 1's
+            'M73 L2', 'T0 H-1', '; VFLUSH_START', f';VG1 E{e(0.30)} F997', '; VFLUSH_END', f'G1 X3 Y3 E{e(0.15 + full)}']   # 238 mm3: 133 of it slot 3's
+    p = profile_of(body, '1.00,1.00', layers=2, nozzles='0.4,0.4', fmap='1,1,1', settings=['; nozzle_volume = 133,148'])
+    assert p['layers'][1] == pytest.approx([0.5, 0.05, 0.45], abs=1e-6) and p['purge'][1] == pytest.approx([0, 0.05, 0.30 - full], abs=1e-6)
+    assert p['layers'][3] == pytest.approx([0, 1 - full, full], abs=1e-6) and p['purge'][3] == pytest.approx([0, 0, full], abs=1e-6)
+    assert p['pushed'] == {1: pytest.approx([0, 0.05, -full], abs=1e-6), 3: pytest.approx([0, -0.05, full], abs=1e-6)}
+    assert [sum(p['layers'][s]) for s in (1, 3)] == pytest.approx([1.0, 1.0], abs=1e-12)
+
+def test_profile_counts_only_the_moves_that_extrude():
+    body = ['T0', 'M73 L1', 'G1 X1 Y2 ; E99 in a comment', f'G1 X1 E{e(0.01)} ; then E99',
+            'T1000', f'G1 X2 E{e(0.02)}', 'T65535', f'G1 X2 E{e(0.03)}',                  # not filaments: slot 1 goes on
+            'M82', 'G92 E0', f'G1 X3 E{e(0.04)}', f'G2 X4 Y4 I1 J0 E{e(0.09)}', f'G3 X5 Y5 I1 J0 E{e(0.10)}', 'G92 E0', f'G1 Y6 E{e(0.05)}',
+            'G1 X6 E0', 'M83 ; relative again', f'    G1 X7 E{e(0.09)}',                   # absolute: 0.04, 0.05, 0.01 and 0.05; an indented line counts
+            'M620.11 S1 E-10', f'M650.11 E{e(5)}', 'T2', f'G1 X8 E{e(0.30)}', 'M73 L2', f'G1 X9 E{e(0.30)}', 'M73 L3', f'G1 X1 E{e(0.40)}']
+    p = profile_of(body, '0.30,1.00')['layers']
+    assert p[1] == pytest.approx([0, 0.30, 0, 0], abs=1e-6) and p[3] == pytest.approx([0, 0.30, 0.30, 0.40], abs=1e-6)
+
+def test_profile_out_of_tolerance_is_refused_with_the_figures_and_within_it_scaled():
+    """max(0.02 g, 0.2 %): Bambu Studio 02.09.01.70 agreed with itself to 0.005 g on every slice measured. Further off,
+    its accounting has changed, and the log says by how much."""
+    body = ['T0', 'M73 L1', f'G1 X1 Y1 E{e(0.99)}', 'T2', f'G1 X1 Y1 E{e(20.0)}']
+    p = profile_of(body, '1.00,20.03', layers=1)                                          # 0.01 g and 0.03 g off: within
+    assert p['layers'] == {1: pytest.approx([0, 1.0], abs=1e-12), 3: pytest.approx([0, 20.03], abs=1e-12)}
+    why = []
+    assert profile_of(body, '1.03,20.05', layers=1, why=why) is None
+    assert why == ['filament 1 adds up to 0.990 g, the header says 1.03 g (-0.040 g)', 'filament 3 adds up to 20.000 g, the header says 20.05 g (-0.050 g)']
