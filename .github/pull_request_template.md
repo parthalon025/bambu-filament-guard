@@ -2,7 +2,7 @@
 
 ## How it was tested
 
-<!-- `python -m pytest test_filament_guard.py`, and anything run on a real printer (say which model). -->
+<!-- `python -m pytest`, and anything run on a real printer (say which model). -->
 
 ## Documentation
 

@@ -16,10 +16,29 @@ python filament_guard.py selftest
 From the repository root:
 
 ```powershell
-python -m pytest test_filament_guard.py
+python -m pytest                          # everything, as CI runs it
+python -m pytest -m "not simulation"      # without the simulated printer: about a second
+python -m pytest tests/test_learning.py   # one area
 ```
 
-They need no printer and no Bambu Studio. The same command runs on every push and pull request.
+They need no printer and no Bambu Studio. The full run is on every push and pull request, on Windows.
+
+Tests marked `windows` drive the card, the icon or the state file's named mutex, which call the Windows API. On another system they are skipped, with the reason, and the rest run.
+
+| File | Tests |
+|---|---|
+| `tests/test_gcode.py` | reading a sliced plate: the header, and the grams each layer takes with the purge |
+| `tests/test_assessment.py` | one filament against the spools that could print it: enough, tight, two spools, colour, nozzle |
+| `tests/test_running_print.py` | what the running print still needs, matched to its slice, taken off its spools |
+| `tests/test_entered_amounts.py` | amounts entered by hand, counted down, and the link that follows a printer |
+| `tests/test_learning.py` | learning from previous prints: the record, the model, what it changes, weigh-ins |
+| `tests/test_stats.py` | the estimators learning uses, against known values |
+| `tests/test_simulation.py` | the simulated printer behind the table in [docs/learning.md](docs/learning.md) (marked `simulation`) |
+| `tests/test_guard.py` | the watcher, the card and the commands, as the running guard drives them |
+| `tests/test_state.py` | settings and the state file, with two processes writing it at once |
+| `tests/helpers.py`, `tests/conftest.py` | what several files share: G-code, trays and printer statuses, and the `state` fixture |
+
+A new test goes in the file of what it tests. A helper used by one file stays in that file.
 
 ## Code layout
 
@@ -31,7 +50,8 @@ They need no printer and no Bambu Studio. The same command runs on every push an
 | `guard_learn.py` | learning from previous prints, per tray: the record, the model and its scores, what they change, weigh-ins, `learned` |
 | `guard_stats.py` | the estimators learning uses: shrinkage, the conformal bound, Kaplan-Meier, change points, Fieller's interval; plain arithmetic |
 | `build.py` | makes the packaged folder and its zip |
-| `test_filament_guard.py` | `python -m pytest test_filament_guard.py` (needs no printer and no Bambu Studio) |
+| `tests/` | the tests: see [Run the tests](#run-the-tests) |
+| `pytest.ini` | where the tests are, and their markers |
 | `docs/` | the documentation beyond the README, and its pictures |
 
 ## Conventions
