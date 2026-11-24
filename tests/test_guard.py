@@ -1142,3 +1142,13 @@ def test_the_amount_window_opens_on_the_screen_its_card_is_on(monkeypatch):
     assert placed((1800, 60), (0, 0, 1920, 1040)) == '+1620+0'                               # held inside that screen: its right edge, its top
     assert placed((1160, 440), (0, 0, 1920, 1040), scale=1.5) == '+1160+268'                 # the gap grows with the screen's scaling: 72 pixels at 150 %
     del asked[:]; assert placed((1160, 440), (0, 0, 1920, 1040), owner=None) == '+1160+292' and asked == [1]   # a card with no window of Bambu Studio's: by a window of its own
+
+@pytest.mark.windows
+def test_asking_for_a_screens_work_area_makes_no_new_type_each_time():
+    """work_area defined its MONITORINFO structure inside the function: a class for every call, and ctypes keeps the
+    pointer type of each for good. 6 kB a call, 2.5 calls a second while a card stands beside a dialog."""
+    import ctypes, gc, guard_ui
+    structures = lambda: (gc.collect(), sum(1 for c in ctypes.Structure.__subclasses__() if c.__name__ == 'MONITORINFO'))[1]
+    guard_ui.work_area(1); before = structures()
+    for _ in range(20): guard_ui.work_area(1)
+    assert structures() == before == 1

@@ -112,10 +112,11 @@ def send_dialogs():
     windows = top_windows(); studios = studio_windows(windows)
     return {h: pid for h, pid, cls, title in windows if pid in studios and cls == '#32770' and title in send_titles(pid)}
 
+class MONITORINFO(ctypes.Structure):                    # defined once: made inside work_area, each call left a class and its pointer type behind for good
+    _fields_ = [('cbSize', wt.DWORD), ('rcMonitor', wt.RECT), ('rcWork', wt.RECT), ('dwFlags', wt.DWORD)]
+
 def work_area(hwnd):
     """The usable rectangle of the screen a window is on."""
-    class MONITORINFO(ctypes.Structure):
-        _fields_ = [('cbSize', wt.DWORD), ('rcMonitor', wt.RECT), ('rcWork', wt.RECT), ('dwFlags', wt.DWORD)]
     u32.MonitorFromWindow.restype = wt.HANDLE; u32.MonitorFromWindow.argtypes = (wt.HWND, wt.DWORD)
     u32.GetMonitorInfoW.argtypes = (wt.HANDLE, ctypes.POINTER(MONITORINFO))
     mi = MONITORINFO(); mi.cbSize = ctypes.sizeof(MONITORINFO)
