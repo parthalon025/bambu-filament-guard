@@ -589,3 +589,71 @@ def test_at_send_print_job_a_reading_of_the_printer_that_fails_is_tried_once_mor
     del calls[:]; fails = set(range(1, 99)); guard = guard_with(); at_send(guard)            # the printer is off
     assert guard.card.shown == [('show', 0)] and guard.card.res['error'] == 'printer did not report its status' and guard.card.res['plate_no'] == 3 and len(calls) == 2
     assert (state / 'guard.log').read_text().count('Filament could not be checked: Case') == 0 and (state / 'guard.log').read_text().count('Filament could not be checked: Farm') == 3
+
+class Icon:
+    """The icon, as the guard sees it: the colours and tooltips it was given, in order."""
+    def __init__(self): self.was = []
+    def set(self, tone, text): self.was.append((tone, text))
+    def refresh(self): pass
+
+def answer(plate_no, status, title='Bracket', pid=1, error=None, **more):
+    """An answer as evaluate gives it, cut down to what the guard reads to show it: one filament with this result."""
+    return dict({'title': title, 'plate_no': plate_no, 'pid': pid, 'error': error, 'worst': status, 'rows': [{'slot': 1, 'status': status}],
+                 'printer': {'model': 'Bambu Lab H2D', 'state': 'IDLE'}}, **more)
+
+def warned(first, *then, cfg=CFG, **how):
+    """A guard that has shown `first`, then got each of `then`: (what its card showed after the first, its icon's
+    colours and tooltips after the first, the guard)."""
+    guard = guard_with(cfg); guard.tray = Icon(); guard.deliver(first)
+    seen, said = len(guard.card.shown), len(guard.tray.was)
+    for res in then: guard.deliver(res, **how)
+    return guard.card.shown[seen:], guard.tray.was[said:], guard
+
+@pytest.mark.windows
+def test_a_warning_stands_until_its_own_plate_a_worse_answer_or_the_user_replaces_it(state, monkeypatch):
+    """A fine plate of the same project wiped another plate's warning once 120 s had passed; a fine slice in a second
+    Bambu Studio, or of another unsaved project, wiped it at once. The line that took its place went after 8 seconds,
+    and the icon read "Enough filament for this print · Bracket"."""
+    short, real = answer(1, 'SHORT'), time.time
+    shown, icon, guard = warned(short)
+    assert guard.card.shown == [('show', 0)] and guard.tray.was == [('danger', 'Not enough filament for this print · Bracket, plate 1')]   # the tooltip names the plate
+    monkeypatch.setattr(fg.time, 'time', lambda: real() + 180)                               # plate 2 took three minutes to slice
+    shown, icon, guard = warned(short, answer(2, 'OK'))
+    assert shown == [] and icon == [] and guard.last is short and guard.last_text() == 'Not enough filament for this print · Bracket, plate 1'
+    monkeypatch.setattr(fg.time, 'time', real)
+    for other in (answer(1, 'OK', 'Lid', pid=2), answer(1, 'OK', pid=2), answer(1, 'OK', 'Unsaved project', pid=2),   # another Bambu Studio's fine slice
+                  answer(2, 'SHORT'), answer(2, 'TIGHT'), answer(2, 'UNKNOWN'),                                     # another plate, no worse
+                  answer(2, 'OK', error='the Bambu Lab H2D did not report its status'), answer(2, 'OK', error='no printer', quiet=True)):
+        shown, icon, guard = warned(short, other)
+        assert shown == [] and icon == [] and guard.last is short, other                     # the card stands, and the icon keeps its colour
+    shown, icon, guard = warned(short, answer(1, 'OK'))                                      # its own plate, sliced again and fine: the line takes its place
+    assert shown == [('show', CFG['ok_seconds'])] and icon == [('ok', 'Enough filament for this print · Bracket, plate 1')]
+    shown, icon, guard = warned(short, answer(1, 'OK'), answer(2, 'OK'))                     # and then no warning stands: another plate's line shows
+    assert shown == [('show', CFG['ok_seconds'])] * 2 and guard.last['plate_no'] == 2
+    shown, icon, guard = warned(answer(1, 'TIGHT'), answer(2, 'SHORT'))                      # a worse answer
+    assert shown == [('show', 0)] and icon == [('danger', 'Not enough filament for this print · Bracket, plate 2')] and guard.card.res['plate_no'] == 2
+    shown, icon, guard = warned(answer(1, 'TIGHT'), answer(2, 'SHORT'), answer(1, 'OK'))     # which then stands in its turn
+    assert shown == [('show', 0)] and guard.card.res['plate_no'] == 2
+    shown, icon, guard = warned(short, answer(2, 'OK'), full=True)                           # the user asked for it
+    assert shown == [('show', 0)] and guard.card.res['plate_no'] == 2 and icon[-1][0] == 'ok'
+    shown, icon, guard = warned(answer(1, 'OK', error='the Bambu Lab H2D did not report its status'), answer(2, 'OK'))
+    assert shown == [] and guard.last['error']                                               # a plate that could not be checked is not wiped by a fine one either
+    shown, icon, guard = warned(answer(1, 'OK', error='the Bambu Lab H2D did not report its status'), answer(2, 'TIGHT'))
+    assert shown == [('show', 0)] and guard.card.res['plate_no'] == 2                        # but by a warning
+
+@pytest.mark.windows
+def test_a_standing_warning_gives_way_at_send_print_job_and_goes_when_its_plate_is_fine_and_quiet_is_asked(state):
+    """Every plate was checked again for "Send print job": the warning found there shows beside the dialog whatever
+    stands in the corner; a fine answer there shows nothing and changes nothing. With "One line when there is enough"
+    off, the plate's own fine answer has no line to put in the warning's place: the card goes."""
+    short = answer(1, 'SHORT')
+    shown, icon, guard = warned(short, answer(2, 'TIGHT'), beside=4321)
+    assert shown == [('show', 0)] and guard.card.where == 4321 and guard.card.res['plate_no'] == 2
+    shown, icon, guard = warned(short, answer(2, 'OK'), beside=4321)
+    assert shown == [] and icon == [] and guard.last is short
+    shown, icon, guard = warned(short, answer(1, 'OK'), beside=4321)                         # its own plate, fine now: nothing beside the dialog, and the card goes
+    assert shown == [('close',)] and icon == [('ok', 'Enough filament for this print · Bracket, plate 1')]
+    shown, icon, guard = warned(short, answer(1, 'OK'), answer(2, 'OK'), cfg=dict(CFG, ok_seconds=0))
+    assert shown == [('close',)] and guard.last['plate_no'] == 2
+    shown, icon, guard = warned(short, answer(1, 'OK', error='no printer', quiet=True))      # sliced again for a printer the guard cannot ask
+    assert shown == [('close',)]

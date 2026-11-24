@@ -1030,7 +1030,7 @@ class Guard:
         self.cfg, self.root, self.standing = cfg, root, standing
         self.todo, self.stopping = queue.Queue(), threading.Event()
         self.last, self.paused, self.ticks, self.sending, self.jobs = None, False, 0, set(), {}
-        self.warning = None                                   # the warning on the full card: (title, plate, severity, when, the card's window)
+        self.warning = None                                   # the warning on the full card, while it stands: see standing_warning
         self.busy, self.greeted = {}, False                   # the checks someone waits for, by what started them: (their line, its text)
         self.told = set()                                     # what was said in the log once, and is not said again in this run
         self.card = guard_ui.Card(root, act=self.act, on_close=None if standing else root.quit)
@@ -1074,29 +1074,36 @@ class Guard:
 
     def last_text(self):
         if self.paused: return 'Checks are paused'
-        return f"{headline(self.last)} · {self.last['title']}" if self.last else 'No slice checked yet'
+        if not self.last: return 'No slice checked yet'
+        return f"{headline(self.last)} · {self.last['title']}" + (f", plate {self.last['plate_no']}" if self.last.get('plate_no') else '')
+
+    def standing_warning(self):
+        """The warning whose card still stands: (its plate: Bambu Studio's process, the project, the plate number; its
+        rank; its card's window), or None."""
+        return self.warning if self.warning and self.card.is_open() and self.card.win is self.warning[2] else None
 
     def deliver(self, res, full=False, beside=None):
         """One answer: the full card for a warning (and whenever it is asked for), one line that goes away otherwise.
-        beside: the "Send print job" dialog, next to which only a warning is worth a card. True when the full card shows."""
+        beside: the "Send print job" dialog, next to which only a warning is worth a card. True when the full card shows.
+        A warning's card that stands (a plate that could not be checked counts as one) gives way to a new answer for its
+        own plate of its own Bambu Studio, to a worse answer, to a warning beside "Send print job" (every plate was
+        checked again for it) and to what the user asks for; to nothing else. Another plate's fine answer, or another
+        Bambu Studio's, once put a line that went after 8 seconds in its place and turned the icon green: now it does
+        not show, and the icon keeps the warning's colour."""
         import guard_ui
-        severity = -1 if res['error'] else SEVERITY[res['worst']]
-        if not full and not beside and self.warning and self.card.is_open() and self.card.win is self.warning[4]:   # the warning's own card, still open
-            title, plate_no, was, when, _ = self.warning    # "slice all" brings the plates' answers seconds apart: a plate that is
-            if title == res['title'] and plate_no != res.get('plate_no') and severity < was and time.time() - when < 120: return   # fine does not wipe another plate's warning
+        if not res['error']: res['ignored'] = self.ignored(res)
+        rank, plate, stands = self.rank(res), (res.get('pid'), res['title'], res.get('plate_no')), self.standing_warning()
+        own = bool(stands) and stands[0] == plate
+        if stands and not full and not own and (not rank[0] if beside else rank <= stands[1]): return
         self.last = res
         if self.tray: self.tray.set(guard_ui.tone_of(res), self.last_text()); self.tray.refresh()
-        if res['error']:
-            if full or not res.get('quiet'): self.card.show(res, beside=beside, hold=not full)
-            self.warning = None
-            return full or not res.get('quiet')
-        res['ignored'] = self.ignored(res)
-        if full or (self.opening(res) and not res['ignored']):
+        if full or rank[0]:
             self.card.show(res, beside=beside, hold=not full)
-            self.warning = (res['title'], res.get('plate_no'), severity, time.time(), self.card.win) if severity >= 2 else None
+            self.warning = (plate, rank, self.card.win) if rank[0] else None
             return True
-        elif not beside and self.cfg['ok_seconds']:
-            self.card.show(res, brief=self.cfg['ok_seconds'], hold=True); self.warning = None
+        if not beside and self.cfg['ok_seconds'] and not res['error']: self.card.show(res, brief=self.cfg['ok_seconds'], hold=True)
+        elif own: self.card.close()                           # its plate is fine now and no line takes the card's place: it must not go on saying otherwise
+        if own or not beside: self.warning = None
 
     # -- what the card and the icon ask for
     def later(self, work, then, otherwise=None):
@@ -1195,7 +1202,7 @@ class Guard:
                 if res is not None and older: res['unchecked'] = older; log(f"{res['title']}: {len(plates)} sliced plates, of which the {older} sliced first were not checked when \"Send print job\" opened")
                 if beside and not guard_ui.visible(beside): pass                  # the dialog has closed meanwhile
                 elif res is not None and self.deliver(res, full=not beside, beside=beside): pass
-                elif res is not None and older:                                   # nothing to warn of among those checked: the rest still has to be said
+                elif res is not None and older and not self.standing_warning():           # nothing to warn of among those checked, here or in the corner: the rest still has to be said
                     self.card.note('Not every plate was checked', [
                         (None, f"{res['title']} has {len(plates)} sliced plates. The {SEND_MOST} sliced last were checked now, with nothing to warn of; "
                                f"the {older} sliced before them {'were' if older != 1 else 'was'} not checked."),

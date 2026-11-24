@@ -16,7 +16,7 @@ Bambu Studio has no plugin interface (v02.09.01.70: the `plugins` folder holds i
 1. Bambu Studio writes the G-code of each plate it slices to `%TEMP%\bamboo_model\<day>\<time>#<pid>#<id>\Metadata\.<pid>.<n>.gcode`. The guard watches that folder.
 2. From the G-code it reads the grams each filament needs (purge and prime tower included), and its material, colour, product and nozzle.
 3. It asks the printer the plate was sliced for what is left on every spool (read-only status over the LAN). When the printer is running a print, it first takes off each spool what that print still needs from it: the answer is for the moment the new print could start. See [The running print](running-print.md).
-4. The answer appears as a "Filament check" card inside Bambu Studio's window, bottom right, under the slicing result. With enough of everything it is one line that goes away after 8 seconds; when a filament falls short it is the full table, and it stays until closed or until the next slice.
+4. The answer appears as a "Filament check" card inside Bambu Studio's window, bottom right, under the slicing result. With enough of everything it is one line that goes away after 8 seconds; when a filament falls short it is the full table, and it stays until you close it, until that plate is sliced again in that Bambu Studio, or until a check finds something worse. Another plate's fine answer, or another Bambu Studio's, does not take its place, and shows no line while the warning stands.
 5. When "Send print job" opens, the guard checks every sliced plate of the project again, all against one reading of the printer. The worst answer that is a warning shows beside that dialog, and names its plate: a finding you ignored, or a result you asked not to be warned of, does not stand in for another plate's warning. A plate that could not be checked (the check is tried once more first) is not taken for a fine one: with no warning on any plate, its "could not be checked" card shows. Of a project with more than 30 sliced plates the 30 sliced last are checked: the card says how many older ones were not, and with nothing else to warn of a card says that alone.
 
 The card belongs to Bambu Studio's window: it is above that window and no other, moves and minimises with it, follows its dark or light mode, and never takes the keyboard. It is still drawn by the guard, which must be running.
@@ -45,7 +45,7 @@ When the guard starts, the first time Bambu Studio runs it shows one line, "Bamb
 
 ## The icon and its settings
 
-Its colour and tooltip are the last result. A click shows that result again; before there is one, it checks the newest slice. A click while that check runs shows the "Checking…" line again and starts no second check. The menu: check the newest slice now, pause, self-test, the log, forget what was learned, and the settings:
+Its colour and tooltip are the last result, with its project and plate; while a warning's card stands they stay that warning's. A click shows that result again; before there is one, it checks the newest slice. A click while that check runs shows the "Checking…" line again and starts no second check. The menu: check the newest slice now, pause, self-test, the log, forget what was learned, and the settings:
 
 - One line when there is enough (`ok_seconds`)
 - Warn when a colour is not loaded / when a spool's amount is unknown (`popup_on`: the results that open the full card. "Not enough" and "not loaded" open it whatever that list holds, and one such filament is enough, whatever the others are.)
