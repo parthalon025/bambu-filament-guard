@@ -31,6 +31,39 @@ def run_queued(guard):
 ENOUGH = {'gcode_state': 'IDLE', 'ams': {'ams': [{'id': '0', 'tray': [{'id': '0', 'tray_type': 'PLA', 'tray_color': '0A2989FF', 'remain_g': 500},
                                                                        {'id': '1', 'tray_type': 'PLA', 'tray_color': 'C12E1FFF', 'remain_g': 500}]}]}}
 
+def tk_stand_in(monkeypatch):
+    """Puts a stand-in in tkinter's place (there is none where no screen is) and returns the widgets made on it, in
+    order: each keeps what it was made and configured with (k) and the keys bound to it (keys)."""
+    made = []
+    class Widget:
+        def __init__(self, *a, **k): self.k, self.keys = dict(k), {}; made.append(self)
+        def configure(self, **k): self.k.update(k)
+        def bind(self, key, then): self.keys[key] = then
+        def winfo_reqheight(self): return 100
+        def __getitem__(self, key): return self.k.get(key, '')
+        def __getattr__(self, name): return lambda *a, **k: None
+    class Var:
+        def __init__(self, value=''): self.value, self.watch = value, []
+        def get(self): return self.value
+        def set(self, value): self.value = value; [w() for w in self.watch]
+        def trace_add(self, how, then): self.watch.append(then)
+    monkeypatch.setitem(sys.modules, 'tkinter', type(sys)('tkinter'))
+    for name in ('Toplevel', 'Frame', 'Label', 'Button', 'Entry'): setattr(sys.modules['tkinter'], name, type(name, (Widget,), {}))
+    sys.modules['tkinter'].StringVar = Var
+    return made
+
+def card_shown(monkeypatch, res, brief=0):
+    """The card guard_ui makes for an answer, on the stand-in for tkinter: (the texts of its labels, the texts of its
+    buttons, what happened in order: 'placed' when the card was put on the screen, and each thing it told the guard)."""
+    import guard_ui
+    made, order = tk_stand_in(monkeypatch), []
+    def opened(card, pid=None, beside=None, hold=False):
+        card.win, card.t, card.owner, card.beside, card.held, card.closes_after = sys.modules['tkinter'].Toplevel(), guard_ui.THEMES['dark'], None, None, False, 0
+        return card.win
+    monkeypatch.setattr(guard_ui.Card, '_open', opened); monkeypatch.setattr(guard_ui.Card, '_place', lambda card: order.append('placed'))
+    guard_ui.Card(None, act=lambda name, res, arg=None: order.append((name, arg))).show(res, brief)
+    return [w.k['text'] for w in made if type(w).__name__ == 'Label'], [w.k['text'] for w in made if type(w).__name__ == 'Button'], order
+
 def slice_file(tmp_path, text):
     meta = tmp_path / 'bamboo_model' / 'Thu_Nov_19' / '01_02_03#1#9' / 'Metadata'; meta.mkdir(parents=True, exist_ok=True)
     (meta.parent / 'origin.txt').write_text(r'C:\prints\Benchy.3mf')
@@ -236,23 +269,7 @@ def test_the_empty_spool_typed_is_what_the_next_amount_window_starts_with(state)
 @pytest.mark.windows
 def test_the_amount_window_takes_the_scale_and_the_empty_spool(monkeypatch):
     import guard_ui
-    made = []
-    class Widget:
-        def __init__(self, *a, **k): self.k, self.keys = dict(k), {}; made.append(self)
-        def configure(self, **k): self.k.update(k)
-        def bind(self, key, then): self.keys[key] = then
-        def winfo_reqheight(self): return 100
-        def __getitem__(self, key): return self.k.get(key, '')
-        def __getattr__(self, name): return lambda *a, **k: None
-    class Var:
-        def __init__(self, value=''): self.value, self.watch = value, []
-        def get(self): return self.value
-        def set(self, value): self.value = value; [w() for w in self.watch]
-        def trace_add(self, how, then): self.watch.append(then)
-    monkeypatch.setitem(sys.modules, 'tkinter', type(sys)('tkinter'))
-    for name in ('Toplevel', 'Frame', 'Label', 'Button', 'Entry'): setattr(sys.modules['tkinter'], name, type(name, (Widget,), {}))
-    sys.modules['tkinter'].StringVar = Var
-    acts = []
+    made, acts = tk_stand_in(monkeypatch), []
     card = guard_ui.Card(None, act=lambda name, res, arg=None: acts.append((name, arg))); card.t = guard_ui.THEMES['dark']; card.empty_spool = 200
     def window(tray, weigh=False):
         del made[:], acts[:]; card.ask_amount(None, tray, weigh)
@@ -277,3 +294,17 @@ def test_the_amount_window_takes_the_scale_and_the_empty_spool(monkeypatch):
     scale, spool, result, wrong, save, buttons = window(measured, weigh=True)
     assert (scale.get(), buttons) == ('', ['Save'])                                                # a weigh-in is never guessed from the reading
     scale.set('292'); save(); assert acts == [('spool', 200.0), ('weigh', (measured, 92.0))]
+
+@pytest.mark.windows
+def test_the_card_says_when_what_was_learned_could_not_be_used(state, monkeypatch):
+    """The check went on as with learning off: the full card says so under its table, the one line beside its count."""
+    running(monkeypatch, blue_reads(120))
+    with monkeypatch.context() as m:
+        m.setattr(gn, 'load', lambda: (_ for _ in ()).throw(KeyError('at'))); res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['error'] is None and res['worst'] == 'OK' and res['printer']['unlearned']
+    labels, buttons, _ = card_shown(monkeypatch, res)
+    assert labels[-1].endswith("the amounts are the AMS's estimate. What was learned from previous prints could not be used (KeyError): this check is as without it.")
+    labels, buttons, _ = card_shown(monkeypatch, res, brief=8)
+    assert labels[-1] == '1 filament against the spools on the Bambu Lab H2D; what was learned could not be used' and buttons == ['Details']
+    assert not any('learned' in text for text in card_shown(monkeypatch, fg.evaluate(BLUE, CFG, 'Benchy'))[0])
+

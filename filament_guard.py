@@ -787,15 +787,18 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         # it (see credit: an entered amount the ledger has not yet taken it off included).
         owed, counted = guard_ledger.owed(status, load_state().get('slices', []))
         running = guard_ledger.job_key(status) if status.get('gcode_state') in BUSY else None
+        learned = reserve = unlearned = None
         if cfg.get('learn'):
             import guard_learn
-            credit(trays, owed, guard_learn.corrections(printer['serial'], trays, cfg=cfg), running)
-        else: credit(trays, owed, running=running)
+            try: history = guard_learn.load(); learned = guard_learn.corrections(printer['serial'], trays, history, cfg)
+            except Exception as e:           # what was learned may make a check stricter, never cost it: the check goes on as with learning off, and says so
+                unlearned = f'what was learned from previous prints could not be used ({e.__class__.__name__}): this check is as without it'
+                log(f'learning: {e.__class__.__name__}: {e}: this check is as with learning off')
+        credit(trays, owed, learned, running)
         rows = [assess(f, trays, cfg, times) for f in plate['filaments']]
         share_spools(rows, plate['filaments'], trays, cfg, times)
-        reserve = None
-        if cfg.get('learn'):
-            reserve = guard_learn.reserve_words(printer['serial'], rows, cfg=cfg) or None
+        if cfg.get('learn') and not unlearned:
+            reserve = guard_learn.reserve_words(printer['serial'], rows, history, cfg) or None
             offer = guard_learn.weigh_offer(printer['serial'], rows, cfg)
             if offer: res['weigh'] = offer
     except Exception as e:                   # a status the guard does not understand must end as a card that says so, not as a line in the log
@@ -803,7 +806,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         return res
     res['printer'] = {'model': printer['model'], 'serial': printer['serial'], 'state': status.get('gcode_state', '?'), 'job': status.get('subtask_name', ''),
                       'percent': status.get('mc_percent'), 'layer': status.get('layer_num'), 'layers': status.get('total_layer_num'), 'counted': counted,
-                      'beyond': {t['label']: t['beyond'] for t in trays if round(t.get('beyond') or 0)}, 'reserve': reserve}
+                      'beyond': {t['label']: t['beyond'] for t in trays if round(t.get('beyond') or 0)}, 'reserve': reserve, 'unlearned': unlearned}
     res['rows'] = rows
     res['worst'] = max((r['status'] for r in rows), key=SEVERITY.get, default='OK')
     return res
@@ -845,7 +848,7 @@ def report_text(res):
         busy = f"{job_text(p)}: " + ('the running print is counted: what it still needs is taken off its spools' if p.get('counted') else
                                                     "its spools are still being used, and the guard could not count that print: the amounts are the spools' amounts now")
         busy += beyond_text(p)
-    lines.append(f"  {p['model']}, {p['state']}" + busy + (f"; {p['reserve']}" if p.get('reserve') else ''))
+    lines.append(f"  {p['model']}, {p['state']}" + busy + ''.join(f'; {p[key]}' for key in ('reserve', 'unlearned') if p.get(key)))
     for r in res['rows']:
         lines.append(f"  {r['slot']:>2} {r['type']:<8} {r['colour']} {r['name'][:22]:<22} needs {r['need']:7.1f} g   {tray_text(r):<10} has {has_text(r):<22} {STATUS_WORD[r['status']]}"
                      + (f"  ({r['note']})" if r['note'] else ''))
@@ -1401,7 +1404,11 @@ def main(argv=None):
         if a.forget is not None:
             try: print(guard_learn.forget(a.forget or None, a.printer, names), 'is forgotten'); return 0
             except ValueError as e: print(e); return 1
-        print('\n'.join(guard_learn.report(guard_learn.load(), names, cfg.get('learn'), cfg))); return 0
+        try: lines = guard_learn.report(guard_learn.load(), names, cfg.get('learn'), cfg)
+        except Exception as e:               # a history that cannot be shown must still say so, and how to start again
+            log(f'learned: {e.__class__.__name__}: {e}')
+            print(f'What was learned cannot be shown ({e.__class__.__name__}: {e}). "learned --forget" starts again from nothing.'); return 1
+        print('\n'.join(lines)); return 0
     if a.cmd == 'trays':
         import guard_ledger
         conf = bs_conf()

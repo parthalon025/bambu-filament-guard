@@ -132,10 +132,70 @@ WEIGH_TRAY, WEIGH_ANY = 7 * 86400, 86400   # "Weigh C3..." at most once a week p
 def path():
     return os.path.join(fg.STATE_DIR, 'learned.json')
 
+def number(x, least=-1e9, most=1e9):
+    """Whether x is a number a record can hold: not a truth value, not NaN, and of a size that sums and squares take."""
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and least <= x <= most
+
+def moment(x):
+    """Whether x is a time a record can hold: one that time.localtime takes, on Windows too (1970 to the year 2900)."""
+    return number(x, 0, 2.9e10)
+
+def well_formed(kind, x):
+    """Whether a record of the history file holds what a check and `learned` read from it, in the form they read it. A
+    file cut short, edited by hand or written by another version may not: a key gone, None or text where a number is
+    read, a list where a dict is. Only what is read is asked for: a 1.3.0 record, and keys this version does not know,
+    pass."""
+    if not isinstance(x, dict): return False
+    spool, opt = x.get('spool'), lambda key, test=number: x.get(key) is None or test(x[key])
+    if spool is not None and not (isinstance(spool, dict) and all(spool.get(k) is None or isinstance(spool[k], str) for k in ('id', 'type', 'colour', 'fid'))
+                                  and (spool.get('weight') is None or number(spool['weight']))): return False
+    if kind == 'jobs':
+        sliced, samples, score = x.get('sliced'), x.get('samples'), x.get('score')
+        return (('at' not in x or moment(x['at'])) and isinstance(sliced, dict) and number(sliced.get('printed')) and number(sliced.get('purge'))
+                and all(opt(key) for key in ('before', 'start', 'end', 'fed', 'layer0'))
+                and (not x.get('whole') or (number(x.get('start')) and number(x.get('end'))))
+                and (x.get('before') is None or x.get('start') is None or number(x.get('layer0')))
+                and (samples is None or (isinstance(samples, list) and all(isinstance(p, list) and len(p) == 2 and number(p[0]) and number(p[1]) for p in samples)))
+                and (not score or (isinstance(score, dict) and all(number(score.get(key)) for key in ('n', 'fell', 'learned', 'applied')) and score['n'] > 0)))
+    if kind == 'dry':
+        c = x.get('contradicted')
+        return moment(x.get('at')) and number(x.get('reading')) and (not c or (isinstance(c, dict) and moment(c.get('at')) and number(c.get('reading'))))
+    if kind == 'seen': return moment(x.get('at')) and number(x.get('reading'))
+    if kind == 'weighs': return moment(x.get('at')) and number(x.get('reading')) and number(x.get('weight'))
+    return moment(x.get('at')) and moment(x.get('found'))            # changes
+
+def sift(history):
+    """(the history with only its well-formed records, what was left out, in words): a printer that is not a dict of
+    trays, a tray that is not a dict, a kind that is not a list, and any record that is not well formed. The rest
+    stands: one bad record costs neither a check nor the history."""
+    if not isinstance(history, dict): return {}, ['all of it (not a history)']
+    out, left = {}, []
+    for serial, trays in history.items():
+        if not isinstance(trays, dict): left.append(f"{serial} (not a printer's trays)"); continue
+        out[serial] = {}
+        for label, h in trays.items():
+            if not isinstance(h, dict): left.append(f"{serial} {label} (not a tray's history)"); continue
+            h = out[serial][label] = dict(h)
+            for kind in LIMITS:
+                if kind not in h: continue
+                items = h[kind] if isinstance(h[kind], list) else []
+                good = [x for x in items if well_formed(kind, x)]
+                if not isinstance(h[kind], list): left.append(f'{serial} {label}: its {kind} (not a list)')
+                elif len(good) < len(items): left.append(f'{serial} {label}: {len(items) - len(good)} of {len(items)} {kind}')
+                h[kind] = good
+    return out, left
+
+SAID = set()                  # what load has said it left out: said once in a run of the guard, as every check reads the file
+
 def load():
     """{serial: {tray label: {'jobs': [record], 'dry': [event], 'seen': [..], 'weighs': [..], 'changes': [..]}}}. No file
-    is no history; a damaged one is set aside (filament_guard.read_json, under the state folder's lock like every write)."""
-    return fg.read_json(path(), {})
+    is no history; a damaged one is set aside (filament_guard.read_json, under the state folder's lock like every write).
+    What is not well formed in a file that does read is left out (sift), and the log says what, once; the next write of
+    the history drops it from the file."""
+    history, left = sift(fg.read_json(path(), {}))
+    said = '; '.join(left[:8]) + (f'; and {len(left) - 8} more' if len(left) > 8 else '')
+    if left and said not in SAID: SAID.add(said); fg.log(f'learned.json: left out what cannot be read: {said}')
+    return history
 
 def save(history):
     with fg.state_lock(): fg.write_json(path(), history, separators=(',', ':'))
@@ -189,7 +249,7 @@ def contradicted(event, tray_history=None):
     if not c and tray_history:
         later = [(s['at'], s['reading'], s.get('job', '')) for s in tray_history.get('seen', []) if s['at'] > event['at'] and s['reading'] < event['reading']]
         later += [(j.get('at', 0), fed_of(j), j.get('job', '')) for j in tray_history.get('jobs', []) if j.get('at', 0) > event['at']]
-        later = sorted(x for x in later if x[1] is not None and x[1] < event['reading'])
+        later = sorted((x for x in later if x[1] is not None and x[1] < event['reading']), key=lambda x: x[:2])
         c = {'at': later[0][0], 'reading': later[0][1]} if later else None
     return f"on {day(c['at'])} a spool in it still gave filament at {c['reading']:.0f} g" if c else ''
 
@@ -656,8 +716,8 @@ class Recorder:
                 jobs = [j for j in since(h['jobs'], start) if j.get('score')]
                 i = change_found([j['score'] for j in jobs])
                 if i is not None:
-                    add(history, self.serial, label, 'changes', {'at': jobs[i]['at'], 'found': now, 'job': jobs[i]['job']})
-                    fg.log(f'{label}: its readings changed from "{jobs[i]["job"]}" on: what was learned of it before no longer counts')
+                    add(history, self.serial, label, 'changes', {'at': jobs[i].get('at', 0), 'found': now, 'job': jobs[i].get('job', '')})
+                    fg.log(f'{label}: its readings changed from "{jobs[i].get("job", "")}" on: what was learned of it before no longer counts')
             save(history)
         if notes: fg.log(f'recorded "{job["name"]}" for learning: {", ".join(notes)}' + ('' if job['sound'] else f' (not used: {"; ".join(job["why"])})'))
 
@@ -698,7 +758,7 @@ def report(history, names=None, learning=True, cfg=None):
             t, jobs, dries = est['trays'][label], h.get('jobs', []), h.get('dry', [])
             lines.append(f"  {label}: {len(jobs)} print{'s' if len(jobs) != 1 else ''} recorded, {sum(1 for j in jobs if j.get('sound'))} sound, {len(t['scores'])} scored"
                          + (f"; {len(dries)} run-dr{'ies' if len(dries) != 1 else 'y'}" if dries else '') + (f"; weighed {len(h['weighs'])} time{'s' if len(h['weighs']) != 1 else ''}" if h.get('weighs') else ''))
-            if t['change']: lines.append(f"    a change in its readings was noticed on {day(t['change']['found'])}, from \"{t['change']['job']}\": what came before no longer counts")
+            if t['change']: lines.append(f"    a change in its readings was noticed on {day(t['change']['found'])}, from \"{t['change'].get('job', '?')}\": what came before no longer counts")
             if t['scores']:
                 err = lambda f: sum(abs(s['fell'] - s[f]) for s in t['scores']) / len(t['scores'])
                 lines.append(f"    forecast of the fall, off by on average: learned {err('learned'):.1f} g, without learning {err('n'):.1f} g"
@@ -716,8 +776,8 @@ def report(history, names=None, learning=True, cfg=None):
                          + (', '.join(f"{v:.0f} g {'ran dry' if k == 'dry' else 'weighed near empty'}" for k, v, _ in t['exact']) or 'no run-dry or weigh-in near empty')
                          + (f"; {len(seen)} spool{'s' if len(seen) != 1 else ''} still feeding at {min(seen):.0f} g or more" if seen else ''))
             for d in dries[-3:]:
-                lines.append(f"      ran dry {time.strftime('%d %b %H:%M', time.localtime(d['at']))} at layer {d['layer']} of \"{d['job']}\", reading {d['reading']:.0f} g"
-                             + (f", {d['needed']:.1f} g still to go" if d.get('needed') is not None else ''))
+                lines.append(f"      ran dry {time.strftime('%d %b %H:%M', time.localtime(d['at']))} at layer {d.get('layer', '?')} of \"{d.get('job', '?')}\", reading {d['reading']:.0f} g"
+                             + (f", {d['needed']:.1f} g still to go" if number(d.get('needed')) else ''))
             if measured(est, t, on): lines.append(f"    margin {t['q']:.3f} x (print + {MARGIN_K:.0f} g): the measured reserve is in use")
             else:
                 why = need + [x for x in ('a reading at empty of its own' if len(t['spools']) < OWN_EXACT_MIN else '', 'the setting is off' if not on else '') if x]

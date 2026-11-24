@@ -216,6 +216,7 @@ class Card:
             busy = ((', less what the print running there still needs' if p.get('counted') else ', which is printing a job the guard could not count')
                     + fg.beyond_text(p)) if p['state'] in fg.BUSY else ''
             text = 'Ignored for this project' if res.get('ignored') else f"{len(res['rows'])} filament{'s' if len(res['rows']) != 1 else ''} against the spools on the {p['model']}" + busy
+            if p.get('unlearned'): text += '; what was learned could not be used'
             self._label(line, text, 'muted', 9, row=0, column=0)
             self._button(line, 'Details', lambda: self.act('details', res), row=0, column=1, padx=(3 * SPACE, 0))
             self.closes_after = brief
@@ -245,7 +246,8 @@ class Card:
                     f" It is printing now{fg.job_text(p)}: that job is still drawing from these spools, and the guard could not count what it still needs."
                     if p['state'] in fg.BUSY else '')
             spools += ''.join(f" The print running now needs {g:.0f} g more of {label}'s filament than the loaded spools hold." for label, g in (p.get('beyond') or {}).items())
-            if p.get('reserve'): spools += f" {p['reserve'][:1].upper()}{p['reserve'][1:]}."
+            for key in ('reserve', 'unlearned'):
+                if p.get(key): spools += f" {p[key][:1].upper()}{p[key][1:]}."
             if res.get('weigh'):
                 spools += f" Weighing the spool in {res['weigh']['label']} would settle it: the guard then counts that spool by what it held."
             ignored = ' Ignored for this project: it shows as one line until the finding changes.' if res.get('ignored') else ''

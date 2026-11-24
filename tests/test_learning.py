@@ -53,6 +53,20 @@ def random_history_14(rnd, labels):
                       'seen': [{'at': rnd.uniform(0, 20), 'reading': rnd.uniform(0, 100), 'spool': {'id': str(rnd.randint(0, 9))}} for _ in range(0 if few else rnd.randint(0, 6))]}
     return out
 
+ODD = (None, 'x', -7, 1e300, float('nan'), True, [], {})
+
+def one_change_at_a_time(root):
+    """Changes root in one place, yields (where, what), and puts it back: every key taken out, and every key and item
+    set to each of ODD, at every level."""
+    def walk(node, where):
+        for k in (list(node) if isinstance(node, dict) else range(len(node))):
+            was = node[k]
+            for odd in ODD: node[k] = odd; yield where + (k,), odd
+            if isinstance(node, dict): del node[k]; yield where + (k,), 'taken out'
+            node[k] = was
+            if isinstance(was, (dict, list)): yield from walk(was, where + (k,))
+    yield from walk(root, ())
+
 def test_a_whole_print_is_recorded_tray_by_tray(state):
     benchy(); rec = gn.Recorder('SERIAL'); run_job(rec)
     job = gn.load()['SERIAL']['C3']['jobs'][0]
@@ -505,3 +519,72 @@ def test_a_weighed_spool_is_counted_with_no_more_than_it_held(state):
     assert c3(250) == {}                                                                       # it held more than it read: never counted above the reading
     gn.weigh('SERIAL', 'C3', 200.0, 190.0, spool, now=1e6 + 2)                                 # a quarter full or less: the reading at empty, 10 g
     assert [(k, v) for k, v, _ in gn.estimates(gn.load()['SERIAL'])['trays']['C3']['exact']] == [('weighed', 10.0)] and c3(250)['credited'] == 240
+
+def test_an_odd_history_file_costs_neither_the_check_nor_what_else_was_learned(state, monkeypatch, capsys):
+    """The review changed a learned.json in one place at a time: 33 kinds of change made every check of that printer an
+    error card, and `learned` crashed on the same file. Here a history as the guard writes it has every key taken out,
+    and every key and item set to None, a text, a number, NaN, a truth value, a list and a dict, at every level: no
+    check ends as an error or goes without its learning, and `learned` shows what is left."""
+    benchy(); rec = gn.Recorder('SERIAL'); t = run_job(rec); t = run_job(rec, t=t + 100, task='32')
+    dry_at_7 = from_layer(6, lambda s, tt: (h2d(s['gcode_state'], s['layer_num'], None if s['layer_num'] >= 7 else 20.0, '33'), tt))
+    run_job(gn.Recorder('SERIAL'), before=44.0, t=t + 100, task='33', fault=dry_at_7)
+    spool = {'id': TAG, 'type': 'PLA', 'colour': '#0A2989', 'fid': 'GFA00', 'weight': 1000.0}
+    gn.weigh('SERIAL', 'C3', 110.0, 92.0, spool, now=300.0)
+    h = gn.load(); c3 = h['SERIAL']['C3']
+    for j in c3['jobs']: del j['samples'][2:]                                                # two of its readings layer by layer hold every kind of place
+    c3['dry'].insert(0, {'at': 2.0, 'job': 'Benchy', 'reading': 45.0, 'layer': 3, 'needed': 2.0, 'spool': dict(spool, id='AS 1.3.0 KEPT IT'), 'contradicted': {'at': 3.0, 'job': 'Benchy', 'reading': 30.0}})
+    c3['changes'] = [{'at': 1.0, 'found': 400.0, 'job': 'Benchy'}]
+    h['SERIAL']['B1'] = {'dry': [{'at': 100.0, 'job': 'Cube', 'reading': 12.0, 'layer': 4, 'needed': 3.0, 'spool': dict(spool, id='A SPOOL IN B1'), 'print_error': None, 'hms': None}]}
+    assert gn.sift(json.loads(json.dumps(h))) == (h, []) and [len(c3[kind]) for kind in gn.LIMITS] == [3, 2, 3, 1, 1]   # as written, all of it is well formed
+    running(monkeypatch, blue_reads(110)); seen = {'SERIAL': blue_reads(110)}
+    def checked(history):
+        (state / 'learned.json').write_text(json.dumps(history))
+        res = fg.evaluate(BLUE, CFG, 'Benchy', seen=seen)
+        assert res['error'] is None and res['printer']['unlearned'] is None and fg.main(['learned']) == 0
+        return res['rows'][0]
+    whole = checked(h)['trays'][0]['credited']
+    assert whole < 110 - 20 and '3 prints recorded, 2 sound, 2 scored; 2 run-dries; weighed 1 time' in capsys.readouterr().out   # less than its reading less the 20 g it read when it ran dry
+    for kind, i, key, what in (('dry', 1, 'at', 'taken out'), ('dry', 1, 'reading', None), ('jobs', 0, 'layer0', 'taken out'), ('jobs', 0, 'at', None)):   # the review's four
+        odd, rest = json.loads(json.dumps(h)), json.loads(json.dumps(h))
+        if what is None: odd['SERIAL']['C3'][kind][i][key] = None
+        else: del odd['SERIAL']['C3'][kind][i][key]
+        del rest['SERIAL']['C3'][kind][i]
+        row = checked(odd); out = capsys.readouterr().out
+        assert ('; 1 run-dry;' if kind == 'dry' else '2 prints recorded, 1 sound, 1 scored; 2 run-dries') in out
+        assert row['trays'][0]['credited'] == checked(rest)['trays'][0]['credited'] < 110 and (row['trays'][0]['credited'] == whole) == (kind == 'jobs')   # as if that record alone had never been kept
+    for shape in ([], 'x', None, {'SERIAL': []}, {'SERIAL': {'C3': []}}, {'SERIAL': {'C3': {'jobs': {}, 'dry': c3['dry']}}}):
+        assert checked(shape)['status'] in ('TIGHT', 'SHORT')
+    log = (state / 'guard.log').read_text()
+    assert log.count('learned.json: left out what cannot be read: SERIAL C3: 1 of 2 dry\n') == 1 and 'left out what cannot be read: all of it (not a history)' in log   # said once, not at every read
+    assert "SERIAL (not a printer's trays)" in log and "SERIAL C3 (not a tray's history)" in log and 'SERIAL C3: its jobs (not a list)' in log
+    capsys.readouterr()
+    monkeypatch.setattr(fg, 'read_json', lambda path, empty, read=fg.read_json: h if path == gn.path() else read(path, empty))   # every change is a check: none of them needs the disk
+    monkeypatch.setattr(fg, 'load_state', lambda held={}: held)
+    for where, what in one_change_at_a_time(h):
+        try:
+            res = fg.evaluate(BLUE, CFG, 'Benchy', seen=seen); lines = gn.report(gn.load(), {}, True, MEASURED)
+        except Exception as e: pytest.fail(f'{where} {what}: {e!r}')
+        assert res['error'] is None and res['printer']['unlearned'] is None and lines[0].startswith('Learning from prints is on'), (where, what, res['error'], res['printer']['unlearned'])
+
+def test_learning_that_fails_costs_no_check_and_the_answer_says_so(state, monkeypatch, capsys):
+    """Whatever goes wrong in what was learned (a record of a kind the sifting did not foresee, a history file another
+    program holds), the check goes on as with learning off and says so; the log has the error and its type. `learned`
+    says that it cannot show it, and how to start again."""
+    gn.keep('SERIAL', 'C3', 'dry', empty_at(20.0))
+    running(monkeypatch, blue_reads(120))
+    assert fg.evaluate(BLUE, CFG, 'Benchy')['rows'][0]['status'] == 'TIGHT'                   # counted as 100 g, for 85.3 g and a reserve of 30 g
+    off = fg.evaluate(BLUE, dict(CFG, learn=False), 'Benchy')
+    for where, error in (('corrections', KeyError('at')), ('load', fg.StateBusy('learned.json is held by another program'))):
+        with monkeypatch.context() as m:
+            m.setattr(gn, where, lambda *a, error=error, **k: (_ for _ in ()).throw(error))
+            res = fg.evaluate(BLUE, CFG, 'Benchy')
+        clause = f'what was learned from previous prints could not be used ({type(error).__name__}): this check is as without it'
+        assert res['error'] is None and res['rows'] == off['rows'] and res['worst'] == 'OK' and 'weigh' not in res
+        assert (res['printer']['unlearned'], res['printer']['reserve']) == (clause, None) and fg.report_text(res).splitlines()[1] == '  Bambu Lab H2D, IDLE; ' + clause
+    log = (state / 'guard.log').read_text()
+    assert "learning: KeyError: 'at': this check is as with learning off" in log and 'learning: StateBusy: learned.json is held by another program: this check is as with learning off' in log
+    assert fg.evaluate(BLUE, CFG, 'Benchy')['printer']['unlearned'] is None and off['printer']['unlearned'] is None
+    capsys.readouterr(); monkeypatch.setattr(gn, 'report', lambda *a, **k: 1 / 0)
+    assert fg.main(['learned']) == 1 and capsys.readouterr().out == 'What was learned cannot be shown (ZeroDivisionError: division by zero). "learned --forget" starts again from nothing.\n'
+    assert 'learned: ZeroDivisionError: division by zero' in (state / 'guard.log').read_text() and fg.main(['learned', '--forget']) == 0 and gn.load() == {}
+
