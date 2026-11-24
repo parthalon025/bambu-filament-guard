@@ -354,6 +354,22 @@ def test_the_measured_reserve_is_used_only_when_it_is_turned_on(state, monkeypat
     assert 'margin' in gn.corrections('SERIAL', c3, history, MEASURED)['C3'] and fg.evaluate(BLUE, MEASURED, 'Benchy')['rows'][0]['status'] == 'OK'
     assert fg.main(['learned']) == 0 and 'margin not in use: the setting is off' in capsys.readouterr().out
 
+def test_past_prints_that_fell_short_raise_the_reserve_with_the_measured_reserve_off():
+    """The measured reserve not in use, as it comes: its figure still counts where it is the larger. Nine prints whose
+    reading fell 150 g for 100 g sliced put the forecast further out than the fixed 30 g covers: a spool the fixed
+    reserve calls enough is tight, and the card says why. Never the other way: prints that fell as forecast leave the
+    fixed reserve as it is."""
+    short = {'SERIAL': {'C3': {'jobs': [scored(150.0, at=float(i)) for i in range(9)]}}}
+    c3 = [tray('C3', 135, colour='#0A2989', weight=1000)]
+    def row(history, cfg=CFG): return fg.assess(BLUE['filaments'][0], fg.credit([dict(t) for t in c3], {}, gn.corrections('SERIAL', c3, history, cfg)), cfg)
+    r = row(short)
+    assert (r['status'], r['measured'], r['raised']) == ('TIGHT', False, True) and r['reserve'] > 30 and 'past prints put the figure up to' in r['note']
+    assert r['best'] >= r['need'] + 30                                                         # the fixed reserve alone would have said enough
+    assert 'for C3 the reserve is larger than the fixed one' in gn.reserve_words('SERIAL', [r], short, CFG)
+    assert row(short, MEASURED)['raised']                                                      # turned on but not yet earned (no reading at empty): the same floor
+    even = {'SERIAL': {'C3': {'jobs': [scored(101.0, at=float(i)) for i in range(9)]}}}
+    r = row(even); assert (r['raised'], r['reserve']) == (False, 30.0) and gn.reserve_words('SERIAL', [r], even, CFG) == ''
+
 def test_no_answer_is_looser_than_1_3_0s_until_the_reserve_is_measured():
     """Over random histories, with spools of 250 g to 3 kg, readings that tie or nearly tie in whole grams, and a print
     running: a tray is never counted above its reading, a need never below the slicer's, a measured reserve never below

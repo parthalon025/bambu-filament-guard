@@ -453,10 +453,12 @@ def bias(t, tray):
     return mine[-1]['reading'] - mine[-1]['weight'], mine[-1]['at']
 
 def corrections(serial, trays, history=None, cfg=None, plain_rules=False):
-    """{tray label: {'credited', 'evidence', 'pre', 'pre_note', 'rho', 'rho_note', 'margin', 'margin_note'}} for the
-    trays the printer measures (not an amount entered by hand): what a check counts each with (see the module's
-    docstring). credited: never above the reading, never below 0; rho: never below 1. plain_rules: 1.3.0's rules alone
-    (for comparison). Trays nothing changes for are left out."""
+    """{tray label: {'credited', 'evidence', 'pre', 'pre_note', 'rho', 'rho_note', 'margin', 'margin_note', 'floor',
+    'floor_note'}} for the trays the printer measures (not an amount entered by hand): what a check counts each with
+    (see the module's docstring). credited: never above the reading, never below 0; rho: never below 1. margin: the
+    measured reserve's, in use; floor: the same figure when it is not (the setting off, or not yet earned), where it can
+    only raise the fixed reserve (see filament_guard.assess). plain_rules: 1.3.0's rules alone (for comparison). Trays nothing
+    changes for are left out."""
     history = load() if history is None else history
     ph = history.get(serial, {})
     est = estimates(ph)
@@ -491,7 +493,9 @@ def corrections(serial, trays, history=None, cfg=None, plain_rules=False):
         if credited < g: fix.update(credited=credited, evidence=evidence)
         if round(pre, 1) > 0: fix.update(pre=pre, pre_note=pre_note)
         if rho is not None and round(rho, 3) > 1: fix.update(rho=rho, rho_note=f"its reading falls {rho:.3f} g per sliced gram ({len(t['rated'])} of its prints, drawn to the printer's)")
-        if loose: fix.update(margin=t['q'], margin_note=f"measured from {est['printer']['scored']} scored prints")
+        # Not in use (the setting off, or not yet earned): the same figure is a floor under the fixed reserve, which it can
+        # only raise. That takes forecasts alone, not readings at empty: evidence that a check must be stricter needs less.
+        if t['q'] is not None: fix.update({'margin' if loose else 'floor': t['q'], 'margin_note' if loose else 'floor_note': f"measured from {est['printer']['scored']} scored prints"})
         if fix: out[label] = fix
     return out
 
@@ -511,11 +515,14 @@ def lacking(p):
 
 def reserve_words(serial, rows, history=None, cfg=None):
     """The card's footnote on the reserve, in one clause: which reserve the rows of this check used, and what the measured
-    one still lacks. '' with the measured reserve off, as it is unless turned on: the reserve is then the fixed one,
-    and there is nothing to add to what the results say. '' also when no row came to a reserve (nothing loaded to
-    judge)."""
+    one still lacks. With the measured reserve off, as it is unless turned on, the reserve is the fixed one and there
+    is nothing to add to what the results say ('') unless past prints raised it for a row. '' also when no row came
+    to a reserve (nothing loaded to judge)."""
     judged = [r for r in rows if r.get('reserve') is not None]
-    if not (cfg or {}).get('measured_reserve', False) or not judged: return ''
+    if not judged: return ''
+    if not (cfg or {}).get('measured_reserve', False):
+        raised = sorted({r['trays'][0]['label'] for r in judged if r.get('raised')})
+        return f"for {', '.join(raised)} the reserve is larger than the fixed one: its past prints put the printer's figure further out" if raised else ''
     p = estimates((load() if history is None else history).get(serial, {}))['printer']
     used = [r for r in judged if r.get('measured')]
     if used:

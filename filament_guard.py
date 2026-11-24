@@ -648,14 +648,19 @@ def assess(fil, trays, cfg, times=1):
     # be smaller for that. (A 1 kg spool counted lower by another tray's run-dry once left a 250 g spool the fullest,
     # with 7.5 g for a reserve where 1.3.0 asked 30 g.) The spools are the same whatever was learned, so their largest is.
     reserve = max(need * cfg['margin_pct'] / 100.0, max(t.get('weight') or 0 for t in group) * cfg['spool_reserve_pct'] / 100.0)
-    if group[0].get('margin') is not None:                   # measured from the guard's own past forecasts (guard_learn), within its floor
+    # Measured from the guard's own past forecasts (guard_learn), within its floor. In use ('margin': the setting on, and
+    # earned) it replaces the fixed reserve and may be smaller. Otherwise ('floor') it can only raise the fixed one:
+    # where past prints fell further short than the fixed reserve covers, the answer must not be the looser of the two.
+    fixed, floors = reserve, [t['floor'] for t in group if t.get('floor') is not None]
+    if group[0].get('margin') is not None or floors:
         import guard_learn
         floor_g, floor_share = guard_learn.RESERVE_FLOOR
-        reserve = max(floor_g, floor_share * need, group[0]['margin'] * (row['sliced'] + guard_learn.MARGIN_K))
-    row['reserve'], row['measured'] = reserve, group[0].get('margin') is not None
+        measure = lambda q: max(floor_g, floor_share * need, q * (row['sliced'] + guard_learn.MARGIN_K))
+        reserve = measure(group[0]['margin']) if group[0].get('margin') is not None else max(fixed, measure(max(floors)))
+    row['reserve'], row['measured'], row['raised'] = reserve, group[0].get('margin') is not None, group[0].get('margin') is None and reserve > fixed
     if row['best'] >= need + reserve: row['status'] = 'OK'
     elif row['best'] >= need: row['status'] = 'TIGHT'; row['note'] = (f"{row['best'] - need:.0f} g to spare, and " + (
-        f"past prints put the figure up to {reserve:.0f} g out" if group[0].get('margin') is not None else f"the AMS's figure can be {reserve:.0f} g out"))
+        f"past prints put the figure up to {reserve:.0f} g out" if row['measured'] or row['raised'] else f"the AMS's figure can be {reserve:.0f} g out"))
     elif row['total'] >= need: row['status'] = 'SPLIT'; row['note'] = 'only across these spools: AMS auto refill must be on'
     else: row['status'] = 'SHORT'; row['note'] = f"short by {need - row['total']:.0f} g"
     if unknown and row['status'] in ('SHORT', 'SPLIT', 'TIGHT'): row['note'] += f"; {', '.join(unknown)} holds an unknown amount more"
@@ -719,7 +724,7 @@ def credit(trays, owed, learned=None, running=None, order=None):
         base = fix.get('credited', raw)
         t['reading'] = raw
         if 'credited' in fix: t['credited'], t['evidence'] = base, fix['evidence']
-        for key in ('pre', 'rho', 'margin'):
+        for key in ('pre', 'rho', 'margin', 'floor'):
             if fix.get(key) is not None: t[key], t[key + '_note'] = fix[key], fix[key + '_note']
         if share or base < raw: t['reads'] = raw
         if share: t['owes'], t['reserved'] = share, min(base, share)
