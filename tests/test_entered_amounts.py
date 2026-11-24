@@ -109,7 +109,7 @@ def follow(monkeypatch, script, passes, leap=(0, 0)):
     pass of the follower's 3-second wait; leap: (pass, seconds) the wall clock jumps there (the computer slept). Returns
     the follower, [(pass, job id)] of the statuses it looked at, and for each link it made whether the address was
     looked up afresh."""
-    clock, n, looks, links, tell = [1_800_000_000.0], [0], [], [], {}
+    clock, n, looks, links, tell = [time.time()], [0], [], [], {}
     monkeypatch.setattr(gl, 'time', types.SimpleNamespace(time=lambda: clock[0]))
     monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {'SERIAL': 'code'}})
     monkeypatch.setattr(fg, 'printer_ip', lambda serial, cfg, refresh=False: links.append(refresh) or 'printer')
@@ -338,3 +338,17 @@ def test_the_follower_ends_an_amount_whose_spool_is_gone_once_two_looks_agree(st
     tagged = printing('IDLE', [spool(0, 700), spool(1, 500, **RED)]); assert followed(tagged) == ['SERIAL'] and followed(tagged, tagged) == []
     log = (state / 'guard.log').read_text()
     assert 'A1: amount ended: the tray holds PLA #FFFFFF now' in log and 'A1: amount ended: the printer measures the tray now' in log
+
+def test_an_amount_entered_long_before_the_printer_was_first_followed_is_out_of_date(state, monkeypatch):
+    """400 g are entered on the card of "check --popup", with no guard running: nothing follows the printer. "Part" is
+    printed twice. The guard is started the next day, and its first look, the baseline, counts nothing of what has
+    run: the amount is out of date. An amount entered minutes before that look stands."""
+    part(120.0); over = printing('FINISH', [spool(0, typ='PETG'), spool(2)], task='9', mapping=(2,), layer=100)
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 400)
+    fg.update_state(lambda st: st['spools']['SERIAL']['A3'].__setitem__('at', time.time() - 86400))
+    gl.enter('SERIAL', {'label': 'A1', 'type': 'PETG', 'colour': '#101010'}, 300)        # this one just now
+    gl.JobWatch('SERIAL', dict(CFG, learn=False)).see(over); book = fg.load_state()['spools']['SERIAL']
+    assert book['A3']['stale'] and not book['A1'].get('stale')
+    assert 'entered amounts out of date: A3: entered more than ten minutes before the printer was first followed' in (state / 'guard.log').read_text()
+    running(monkeypatch, over); res = fg.evaluate(needing(300), CFG, 'Next')
+    assert res['worst'] == 'UNKNOWN' and 'the amount entered for A3 is out of date' in res['rows'][0]['note']

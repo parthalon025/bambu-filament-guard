@@ -33,6 +33,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - A job was matched to another project's slice when that project's name began its own: "Bracket_v2" (300 g), printing, was counted by a newer slice of "Bracket" (40 g) with as many layers. A job is now counted by the project named exactly like it, else by the one whose name begins it at the greatest length, and not at all when no slice of that project fits.
 - An entered amount outlived its spool when no plate was sliced while the tray was empty: taken out and replaced by another spool of the same material and colour, the tray kept the old amount. Entries ended only at a check. The guard now also ends them while it follows the printer, once two looks in a row agree, and the log names the tray and the reason.
 - An amount typed while the spool was still on the scale was lost at the check that followed, which saw the tray empty. It now stands until the spool is back in its tray, and an empty tray ends an amount only after the printer has seen the tray loaded with that filament. A report still in pieces, showing no spool in any AMS, no longer ends every entered amount.
+- An amount entered while no guard was running (on the card of `check --popup`) was trusted by a guard started later, whatever had been printed in between: its first look at the printer counts nothing of what has run. An amount entered ten minutes or more before that first look, with nothing following the printer since, is now out of date.
 
 ## [1.4.0] - 2026-11-20
 

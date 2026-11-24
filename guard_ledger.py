@@ -20,6 +20,8 @@ print:
   - when the printer was not followed for ten minutes or more (this computer asleep, the link down) and shows
     another job than the last one counted, every entry of that printer is out of date: more than one print may
     have come and gone.
+  - an entry made ten minutes or more before a follower's first look at the printer, with nothing following the
+    printer in between (no guard was running), is out of date at that look: it takes what has run for the baseline.
 A printer in LAN-only mode gives every job the id 0, so a job sent again has the key of the run before it. Kept with
 the key of the job last counted is therefore whether that job was last seen over ('ended', in the state file): found
 on the printer again after that, it is another run, counted like a new job, or after ten minutes unfollowed making the
@@ -325,6 +327,18 @@ def catch_up(serial, status, state=None):
         return bool(late)
     return fg.update_state(change)
 
+def unfollowed(serial, before, followed):
+    """Makes out of date, at a follower's first look, the entries made before `before` that nothing has followed the
+    printer since (followed: when it was last followed, None: never). An amount entered with no guard running, on the
+    card of "check --popup", was taken for the spool's amount by a guard started a day and two prints later: the first
+    look counts nothing of what has run."""
+    def change(state):
+        old = [l for l, e in state.get('spools', {}).get(serial, {}).items() if e['at'] < before and not (followed and followed >= e['at']) and not e.get('stale')]
+        for l in old: state['spools'][serial][l]['stale'] = True
+        return old
+    old = fg.update_state(change)
+    if old: fg.log(f"entered amounts out of date: {', '.join(old)}: entered more than ten minutes before the printer was first followed, and it may have printed since")
+
 def all_out_of_date(serial, why):
     def change(state):
         for e in state.get('spools', {}).get(serial, {}).values(): e['stale'] = True
@@ -352,17 +366,17 @@ class JobWatch(threading.Thread):
         self.going = {}                                                      # {tray: why} the entries the last look found ended
         self.lost = False                                                    # the last link got no report: look for the printer's address again
 
-    def look(self, status, gap=False, state=None):
-        """status: the printer's whole status now. gap: it was not followed for a while before this look. Returns True
-        when it counted a job (or, failing that, made the entries out of date). An entry made while this job ran is
-        caught up with it (catch_up). What cannot be dealt with now (fg.StateBusy: the state file could not be written) is
-        left for the next look."""
+    def look(self, status, gap=False, state=None, at=None):
+        """status: the printer's whole status now. gap: it was not followed for a while before this look. at: when the
+        printer reported it (now, when not given). Returns True when it counted a job (or, failing that, made the
+        entries out of date). An entry made while this job ran is caught up with it (catch_up). What cannot be dealt
+        with now (fg.StateBusy: the state file could not be written) is left for the next look."""
         gstate, key = status.get('gcode_state'), job_key(status)
         running, done = gstate in RUN, False
         if (gstate, key) != self.seen or gap:
             again = key == self.counted and gstate in fg.BUSY and (self.ended or not running)   # the job counted is on the printer anew: another run of it
             if self.counted is None:                                         # baseline: what runs or has run is not counted, what is being prepared will be
-                self.remember(key if gstate in STARTED else NO_JOB, not running)
+                self.remember(key if gstate in STARTED else NO_JOB, not running); unfollowed(self.serial, (time.time() if at is None else at) - GAP, self.followed)
             elif gap and (key != self.counted or again):                     # prints may have come and gone unseen: this one, and how many before it?
                 all_out_of_date(self.serial, 'the printer was not followed for a while and has printed since'); self.remember(key if gstate in STARTED else NO_JOB, not running); done = True
             elif gstate in STARTED and (key != self.counted or (again and running)):   # a new job, or the same one started anew
@@ -387,7 +401,7 @@ class JobWatch(threading.Thread):
         try:
             if entered and not self.entered: self.restart(state)
             self.entered = entered
-            if entered: self.look(status, gap=bool(self.followed) and at - self.followed > GAP, state=state); self.end(status, state, at)
+            if entered: self.look(status, gap=bool(self.followed) and at - self.followed > GAP, state=state, at=at); self.end(status, state, at)
             self.mark_followed(at); self.mark_printing(status.get('gcode_state') in fg.BUSY); note_job(self.serial, status, state)
         except fg.StateBusy as e: self.say(f'following the printer: {e}; tried again at the next look')
         if self.cfg.get('learn'):
