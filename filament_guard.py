@@ -948,6 +948,10 @@ def credit(trays, owed, learned=None, running=None, order=None, taken=True, gone
     """What each tray is counted with, for the moment the checked print could start: its reading, corrected by what was
     learned of it (learned: guard_learn.corrections; only ever lower, and never an amount entered by hand), less what the
     print running now still needs of it (owed).
+      - Off a tray the printer measures, what the running print still needs comes in the reading's grams: the sliced
+        grams by the tray's learned rate (rho), where its reading falls by more than a gram for each gram sliced, as
+        assess counts the checked print's own need. In sliced grams, a tray reading 700 g with 500 g still to print
+        and a rate of 1.10 is counted with 200 g where its reading will come to 150 g.
       - An amount entered by hand has the running print taken off it like a reading until guard_ledger has done so
         itself: the entry's 'accounted' job is the running one, `running`, nothing was 'missed', and `taken`
         (guard_ledger.taken_off) says it is that run: never while the printer prepares the job, nor when the job the
@@ -970,7 +974,7 @@ def credit(trays, owed, learned=None, running=None, order=None, taken=True, gone
     for t in trays:
         if t['grams'] is None or t.get('stale'): blind[t['label']] = owed.get(t['label'], 0.0); continue
         raw, share, fix, over = t['grams'], owed.get(t['label'], 0.0), {}, 0.0
-        if not t.get('entered'): fix = (learned or {}).get(t['label'], {})
+        if not t.get('entered'): fix = (learned or {}).get(t['label'], {}); share *= max(1.0, fix.get('rho') or 1.0)
         elif not running: share = 0.0
         elif taken and t.get('accounted') == running and t.get('missed') != running: counted.add(t['label']); share, over = 0.0, min(share, t.get('over') or 0.0)
         base = fix.get('credited', raw)

@@ -5,8 +5,9 @@ import time
 import pytest
 
 import filament_guard as fg
+import guard_learn as gn
 import guard_ledger as gl
-from helpers import CFG, H2D_JOB, SLICE, gcode, kept, running, BLUE, BLUE_JOB, needing, part, printing, spool
+from helpers import CFG, H2D_JOB, SLICE, fil, gcode, kept, running, tray, BLUE, BLUE_JOB, needing, part, printing, spool
 
 
 PETG_PLATE = {'printer_model': 'Bambu Lab H2D', 'time': '', 'layers': 3,
@@ -271,3 +272,20 @@ def test_a_job_counted_on_a_tray_that_is_gone_makes_the_entered_spools_of_its_fi
     part(300.0, **BLACK); assert counted() == {'A2': True, 'A3': False} and book()['A3']['grams'] == 400
     assert "out of date: A2, which the print may go on from: A1's amount is not known" in (state / 'guard.log').read_text()
     part(300.0); assert counted() == {'A2': True, 'A3': True}
+
+def test_the_running_print_is_taken_off_a_reading_by_what_the_reading_falls(state):
+    """In ten prints C3's reading has fallen 1.10 g for every gram sliced; the guard counts by 1.094, drawn to the
+    printer's. C3 reads 700 g and the print running still needs 500 g sliced: its reading will fall by 547 g, not by
+    500 g. A plate of 150.7 g, whose own need is counted by that rate, does not fit the 153 g left; taken off in sliced
+    grams it read "enough" on 200 g. An amount entered by hand loses the sliced grams as before, and so does a reading
+    with learning off."""
+    record = lambda at: {'at': at, 'job': f'J{at:g}', 'sound': True, 'whole': True, 'before': 402.0, 'start': 400.0, 'end': 402.0 - (1.10 * 99 + 2.0), 'layer0': 1.0,
+                         'sliced': {'from': 1, 'to': None, 'printed': 99.0, 'purge': 0.0}, 'spool': {}, 'fed': None, 'score': {'n': 100.0, 'fell': 1.10 * 99 + 2.0, 'learned': 100.0, 'applied': 100.0}}
+    trays = [tray('C3', 700.0, weight=1000.0), dict(tray('A1', 700.0, colour='#101010'), entered=1.0)]; owed = {'C3': 500.0, 'A1': 500.0}
+    learned = gn.corrections('S', trays, {'S': {'C3': {'jobs': [record(float(i)) for i in range(10)]}}}, CFG); rho = learned['C3']['rho']
+    assert rho == pytest.approx(1.094, abs=0.0005) and 'A1' not in learned
+    c3, a1 = fg.credit([dict(t) for t in trays], owed, learned, 'J')
+    assert c3['grams'] == pytest.approx(700 - 500 * rho) and c3['owes'] == c3['reserved'] == pytest.approx(500 * rho) and c3['reads'] == 700 and a1['grams'] == 200
+    row = fg.assess(fil(150.7), [c3], CFG)
+    assert row['status'] == 'SHORT' and row['best'] == pytest.approx(152.96, abs=0.01) and 'C3 reads 700 g, of which the running print still needs 547 g' in row['note']
+    assert [t['grams'] for t in fg.credit([dict(t) for t in trays], owed, None, 'J')] == [200, 200]
