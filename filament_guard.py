@@ -286,7 +286,8 @@ def plates_of_file(path):
     whose G-code is not complete, which the caller has to say: left out, the rest would pass for the whole file.
     ValueError, with the reason, for a file that is not one or cannot be read: a 3MF that is damaged, cut short or
     encrypted included."""
-    if zipfile.is_zipfile(path):
+    with open(path, 'rb') as f: zipped = f.read(2) == b'PK'  # a 3MF by how it begins: cut short, is_zipfile no longer knows it (Python 3.15), and it was then called an incomplete G-code file
+    if zipped or zipfile.is_zipfile(path):
         import zlib
         out = []
         try:

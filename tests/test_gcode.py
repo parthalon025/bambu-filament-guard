@@ -210,10 +210,13 @@ def test_check_ends_a_file_it_cannot_read_in_one_line_and_exit_code_3(state, tmp
     with zipfile.ZipFile(tmp_path / 'damaged.gcode.3mf', 'w', zipfile.ZIP_DEFLATED) as z: z.writestr('Metadata/plate_1.gcode', gcode() * 50)
     damaged = bytearray((tmp_path / 'damaged.gcode.3mf').read_bytes()); damaged[60:90] = b'\xff' * 30; (tmp_path / 'damaged.gcode.3mf').write_bytes(damaged)
     locked = bytearray(good); locked[locked.find(b'PK\x03\x04') + 6] |= 1; locked[locked.find(b'PK\x01\x02') + 8] |= 1; (tmp_path / 'locked.gcode.3mf').write_bytes(locked)
-    for name, why in (('cut', 'central directory'), ('damaged', 'Error -3 while decompressing data'), ('locked', 'is encrypted')):
+    for name, why in (('cut', ''), ('damaged', 'Error -3 while decompressing data'), ('locked', 'is encrypted')):    # what Python says of a cut file differs by its version
         path = str(tmp_path / f'{name}.gcode.3mf'); code, out = checked(capsys, path)
         assert code == 3 and out.startswith(f'{path}: this 3MF cannot be read (') and why in out and '\n' not in out
         assert checked(capsys, path, '--json') == (3, json.dumps({'error': out}))
+    monkeypatch.setattr(zipfile, 'is_zipfile', lambda path: False)       # Python 3.15's answer for the cut file: it is a 3MF all the same
+    path = str(tmp_path / 'cut.gcode.3mf'); code, out = checked(capsys, path)
+    assert code == 3 and out.startswith(f'{path}: this 3MF cannot be read (')
     (tmp_path / 'project.3mf').write_bytes(b'PK\x05\x06' + bytes(18))                      # an empty zip: no G-code in it
     assert checked(capsys, str(tmp_path / 'project.3mf')) == (3, f"{tmp_path / 'project.3mf'}: no sliced plate in this 3MF: slice it first (a project file holds no G-code)")
     assert json.loads(checked(capsys, str(tmp_path / 'none.gcode'), '--json')[1])['error'].startswith(f"{tmp_path / 'none.gcode'}: [Errno 2]")
