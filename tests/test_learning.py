@@ -44,12 +44,13 @@ def random_history_14(rnd, labels):
     out = {}
     for label in labels:
         if rnd.random() < 0.3: continue
+        few = rnd.random() < 0.5                                                             # a tray that has had run-dries and little else
         jobs = [dict(scored(n * rnd.uniform(0.85, 1.2) + rnd.uniform(-3, 3), n, at=float(i)), sound=rnd.random() < 0.9)
-                for i, n in enumerate(rnd.uniform(5, 300) for _ in range(rnd.randint(0, 14)))]
+                for i, n in enumerate(rnd.uniform(5, 300) for _ in range(0 if few else rnd.randint(0, 14)))]
         spool = lambda: {'id': str(rnd.randint(0, 5))}
         out[label] = {'jobs': jobs, 'dry': [dict(empty_at(rnd.uniform(-5, 50), rnd.uniform(0, 20)), spool=spool()) for _ in range(rnd.randint(0, 4))],
-                      'weighs': [{'at': rnd.uniform(0, 20), 'reading': rnd.uniform(0, 400), 'weight': rnd.uniform(0, 400), 'spool': spool()} for _ in range(rnd.randint(0, 3))],
-                      'seen': [{'at': rnd.uniform(0, 20), 'reading': rnd.uniform(0, 100), 'spool': {'id': str(rnd.randint(0, 9))}} for _ in range(rnd.randint(0, 6))]}
+                      'weighs': [{'at': rnd.uniform(0, 20), 'reading': rnd.uniform(0, 400), 'weight': rnd.uniform(0, 400), 'spool': spool()} for _ in range(0 if few else rnd.randint(0, 3))],
+                      'seen': [{'at': rnd.uniform(0, 20), 'reading': rnd.uniform(0, 100), 'spool': {'id': str(rnd.randint(0, 9))}} for _ in range(0 if few else rnd.randint(0, 6))]}
     return out
 
 def test_a_whole_print_is_recorded_tray_by_tray(state):
@@ -154,8 +155,8 @@ def test_the_loss_before_the_first_layer_is_added_to_the_need(state, monkeypatch
     assert row['need'] == pytest.approx(2 * 85.3 + 2 * 3.0) and 'C3 lost up to 3.0 g before the first layer of its last 2 prints, which is added to the need' in row['note']
 
 def test_a_tray_counted_lower_does_not_shrink_the_reserve():
-    """The reserve is a share of the fullest spool's weight: learning that makes a small spool the fullest keeps the
-    larger reserve."""
+    """The reserve is a share of the largest matching spool's full weight: learning that makes a small spool the fullest
+    does not make it smaller."""
     trays = [tray('A1', 120, weight=1000), tray('A2', 110, weight=250)]
     learned = {'A1': {'credited': 90.0, 'evidence': 'it read 30 g when a spool ran dry in it on 19 Nov'}}
     plain, strict = fg.assess(fil(100), fg.credit([dict(t) for t in trays], {}), CFG), fg.assess(fil(100), fg.credit([dict(t) for t in trays], {}, learned), CFG)
@@ -164,6 +165,18 @@ def test_a_tray_counted_lower_does_not_shrink_the_reserve():
     learned = {'A1': {'credited': 60.0, 'evidence': 'it read 40 g when a spool ran dry in it on 19 Nov'}}
     plain, strict = fg.assess(fil(85), fg.credit([dict(t) for t in trays], {}), CFG), fg.assess(fil(85), fg.credit([dict(t) for t in trays], {}, learned), CFG)
     assert plain['status'] == strict['status'] == 'TIGHT'
+
+def test_a_small_spool_left_the_fullest_by_what_was_learned_of_another_tray_does_not_shrink_the_reserve():
+    """The review's case, need 65 g. By 1.3.0's rules A2, a 1 kg spool with no history, is the fullest (90 g) and the
+    reserve 30 g: tight. The printer's reading at empty (A1's run-dry at 40 g) counts A2 as 50 g, so A3, a 250 g spool,
+    is the fullest at 76 g; 3 % of that spool's weight, 7.5 g, made it "enough"."""
+    trays = [tray('A1', 100, weight=250), tray('A2', 90, weight=1000), tray('A3', 80, weight=250)]
+    history = {'S': {'A1': {'dry': [empty_at(40.0)]}, 'A3': {'dry': [empty_at(r, 50.0 + i, f'S{i}') for i, r in enumerate((2.0, 3.0, 1.0))]}}}
+    for cfg in (CFG, dict(CFG, measured_reserve=True), dict(CFG, measured_reserve=False)):     # nothing is scored: the reserve is the fixed one either way
+        old = fg.assess(fil(65), fg.credit([dict(t) for t in trays], {}, gn.corrections('S', trays, history, plain_rules=True)), cfg)
+        new = fg.assess(fil(65), fg.credit([dict(t) for t in trays], {}, gn.corrections('S', trays, history, cfg)), cfg)
+        assert (old['status'], old['best'], old['reserve']) == ('TIGHT', 90, 30.0)
+        assert (new['status'], new['reserve'], new['trays'][0]['label']) == ('TIGHT', 30.0, 'A3') and new['best'] == pytest.approx(80 - (2 + gs.t_quantile(0.9, 2) * (4 / 3) ** 0.5))
 
 def test_learning_can_only_make_a_check_stricter():
     """Over random histories: what a tray is counted with only falls, a need only rises, a result only gets worse; with
@@ -288,21 +301,24 @@ def test_the_reserve_is_measured_once_there_are_nine_scored_prints_and_repeated_
     assert not fg.evaluate(BLUE, CFG, 'Benchy')['rows'][0]['measured']                         # readings at empty of another tray only: the fixed reserve
 
 def test_no_answer_is_looser_than_1_3_0s_until_the_reserve_is_measured():
-    """Over random histories: a tray is never counted above its reading, a need never below the slicer's, a measured
-    reserve never below its floor; and until the printer has earned the measured reserve, or with it off, no result is
-    looser than 1.3.0's own rules give."""
+    """Over random histories, with spools of 250 g to 3 kg, readings that tie or nearly tie in whole grams, and a print
+    running: a tray is never counted above its reading, a need never below the slicer's, a measured reserve never below
+    its floor; and with the measured reserve off, or not yet earned, no result is looser than 1.3.0's own rules give."""
     rnd = random.Random(1889)
-    for _ in range(600):
-        labels = rnd.sample(['A1', 'A2', 'B1', 'B2'], rnd.randint(1, 3))
-        trays = [dict(tray(label, rnd.choice([None, rnd.randint(0, 600)]), weight=rnd.choice([None, 1000])), spool=str(rnd.randint(0, 5))) for label in labels]
-        history, cfg = {'S': random_history_14(rnd, labels)}, dict(CFG, measured_reserve=rnd.random() < 0.7)
+    for _ in range(1000):
+        labels, tie = rnd.sample(['A1', 'A2', 'B1', 'B2'], rnd.randint(1, 4)), rnd.randint(0, 300)   # the AMS reads in whole grams: ties happen
+        grams = lambda: rnd.choice([None, tie, tie, tie + rnd.randint(0, 40), tie + rnd.randint(0, 40), rnd.randint(0, 600)])
+        trays = [dict(tray(label, grams(), weight=rnd.choice([None, 250, 500, 1000, 3000])), spool=str(rnd.randint(0, 5))) for label in labels]
+        owed = {t['label']: rnd.choice([0.0, 0.0, 0.0, float(rnd.randint(0, 200))]) for t in trays}
+        history, cfg = {'S': random_history_14(rnd, labels)}, dict(CFG, measured_reserve=rnd.random() < 0.5)
         est = gn.estimates(history['S'])
         earned = cfg['measured_reserve'] and est['printer']['scored'] >= gn.SCORED_MIN and est['printer']['df'] >= gn.SPREAD_DF
-        plain = fg.credit([dict(t) for t in trays], {})
-        old = fg.credit([dict(t) for t in trays], {}, gn.corrections('S', trays, history, plain_rules=True))
-        new = fg.credit([dict(t) for t in trays], {}, gn.corrections('S', trays, history, cfg))
+        plain = fg.credit([dict(t) for t in trays], owed, running='J')
+        old = fg.credit([dict(t) for t in trays], owed, gn.corrections('S', trays, history, plain_rules=True), 'J')
+        new = fg.credit([dict(t) for t in trays], owed, gn.corrections('S', trays, history, cfg), 'J')
         for p, q in zip(plain, new): assert (p['grams'] is None and q['grams'] is None) or 0 <= q['grams'] <= p['grams']
-        need = fil(max(1.0, rnd.choice([rnd.uniform(1, 400), max(t['grams'] or 0 for t in trays) - rnd.uniform(0, 40)])))
+        top = max(t['grams'] or 0 for t in new)                                                # needs just under the fullest: where a reserve decides
+        need = fil(max(1.0, rnd.choice([rnd.uniform(1, 400), top - rnd.uniform(0, 40), top - rnd.uniform(0, 40), top / 1.1 - rnd.uniform(0, 12)])))
         for times in (1, 3):
             a, b = fg.assess(need, old, cfg, times), fg.assess(need, new, cfg, times)
             assert b.get('sliced') is None or b['need'] >= b['sliced'] == need['grams'] * times

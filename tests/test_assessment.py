@@ -18,6 +18,16 @@ def test_a_nearly_empty_spool_is_tight_however_small_the_need():
     assert fg.assess(fil(5), [tray('B2', 30, weight=1000)], CFG)['status'] == 'TIGHT'       # 5 g from a spool that may be 30 g out
     assert fg.assess(fil(400), [tray('B2', 435, weight=1000)], CFG)['status'] == 'TIGHT'    # the 10 % of a large need is the larger reserve
 
+def test_the_reserve_is_a_share_of_the_largest_spool_the_filament_could_be_printed_from():
+    """Not of the fullest spool's: which spool is the fullest changes with what is learned of the trays, and the reserve
+    must not."""
+    small, large = tray('B2', 200, weight=250), tray('C1', 10, weight=1000)
+    assert fg.assess(fil(180), [dict(small)], CFG)['reserve'] == 18.0 and fg.assess(fil(180), [dict(small)], CFG)['status'] == 'OK'   # alone: 10 % of the need
+    for trays in ([small, large], [large, small]):
+        row = fg.assess(fil(180), [dict(t) for t in trays], CFG)
+        assert (row['status'], row['reserve'], row['best']) == ('TIGHT', 30.0, 200) and "the AMS's figure can be 30 g out" in row['note']
+    assert fg.assess(fil(180), [dict(small), tray('C1', 10)], CFG)['reserve'] == 18.0      # a spool whose full weight the printer does not know adds nothing
+
 def test_two_spools_of_the_same_filament():
     row = fg.assess(fil(50), [tray('B2', 30), tray('C1', 40)], CFG)
     assert row['status'] == 'SPLIT' and row['best'] == 40 and row['total'] == 70

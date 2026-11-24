@@ -49,8 +49,9 @@ STARTUP_LNK = os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Windows'
 
 DEFAULTS = {
     # "Enough" asks for the need plus a reserve, because the AMS's figure is an estimate: the larger of margin_pct of
-    # the need and spool_reserve_pct of the spool's full weight (30 g on a 1 kg spool). The AMS counts what it feeds,
-    # so its error grows with what the spool has given, and is largest when the spool is nearly empty.
+    # the need and spool_reserve_pct of a spool's full weight (30 g on a 1 kg spool), the largest spool's of those the
+    # filament could be printed from. The AMS counts what it feeds, so its error grows with what the spool has given,
+    # and is largest when the spool is nearly empty.
     # Measured 2026-11-19 (H2D): a 1 kg spool reported at 105 g ran dry after 84-85 g of a print that needed 85.3 g.
     'margin_pct': 10,
     'spool_reserve_pct': 3,
@@ -610,7 +611,6 @@ def assess(fil, trays, cfg, times=1):
                        + (f", {t['grams']:.0f} g" if t['grams'] is not None else ''))
         return row
     group = [t for t in near if fil['fid'] and t['fid'] == fil['fid']] or near
-    plainest = max(group, key=lambda t: t.get('plain', t['grams']) or 0)   # the fullest spool had nothing been learned: taken before the sort by learned grams, so a tie goes as it would
     group.sort(key=lambda t: -(t['grams'] or 0))
     row['sliced'] = need                                     # what the slicer says; the need below never falls under it
     # What was learned of the trays (guard_learn): the largest rate and loss before layer 1 of the matching spools, as
@@ -630,9 +630,11 @@ def assess(fil, trays, cfg, times=1):
                        else f"{', '.join(unknown)} reports no remaining amount")
         return row
     row['best'], row['total'] = max(known), sum(known)
-    # The reserve is a share of the fullest spool's full weight. Learning may make another spool the fullest: the larger
-    # of the two weights is taken, so that the reserve is never smaller for having learned (see credit).
-    reserve = max(need * cfg['margin_pct'] / 100.0, max(group[0].get('weight') or 0, plainest.get('weight') or 0) * cfg['spool_reserve_pct'] / 100.0)
+    # The reserve is a share of the largest full weight among the spools the filament could be printed from, not of the
+    # fullest spool's: which spool is the fullest changes with what was learned of the trays, and the reserve must never
+    # be smaller for that. (A 1 kg spool counted lower by another tray's run-dry once left a 250 g spool the fullest,
+    # with 7.5 g for a reserve where 1.3.0 asked 30 g.) The spools are the same whatever was learned, so their largest is.
+    reserve = max(need * cfg['margin_pct'] / 100.0, max(t.get('weight') or 0 for t in group) * cfg['spool_reserve_pct'] / 100.0)
     if group[0].get('margin') is not None:                   # measured from the guard's own past forecasts (guard_learn), within its floor
         import guard_learn
         floor_g, floor_share = guard_learn.RESERVE_FLOOR
@@ -692,14 +694,10 @@ def credit(trays, owed, learned=None, running=None, order=None):
       - What the running print needs beyond a tray's amount comes, with AMS auto refill, from the loaded spools of the
         same filament (same_filament), the fullest first: it is taken off them ('taken' on the tray, 'refills' on
         theirs); what none of them holds is 'beyond' (assess and the card say so).
-    Keeps the amount before any of this ('reads') whenever something was corrected or taken off, and what the tray would
-    be counted with had nothing been learned ('plain'), which keeps the reserve from shrinking (see assess). The spools
-    a print goes on with are taken in the order they would be without learning (`order`), so that no tray is ever
-    counted higher for what was learned of another."""
-    plain = None
-    if learned:
-        plain = {t['label']: t for t in credit([dict(t) for t in trays], owed, None, running)}
-        order = {label: t.get('left', t['grams']) for label, t in plain.items()}
+    Keeps the amount before any of this ('reads') whenever something was corrected or taken off. The spools a print
+    goes on with are taken in the order they would be without learning (`order`), so that no tray is ever counted
+    higher for what was learned of another."""
+    if learned: order = {t['label']: t.get('left', t['grams']) for t in credit([dict(t) for t in trays], owed, None, running)}
     for t in trays:
         if t['grams'] is None or t.get('stale'): continue
         raw, share, fix = t['grams'], owed.get(t['label'], 0.0), {}
@@ -725,8 +723,6 @@ def credit(trays, owed, learned=None, running=None, order=None):
             o.setdefault('refills', []).append((t['label'], g)); t.setdefault('taken', []).append((o['label'], g))
             if excess <= 1e-6: break
         if excess > 1e-6: t['beyond'] = excess
-    for t in trays:
-        if 'left' in t: t['plain'] = plain[t['label']]['grams'] if plain else t['grams']
     return trays
 
 def pick_printer(model, printers):

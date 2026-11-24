@@ -9,6 +9,11 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 ### Changed
 
 - The window for a spool's amount ("Amount in …", "Weigh C3…") takes what the scale shows and what the empty spool weighs, and takes one from the other: the filament shows as you type. It starts with the empty spool's weight entered last (`empty_spool_g`, 250 g at first); 0 there is the filament weighed alone, as before.
+- The reserve's share of a spool's full weight (3 %) is taken from the largest spool the filament could be printed from, not from the fullest one. With a 250 g and a 1 kg spool of one filament loaded, the reserve is 30 g whichever is the fullest, so a check can be "tight" where it was "enough".
+
+### Fixed
+
+- With learning on, a check could answer "enough" where 1.3.0's rules said "tight", before any reserve was measured. Which spool is the fullest changes with what was learned of the trays: a 1 kg spool counted lower for another tray's run-dry left a 250 g spool the fullest, and the reserve fell from 30 g to 7.5 g. The reserve no longer depends on which spool is the fullest.
 
 ## [1.4.0] - 2026-11-20
 
