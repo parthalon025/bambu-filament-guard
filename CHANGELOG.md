@@ -60,6 +60,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - Every click on "Amount in …" opened another window, and each stayed on top of every program after the card and Bambu Studio were gone. There is one such window at a time: a second click brings it forward, and it closes with the card it came from.
 - An "&" in a project's title showed as an underlined letter in the icon's menu. It shows as "&".
 - The card's buttons had no border, and in Bambu Studio's light mode their background is all but the card's own: they read as plain text. They have a one-pixel border in both modes.
+- When the guard's window loop ended by an error, its icon stayed in the notification area and the process stayed with it: a guard that checked nothing looked alive. The icon is now stopped whatever ends the loop.
 
 ## [1.4.0] - 2026-11-20
 

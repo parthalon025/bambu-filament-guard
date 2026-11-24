@@ -1534,9 +1534,10 @@ class Guard:
         finally: self.root.after(400, self.pump)                                 # whatever happened above: without the next round there is no card, no menu and no Quit
 
     def loop(self):
-        self.root.after(400, self.pump); self.root.mainloop()
-        if self.tray: self.tray.stop()
-        for job in self.jobs.values(): job.stopped.set()
+        try: self.root.after(400, self.pump); self.root.mainloop()
+        finally:                                              # whatever ended the loop: the icon's thread is no daemon, and left running it kept a dead guard looking alive
+            if self.tray: self.tray.stop()
+            for job in self.jobs.values(): job.stopped.set()
 
 
 def watch(start_line=True):

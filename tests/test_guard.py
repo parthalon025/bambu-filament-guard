@@ -1249,3 +1249,14 @@ def test_buttons_have_a_border_from_the_theme(state, monkeypatch):
         assert [w.k['text'] for w in buttons] == ['Check again', 'Ignore for this project']
         assert {(w.k.get('highlightthickness'), w.k.get('highlightbackground')) for w in buttons} == {(1, guard_ui.THEMES[theme]['border'])}
     assert {(w.k.get('highlightthickness'), w.k.get('highlightbackground')) for w in amount_asked(monkeypatch, EXT).made if type(w).__name__ == 'Button'} == {(1, guard_ui.THEMES['dark']['border'])}
+
+@pytest.mark.windows
+def test_the_icon_is_stopped_whatever_ends_the_cards_loop(state):
+    """The icon runs on a thread of pystray's that is no daemon: when the Tk loop ended by an exception, the icon was not
+    stopped, the process stayed, and a dead guard looked alive (its icon there, "status" saying it runs)."""
+    def broken(): raise RuntimeError('the Tk loop has ended')
+    guard, stopped = guard_with(), []
+    guard.root = type('Root', (), {'after': lambda self, ms, then: None, 'mainloop': lambda self: broken()})()
+    guard.tray = type('Icon', (), {'stop': lambda self: stopped.append('icon')})(); guard.jobs['SERIAL'] = type('Job', (), {'stopped': threading.Event()})()
+    with pytest.raises(RuntimeError): guard.loop()
+    assert stopped == ['icon'] and guard.jobs['SERIAL'].stopped.is_set()
