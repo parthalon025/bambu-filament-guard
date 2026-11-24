@@ -1876,13 +1876,20 @@ def start(start_line=True):
     if is_running(): return
     subprocess.Popen(own_command('watch', *([] if start_line else ['--no-start-line'])), cwd=HERE, close_fds=True, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
+def powershell():
+    """Windows' own PowerShell, by its full path under %SystemRoot%. Started by its bare name, the one that ran was the
+    first Windows found, and it looks in the folder of the running Python and in the current folder before System32:
+    a powershell.exe lying where `install` is run from. The bare name only where that file is not."""
+    own = os.path.join(os.environ.get('SystemRoot') or r'C:\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    return own if os.path.isfile(own) else 'powershell'
+
 def shortcut_folder():
     """The folder the Startup shortcut starts a guard from (its working directory: where that guard's script is), or ''
     when there is no shortcut or it cannot be read. Asked of the same WScript.Shell object that makes it; the answer
     comes as the bytes of its UTF-8 in hex, because the console's code page would garble a folder name outside it."""
     if not os.path.exists(STARTUP_LNK): return ''
     try:
-        out = subprocess.run(['powershell', '-NoProfile', '-Command', "$d=(New-Object -ComObject WScript.Shell).CreateShortcut($env:FG_LNK).WorkingDirectory; "
+        out = subprocess.run([powershell(), '-NoProfile', '-Command', "$d=(New-Object -ComObject WScript.Shell).CreateShortcut($env:FG_LNK).WorkingDirectory; "
                               "[BitConverter]::ToString([Text.Encoding]::UTF8.GetBytes($d))"], env=dict(os.environ, FG_LNK=STARTUP_LNK),
                              capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
         return bytes.fromhex(out.stdout.strip().replace('-', '')).decode('utf-8')
@@ -1892,7 +1899,7 @@ def make_shortcut():
     """The Startup shortcut. The guard starts with Windows and waits; its icon shows while Bambu Studio runs."""
     cmd = own_command('watch')
     env = dict(os.environ, FG_LNK=STARTUP_LNK, FG_EXE=cmd[0], FG_ARGS=subprocess.list2cmdline(cmd[1:]), FG_DIR=HERE)
-    subprocess.run(['powershell', '-NoProfile', '-Command',
+    subprocess.run([powershell(), '-NoProfile', '-Command',
                     "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:FG_LNK); $s.TargetPath=$env:FG_EXE; $s.Arguments=$env:FG_ARGS; "
                     "$s.WorkingDirectory=$env:FG_DIR; $s.Description='Warns when the loaded spools do not hold enough filament for a sliced print'; $s.Save()"],
                    env=env, check=True, capture_output=True, text=True, errors='replace', timeout=60, creationflags=subprocess.CREATE_NO_WINDOW)

@@ -1477,3 +1477,18 @@ def test_what_is_kept_for_no_printer_of_bambu_studio_goes_at_the_next_look_for_a
     fg.update_state(lambda st: st.update(ips=['not', 'a', 'dict']))                                               # and what is no such list at all
     assert fg.printer_ip('SERIAL', CFG, refresh=True) is None and fg.load_state()['ips'] == {}
     assert announcements(monkeypatch, ['SERIAL'], notice('SERIAL' + 'A' * 1900, '192.0.2.50', BAMBU), notice('SERIAL', '192.0.2.50' + '0' * 1900, BAMBU)) == {}
+
+def test_the_startup_shortcut_is_made_and_read_by_windows_own_powershell(tmp_path, monkeypatch):
+    """`powershell` was started by its bare name. Windows looks for that in the folder of the running Python and in the
+    current folder before System32: a powershell.exe lying where `install` is run from was what ran, at every install.
+    It is started by its full path under %SystemRoot%, and by its bare name only where that file is not."""
+    ran = []
+    monkeypatch.setattr(fg.subprocess, 'run', lambda cmd, **how: ran.append(cmd[0]) or type('Done', (), {'stdout': ''})())
+    monkeypatch.setattr(fg.subprocess, 'CREATE_NO_WINDOW', 0, raising=False)
+    lnk = tmp_path / 'Bambu Filament Guard.lnk'; lnk.write_text(''); monkeypatch.setattr(fg, 'STARTUP_LNK', str(lnk))
+    monkeypatch.setenv('SystemRoot', str(tmp_path / 'Windows'))
+    fg.make_shortcut(); fg.shortcut_folder()
+    assert ran == ['powershell', 'powershell']                                             # no such file here: the name, as before
+    own = tmp_path / 'Windows' / 'System32' / 'WindowsPowerShell' / 'v1.0' / 'powershell.exe'; own.parent.mkdir(parents=True); own.write_text('')
+    del ran[:]; fg.make_shortcut(); fg.shortcut_folder()
+    assert ran == [str(own), str(own)]
