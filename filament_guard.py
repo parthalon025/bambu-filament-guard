@@ -1063,6 +1063,15 @@ class Guard:
         on = set(self.popup_on()) | {'SHORT', 'MISSING'}
         return [r['status'] for r in res['rows'] if r['status'] in on]
 
+    def rank(self, res):
+        """How much an answer asks to be seen, for choosing among a project's plates: (2, the severity of its worst row
+        that opens the card) when it opens the card by itself, which an ignored one ('ignored', as set on it) does not;
+        (1, 0) for a plate that could not be checked, which is not a fine one; (0, its severity) for the rest, a line at
+        most, and (0, -1) for a plate sliced for a printer the guard has none to ask about."""
+        if res['error']: return (0, -1) if res.get('quiet') else (1, 0)
+        opening = [] if res.get('ignored') else self.opening(res)
+        return (2, max(SEVERITY[s] for s in opening)) if opening else (0, SEVERITY[res['worst']])
+
     def last_text(self):
         if self.paused: return 'Checks are paused'
         return f"{headline(self.last)} · {self.last['title']}" if self.last else 'No slice checked yet'
@@ -1145,8 +1154,8 @@ class Guard:
 
     def check_newest(self, pid=None, beside=None):
         """From the icon: the newest slice, as a full card. At "Send print job" (beside): every plate of the project the
-        sending Bambu Studio has sliced, because which of them is being sent cannot be read; the worst answer shows,
-        when it is a warning, and names its plate. Of more than SEND_MOST plates the ones sliced last are checked, and
+        sending Bambu Studio has sliced, because which of them is being sent cannot be read; the answer that most asks
+        to be seen (rank) shows, when it is a warning, and names its plate. Of more than SEND_MOST plates the ones sliced last are checked, and
         what shows says how many were not: silence beside the dialog means every sliced plate is fine."""
         import guard_ui
         key = None if beside else 'icon'                      # beside the dialog only a warning shows: no line while it is checked
@@ -1160,7 +1169,7 @@ class Guard:
         paths, older = plates[:SEND_MOST], len(plates[SEND_MOST:])
         if key: self.checking(key, checking_text(printer_for(plate_at(newest))), studio_pid(newest))
         def work():
-            seen, out, unread = {}, [], []
+            seen, out, unread, failed = {}, [], [], {}
             for path in paths:
                 try:
                     with open(path, 'rb') as f: plate = parse_plate(read_head(f))
@@ -1168,9 +1177,18 @@ class Guard:
                     log(f'cannot read the slice {path}: {e.__class__.__name__}: {e}'); unread.append(f'it cannot be read ({e})'); continue
                 if plate is None: unread.append('Bambu Studio is still writing it'); continue
                 if not plate['filaments']: continue
-                res = evaluate(plate, self.cfg, project_title(path), seen=seen); res['pid'], res['plate_no'], res['gcode'] = studio_pid(path), plate_number(path), path
+                title, model = project_title(path), plate['printer_model']
+                # A check that fails is tried once more: one reading that timed out once dropped the plate being sent. A
+                # printer that gave no reading either time is not asked again for each plate (30 plates, 10 s a try):
+                # its other plates get that answer.
+                res = dict(failed[model], plate=plate, time=plate['time']) if model in failed else evaluate(plate, self.cfg, title, seen=seen)
+                if res['error'] and not res.get('quiet') and model not in failed:
+                    res = evaluate(plate, self.cfg, title, seen=seen)
+                    if res['error'] and not seen: failed[model] = res
+                res['pid'], res['plate_no'], res['gcode'] = studio_pid(path), plate_number(path), path
+                if not res['error']: res['ignored'] = self.ignored(res)
                 log(('at "Send print job": ' if beside else 'checked on request: ') + report_text(res).replace('\n', ' | ')); out.append(res)
-            return (max(out, key=lambda r: -1 if r['error'] else SEVERITY[r['worst']]) if out else None), unread    # the newest of the worst
+            return (max(out, key=self.rank) if out else None), unread             # the newest of those that most ask to be seen
         def then(found):
             res, unread = found
             try:

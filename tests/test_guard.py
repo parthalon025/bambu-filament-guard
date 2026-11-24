@@ -478,15 +478,16 @@ def test_an_ignore_kept_by_an_earlier_version_counts_as_lapsed(state, monkeypatc
     assert card_for(blue_print(monkeypatch, 60, 55)) == 'full'
 
 def project_of(tmp_path, monkeypatch, weights, title='Farm'):
-    """A project sliced by one Bambu Studio (process 1), "slice all": one plate for each of weights, the first sliced
-    first, a second apart, in place of what was sliced there before. Returns their files."""
+    """A project sliced by one Bambu Studio (process 1), "slice all": one plate for each of weights (the grams of its blue
+    and red, or its whole G-code), the first sliced first, a second apart, in place of what was sliced there before.
+    Returns their files."""
     meta = tmp_path / 'bamboo_model' / 'Thu_Nov_19' / '01_02_03#1#9' / 'Metadata'; meta.mkdir(parents=True, exist_ok=True)
     (meta.parent / 'origin.txt').write_text(f'C:/prints/{title}.3mf')
     monkeypatch.setattr(fg.tempfile, 'gettempdir', lambda: str(tmp_path)); monkeypatch.setattr(fg, 'BS_DATA', str(tmp_path / 'none'))
     files, now = [], time.time()
     for f in meta.glob('.*.gcode'): f.unlink()
     for n, w in enumerate(weights):
-        f = meta / f'.1.{n}.gcode'; f.write_text(gcode(weights=w)); fg.os.utime(f, (now - 600 + n, now - 600 + n)); files.append(f)
+        f = meta / f'.1.{n}.gcode'; f.write_text(w if '\n' in w else gcode(weights=w)); fg.os.utime(f, (now - 600 + n, now - 600 + n)); files.append(f)
     return files
 
 def at_send(guard, pid=1, dialog=4321):
@@ -527,3 +528,64 @@ def test_of_more_than_30_plates_the_card_says_how_many_were_not_checked(state, t
     project_of(tmp_path, monkeypatch, [FINE] * 30)                                           # 30 fine plates: nothing to say
     guard = guard_with(); at_send(guard)
     assert guard.card.shown == []
+
+def sliced_again(f):
+    """The plate of this file is sliced again: it is the newest now."""
+    fg.os.utime(f, (time.time() - 100, time.time() - 100))
+
+@pytest.mark.windows
+def test_at_send_print_job_a_plate_that_shows_nothing_does_not_stand_for_one_that_warns(state, tmp_path, monkeypatch):
+    """One answer was chosen as the worst before it was known whether it would show. Plate 1's colour, ignored on
+    purpose (or unticked), ranks with plate 2's shortfall and was sliced last: it was chosen, and showed nothing."""
+    import guard_ui
+    monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True); running(monkeypatch, spools((GREEN_PLA, 500), (RED_PLA, 2)))
+    blue, red = project_of(tmp_path, monkeypatch, [gcode(weights='9.99', used='1'), gcode(weights='10.87', used='3')], 'Case')
+    sliced_again(blue)
+    first = fg.evaluate(fg.parse_plate(blue.read_text()), CFG, 'Case'); first['pid'], first['plate_no'], first['gcode'] = 1, 1, str(blue)
+    assert first['worst'] == 'COLOUR'
+    guard = guard_with(); guard.deliver(first); guard.act('ignore', first)
+    guard = guard_with(); at_send(guard)
+    assert guard.card.shown == [('show', 0)] and guard.card.where == 4321 and (guard.card.res['plate_no'], guard.card.res['worst']) == (2, 'SHORT')
+    fg.update_state(lambda st: st.pop('ignored'))
+    guard = guard_with(dict(CFG, popup_on=['TIGHT'])); at_send(guard)                        # the colour not ignored, but not one to warn of
+    assert guard.card.shown == [('show', 0)] and (guard.card.res['plate_no'], guard.card.res['worst']) == (2, 'SHORT')
+    guard = guard_with(); at_send(guard)                                                     # both warn: the newest of the worst, as before
+    assert guard.card.shown == [('show', 0)] and (guard.card.res['plate_no'], guard.card.res['worst']) == (1, 'COLOUR')
+
+@pytest.mark.windows
+def test_at_send_print_job_a_plate_that_could_not_be_checked_is_not_a_fine_one(state, tmp_path, monkeypatch):
+    """An answer that is an error ranked below "enough": with another plate fine, nothing showed for the plate that was
+    not checked. It ranks above enough and unknown, below every warning; and the check is tried once more first."""
+    import guard_ui
+    monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True); running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 500)))
+    project_of(tmp_path, monkeypatch, [FINE, '9.50,10.87', FINE])
+    check, tried = fg.evaluate, []
+    def evaluate(plate, cfg, title='', times=1, seen=None):
+        res = check(plate, cfg, title, times, seen)
+        if plate['filaments'][0]['grams'] == 9.5: tried.append(1); res['error'] = "the Bambu Lab H2D's report could not be worked out (KeyError: 'tray')"
+        return res
+    monkeypatch.setattr(fg, 'evaluate', evaluate)
+    guard = guard_with(); at_send(guard)
+    assert guard.card.shown == [('show', 0)] and guard.card.where == 4321 and guard.card.res['plate_no'] == 2 and guard.card.res['error'] and len(tried) == 2
+    project_of(tmp_path, monkeypatch, [FINE, '9.50,10.87', TOO_MUCH, FINE])                  # a plate that warns comes before it
+    guard = guard_with(); at_send(guard)
+    assert guard.card.shown == [('show', 0)] and (guard.card.res['plate_no'], guard.card.res['worst'], guard.card.res['error']) == (3, 'SHORT', None)
+
+@pytest.mark.windows
+def test_at_send_print_job_a_reading_of_the_printer_that_fails_is_tried_once_more(state, tmp_path, monkeypatch):
+    """The first reading timed out, the next worked: the plate read first was dropped as an error, the others were fine,
+    and nothing showed for the short one. A printer that stays away is asked twice, not twice for every plate."""
+    import guard_ui
+    monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True); running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 500)))
+    project_of(tmp_path, monkeypatch, [FINE, FINE, TOO_MUCH])                                # the short plate is the newest: checked first
+    calls = []
+    def read_status(*a, **k):
+        calls.append(1)
+        if len(calls) in fails: raise fg.PrinterError('printer did not report its status')
+        return spools((BLUE_PLA, 500), (RED_PLA, 500))
+    monkeypatch.setattr(fg, 'read_status', read_status)
+    fails = {1}; guard = guard_with(); at_send(guard)
+    assert guard.card.shown == [('show', 0)] and (guard.card.res['plate_no'], guard.card.res['worst'], guard.card.res['error']) == (3, 'SHORT', None) and len(calls) == 2
+    del calls[:]; fails = set(range(1, 99)); guard = guard_with(); at_send(guard)            # the printer is off
+    assert guard.card.shown == [('show', 0)] and guard.card.res['error'] == 'printer did not report its status' and guard.card.res['plate_no'] == 3 and len(calls) == 2
+    assert (state / 'guard.log').read_text().count('Filament could not be checked: Case') == 0 and (state / 'guard.log').read_text().count('Filament could not be checked: Farm') == 3
