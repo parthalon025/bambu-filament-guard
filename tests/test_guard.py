@@ -1396,3 +1396,17 @@ def test_the_icon_goes_grey_when_slices_cannot_be_read(state, tmp_path, monkeypa
     guard.card.close(); notes = guard.card.shown.count(('note', 'Filament is not being checked'))
     f = slice_file(tmp_path, gcode()); guard.take_slice(str(f), fg.parse_plate(f.read_text())); run_queued(guard)   # a slice that reads: checked again
     assert guard.tray.was[-1][0] == 'ok' and guard.last_text().startswith('Enough filament for this print') and guard.card.shown.count(('note', 'Filament is not being checked')) == notes
+
+@pytest.mark.windows
+def test_a_stop_asked_for_during_slice_all_does_not_wait_for_every_plate(state, monkeypatch):
+    """The stop flag was looked at between rounds only: with "slice all" under way, each plate a check of seconds, an
+    install, an update or a stop gave up waiting after 10 s while the old guard went on to the last plate."""
+    guard, taken = guard_with(), []
+    class Watcher:
+        problems = []
+        def new_plates(self): return [('plate 1', {}), ('plate 2', {}), ('plate 3', {})]
+    def take(path, plate):
+        taken.append(path); (state / 'stop').write_text('')                                  # "stop", asked for while the first plate is checked
+    monkeypatch.setattr(fg, 'Watcher', Watcher); guard.take_slice = take
+    guard.watch_slices()
+    assert taken == ['plate 1'] and guard.stopping.is_set()

@@ -1571,6 +1571,7 @@ class Guard:
                     if os.path.exists(stop_flag): self.stopping.set(); break
                     watcher = watcher or Watcher()
                     for path, plate in watcher.new_plates():
+                        if os.path.exists(stop_flag): self.stopping.set(); break  # between plates too: "slice all" is a check of seconds for each, and a stop waits 10 s
                         try: self.take_slice(path, plate)
                         except Exception as e: log(f'error: {e.__class__.__name__}: {e}')   # one plate that fails does not cost the others of this round their check
                     for path, why in watcher.problems:
