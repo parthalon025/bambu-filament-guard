@@ -36,10 +36,11 @@ What it reads, and from where:
             %LOCALAPPDATA%/BambuFilamentGuard/profiles/), is taken off the spools first. The answer is for the moment
             the checked print could start.
 
-The access code goes from Bambu Studio's configuration to the printer and nowhere else: not into the log, the state
-file, a window or the output. Settings: the icon's menu, or config.json (see DEFAULTS). Settings, log and state:
+The access code goes from Bambu Studio's configuration to the printer's address (config.json's, or a local one that an
+announcement names for it: see discover and SECURITY.md) and nowhere else: not into the log, the state file, a window
+or the output. Settings: the icon's menu, or config.json (see DEFAULTS). Settings, log and state:
 %LOCALAPPDATA%/BambuFilamentGuard/. The card and the icon are in guard_ui.py."""
-import sys, os, re, json, ssl, time, glob, math, ctypes, hashlib, itertools, contextlib, zipfile, socket, struct, threading, queue, subprocess, argparse, tempfile, traceback
+import sys, os, re, json, ssl, time, glob, math, ctypes, hashlib, itertools, contextlib, zipfile, socket, struct, threading, queue, subprocess, argparse, tempfile, traceback, ipaddress
 
 APP = 'BambuFilamentGuard'
 VERSION = '1.5.0'
@@ -637,11 +638,23 @@ def known_printers(conf):
 # A printer the guard does not hear may be off, or Windows Firewall keeps what it announces from pythonw (a network marked
 # Public, a prompt answered "no"): the guard only listens, so both are the same silence, and the answer names both.
 NOT_ANNOUNCED = ('not announcing itself on this network. Is it on? If it is, Windows Firewall may keep its announcements from the guard: allow the guard on private networks, '
-                 'or give the printer\'s address in config.json: {"printers": {"<serial>": {"ip": "<address>"}}}')
+                 'or give the printer\'s address in config.json: {"printers": {"<serial>": {"ip": "<address>"}}}. A printer with a public address must be named there: '
+                 'an announcement is taken for a local address only')
 
-def discover(seconds=8.0, want=None):
-    """{serial: ip} of the Bambu printers announcing themselves on the LAN (SSDP notices on UDP 2021 / 1990). Only a
-    notice whose NT is Bambu's counts: other devices announce themselves on these ports too."""
+def local_address(text):
+    """text when it is an IPv4 address a printer on a local network can have, else None: no host name, no address of the
+    internet at large, not this computer itself, no multicast, unspecified or reserved one."""
+    try: a = ipaddress.ip_address(text if isinstance(text, str) else '')      # a number would be read as an address
+    except ValueError: return None
+    return text if a.version == 4 and not (a.is_global or a.is_loopback or a.is_multicast or a.is_unspecified or a.is_reserved) else None
+
+def discover(want, seconds=8.0):
+    """{serial: ip} of those of the printers `want` (serials) that announce themselves on the LAN (SSDP notices on UDP
+    2021 / 1990). Only a notice whose NT is Bambu's counts: other devices announce themselves on these ports too.
+    An announcement is not authenticated, and the access code is sent to the address it names. So it counts only for
+    a serial that was asked for, and only with a local address (local_address): its Location, taken as it came, let
+    one packet from any device on the network name a host on the internet. A device on the network that names itself
+    is still taken for the printer (SECURITY.md); an address given in config.json is not looked for here at all."""
     socks, found = [], {}
     for port in (2021, 1990):
         try:
@@ -652,24 +665,30 @@ def discover(seconds=8.0, want=None):
             s.settimeout(0.3); socks.append(s)
         except OSError: pass
     t0 = time.time()
-    while socks and time.time() - t0 < seconds and not (want and set(want) <= set(found)):
+    while socks and time.time() - t0 < seconds and not set(want) <= set(found):
         for s in socks:
             try: data, addr = s.recvfrom(4096)
             except OSError: continue
             h = {k.strip().lower(): v.strip() for k, v in (l.split(':', 1) for l in data.decode('utf-8', 'replace').split('\r\n') if ':' in l)}
-            if h.get('usn') and h.get('nt', '').lower() == 'urn:bambulab-com:device:3dprinter': found[h['usn']] = h.get('location') or addr[0]
+            where = local_address(h.get('location') or addr[0])
+            if h.get('usn') in want and where and h.get('nt', '').lower() == 'urn:bambulab-com:device:3dprinter': found[h['usn']] = where
     for s in socks: s.close()
     return found
 
 def printer_ip(serial, cfg, refresh=False):
-    """The printer's IP: config.json, else the last one seen, else its LAN announcement (asked for at most every 10 minutes)."""
+    """The printer's IP: config.json, else the last one seen, else its LAN announcement (asked for at most every 10 minutes).
+    Of what discover heard, the address of this serial alone is kept. An address kept by an earlier version that is no
+    local one (it took whatever an announcement named) is not used: the printer is looked for again."""
     fixed = cfg.get('printers', {}).get(serial, {}).get('ip')
     if fixed: return fixed
-    state = load_state(); ips = state.get('ips', {})
+    state = load_state(); ips = {s: a for s, a in state.get('ips', {}).items() if local_address(a)}
     if serial in ips and not refresh: return ips[serial]
     if time.time() - state.get('discovered_at', 0) > (0 if serial not in ips else 600):
-        found = discover(want=[serial])
-        def change(st): st.setdefault('ips', {}).update(found); st['discovered_at'] = time.time(); return st['ips'].get(serial)
+        found = local_address(discover([serial]).get(serial))
+        def change(st):
+            st['ips'] = {s: a for s, a in st.get('ips', {}).items() if local_address(a)}; st['discovered_at'] = time.time()
+            if found: st['ips'][serial] = found
+            return st['ips'].get(serial)
         return update_state(change)
     return ips.get(serial)
 
@@ -698,7 +717,7 @@ def printer_link(ip, serial, code, client_id, on_report, on_refused=None):
     try: c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
     except AttributeError: c = mqtt.Client(client_id=client_id)
     c.username_pw_set('bblp', code)
-    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE      # the printer signs its own certificate
+    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE      # no public authority has signed the printer's certificate: whatever is shown is accepted (SECURITY.md)
     c.tls_set_context(ctx); c.on_connect = on_connect; c.on_message = on_message
     try: c.connect(ip, 8883, keepalive=30)
     except OSError as e: raise PrinterError(f'no connection to {ip} ({e.__class__.__name__})')

@@ -1309,8 +1309,9 @@ def test_the_self_test_fails_on_a_printer_whose_model_cannot_be_told(state, monk
     assert (False, "The printer …0001: the guard cannot tell which model it is (Bambu Studio's list of printers does not name its serial number): plates sliced for it are not checked") in lines
     assert (True, 'Bambu Lab H2D: 2 spool(s), 2 with a known amount') in lines and not any('unknown model' in text for mark, text in lines)
 
-def announcements(monkeypatch, *datagrams):
-    """discover() on a stand-in for the two UDP sockets it listens on: these datagrams arrive on port 2021, one a look."""
+def announcements(monkeypatch, want, *datagrams):
+    """discover() asked for the serials `want`, on a stand-in for the two UDP sockets it listens on: these datagrams
+    arrive on port 2021, one a look."""
     waiting = list(datagrams)
     class Socket:
         def __init__(self, *a): self.port = None
@@ -1322,7 +1323,7 @@ def announcements(monkeypatch, *datagrams):
             if self.port != 2021 or not waiting: raise OSError('timed out')
             return waiting.pop(0), ('192.0.2.99', 2021)
     monkeypatch.setattr(fg.socket, 'socket', Socket)
-    return fg.discover(seconds=0.2)
+    return fg.discover(want, seconds=0.05)
 
 def notice(usn, location, nt):
     return f'NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nServer: UPnP/1.0\r\nLocation: {location}\r\nNT: {nt}\r\nUSN: {usn}\r\n\r\n'.encode()
@@ -1330,7 +1331,7 @@ def notice(usn, location, nt):
 def test_only_a_bambu_printers_announcement_is_taken_for_a_printer(monkeypatch):
     """Every datagram with a USN line was taken: a television or a router announcing itself on the same ports was kept
     in the state file as a printer's address."""
-    found = announcements(monkeypatch, notice('uuid:a-television', 'http://192.0.2.9:8080/desc.xml', 'urn:schemas-upnp-org:device:MediaRenderer:1'),
+    found = announcements(monkeypatch, ['SERIAL', 'uuid:a-television'], notice('uuid:a-television', '192.0.2.9', 'urn:schemas-upnp-org:device:MediaRenderer:1'),
                           notice('SERIAL', '192.0.2.50', 'urn:bambulab-com:device:3dprinter'), b'not an announcement at all')
     assert found == {'SERIAL': '192.0.2.50'}
 
@@ -1339,7 +1340,8 @@ def test_a_printer_that_is_not_heard_is_not_only_asked_whether_it_is_on(state, m
     off: the answer names both, and the address that can be given in config.json, whose shape no document showed."""
     running(monkeypatch, ENOUGH); monkeypatch.setattr(fg, 'printer_ip', lambda *a, **k: None)
     said = ('is not announcing itself on this network. Is it on? If it is, Windows Firewall may keep its announcements from the guard: allow the guard on private networks, '
-            'or give the printer\'s address in config.json: {"printers": {"<serial>": {"ip": "<address>"}}}')
+            'or give the printer\'s address in config.json: {"printers": {"<serial>": {"ip": "<address>"}}}. A printer with a public address must be named there: '
+            'an announcement is taken for a local address only')
     assert fg.evaluate(BLUE, CFG, 'Benchy')['error'] == f'the Bambu Lab H2D {said}'
     assert fg.main(['trays']) == 0 and f'Bambu Lab H2D: {said[3:]}' in capsys.readouterr().out
 
@@ -1425,3 +1427,36 @@ def test_install_starts_the_guard_whatever_becomes_of_its_list_of_printers(state
     done = install_on(monkeypatch); monkeypatch.setattr(fg, 'bs_conf', lambda: ['not', 'a', 'configuration'])
     assert fg.install() == (True, []) and done[-1] == 'start'
     assert 'the printers could not be listed (AttributeError)' in capsys.readouterr().out
+
+BAMBU = 'urn:bambulab-com:device:3dprinter'
+
+def an_internet_address():
+    """An IPv4 address of the internet at large, made from the documentation address by arithmetic: none is written here."""
+    import ipaddress
+    return next(str(a) for a in (ipaddress.ip_address('192.0.2.50') + n * 2 ** 24 for n in range(1, 9)) if a.is_global)
+
+def test_an_announcement_names_the_printers_address_only_when_it_is_a_local_one(monkeypatch):
+    """Announcements are not authenticated: whoever sends one with the printer's serial names the address the access
+    code is then sent to. Its Location was taken as it came: a host name, an address of the internet, this computer
+    itself. Only an IPv4 address a printer on a local network can have is taken; anything else is dropped."""
+    for location in ('printer.example.net', an_internet_address(), 'localhost', '127.0.0.1', '0.0.0.0', '239.255.255.250', '255.255.255.255',
+                     '192.0.2.50:8883', 'http://192.0.2.50/', '::1', 'fe80::1'):
+        assert announcements(monkeypatch, ['SERIAL'], notice('SERIAL', location, BAMBU)) == {}, location
+    for location in ('192.0.2.50', '192.168.1.50', '10.0.0.7', '172.20.3.4', '169.254.10.2'):
+        assert announcements(monkeypatch, ['SERIAL'], notice('SERIAL', location, BAMBU)) == {'SERIAL': location}
+    assert announcements(monkeypatch, ['SERIAL'], notice('SERIAL', 'printer.example.net', BAMBU), notice('SERIAL', '192.0.2.50', BAMBU)) == {'SERIAL': '192.0.2.50'}   # the forged one first: the real one is still heard
+    assert announcements(monkeypatch, ['SERIAL'], notice('ANOTHER', '192.0.2.51', BAMBU)) == {}                  # a printer that was not asked for
+
+def test_the_address_kept_for_a_printer_is_the_one_asked_for_and_a_local_one(state, monkeypatch):
+    """printer_ip kept every announcement it heard in state.json, and used whatever address was kept there, for good: a
+    forged one outlasted the guard's restarts. It keeps the address of the serial it asked for alone, and an address
+    kept by an earlier version that is no local IPv4 address is not used: the printer is looked for again."""
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {'SERIAL': 'code', 'SERIAL2': 'code'}}); heard = {'SERIAL': '192.0.2.50', 'SERIAL2': '192.0.2.51'}
+    monkeypatch.setattr(fg, 'discover', lambda want, seconds=8.0: dict(heard))             # whatever was heard, of whichever printer
+    assert fg.printer_ip('SERIAL', CFG) == '192.0.2.50' and fg.load_state()['ips'] == {'SERIAL': '192.0.2.50'}
+    fg.update_state(lambda st: st.update(ips={'SERIAL': 'printer.example.net'}, discovered_at=0)); heard.clear()
+    assert fg.printer_ip('SERIAL', CFG) is None and fg.load_state()['ips'] == {}                                   # kept by 1.4.0 from a forged announcement: not used, and gone
+    fg.update_state(lambda st: st.update(ips={'SERIAL': an_internet_address()}, discovered_at=0)); heard['SERIAL'] = '192.0.2.50'
+    assert fg.printer_ip('SERIAL', CFG) == '192.0.2.50'
+    assert fg.printer_ip('SERIAL', dict(CFG, printers={'SERIAL': {'ip': 'printer.example.net'}})) == 'printer.example.net'   # named in config.json: the user's own word, taken as it is
+    assert [fg.local_address(a) for a in (3232235826, None, ['192.0.2.50'], '')] == [None] * 4                    # and nothing but text is an address
