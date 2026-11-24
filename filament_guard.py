@@ -567,8 +567,14 @@ def known_printers(conf):
     for p in out: p['name'] = p['model'] + (f" (…{p['serial'][-4:]})" if sum(o['model'] == p['model'] for o in out) > 1 else '')
     return out
 
+# A printer the guard does not hear may be off, or Windows Firewall keeps what it announces from pythonw (a network marked
+# Public, a prompt answered "no"): the guard only listens, so both are the same silence, and the answer names both.
+NOT_ANNOUNCED = ('not announcing itself on this network. Is it on? If it is, Windows Firewall may keep its announcements from the guard: allow the guard on private networks, '
+                 'or give the printer\'s address in config.json: {"printers": {"<serial>": {"ip": "<address>"}}}')
+
 def discover(seconds=8.0, want=None):
-    """{serial: ip} of the Bambu printers announcing themselves on the LAN (SSDP notices on UDP 2021 / 1990)."""
+    """{serial: ip} of the Bambu printers announcing themselves on the LAN (SSDP notices on UDP 2021 / 1990). Only a
+    notice whose NT is Bambu's counts: other devices announce themselves on these ports too."""
     socks, found = [], {}
     for port in (2021, 1990):
         try:
@@ -584,7 +590,7 @@ def discover(seconds=8.0, want=None):
             try: data, addr = s.recvfrom(4096)
             except OSError: continue
             h = {k.strip().lower(): v.strip() for k, v in (l.split(':', 1) for l in data.decode('utf-8', 'replace').split('\r\n') if ':' in l)}
-            if h.get('usn'): found[h['usn']] = h.get('location') or addr[0]
+            if h.get('usn') and h.get('nt', '').lower() == 'urn:bambulab-com:device:3dprinter': found[h['usn']] = h.get('location') or addr[0]
     for s in socks: s.close()
     return found
 
@@ -922,7 +928,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         status = (seen or {}).get(printer['serial'])
         if status is None:
             ip = printer_ip(printer['serial'], cfg)
-            if not ip: raise PrinterError(f"the {printer['name']} is not announcing itself on this network (is it on?)")
+            if not ip: raise PrinterError(f"the {printer['name']} is {NOT_ANNOUNCED}")
             code = conf['access_code'][printer['serial']]
             try: status = read_status(ip, printer['serial'], code)
             except PrinterError:
@@ -1495,7 +1501,7 @@ def selftest(cfg):
                                'plates sliced for it are not checked')); continue
         try:
             ip = printer_ip(p['serial'], cfg)
-            if not ip: raise PrinterError('it is not announcing itself on this network (is it on?)')
+            if not ip: raise PrinterError(f'it is {NOT_ANNOUNCED}')
             status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
             if not has_spools(status): raise PrinterError('it did not report its spools')
             trays, _ = trays_of(status); guard_ledger.apply(trays, p['serial'])
@@ -1667,7 +1673,7 @@ def main(argv=None):
         for p in known_printers(conf):
             ip = printer_ip(p['serial'], cfg)
             try:
-                if not ip: raise PrinterError('not announcing itself on this network')
+                if not ip: raise PrinterError(NOT_ANNOUNCED)
                 status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
                 if not has_spools(status): raise PrinterError('did not report its spools')
             except PrinterError as e: print(f"{p['name']}: {e}"); continue

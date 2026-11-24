@@ -657,3 +657,37 @@ def test_the_self_test_fails_on_a_printer_whose_model_cannot_be_told(state, monk
     lines = fg.selftest(CFG)
     assert (False, "The printer …0001: the guard cannot tell which model it is (Bambu Studio's list of printers does not name its serial number): plates sliced for it are not checked") in lines
     assert (True, 'Bambu Lab H2D: 2 spool(s), 2 with a known amount') in lines and not any('unknown model' in text for mark, text in lines)
+
+def announcements(monkeypatch, *datagrams):
+    """discover() on a stand-in for the two UDP sockets it listens on: these datagrams arrive on port 2021, one a look."""
+    waiting = list(datagrams)
+    class Socket:
+        def __init__(self, *a): self.port = None
+        def setsockopt(self, *a): pass
+        def settimeout(self, seconds): pass
+        def close(self): pass
+        def bind(self, where): self.port = where[1]
+        def recvfrom(self, size):
+            if self.port != 2021 or not waiting: raise OSError('timed out')
+            return waiting.pop(0), ('192.0.2.99', 2021)
+    monkeypatch.setattr(fg.socket, 'socket', Socket)
+    return fg.discover(seconds=0.2)
+
+def notice(usn, location, nt):
+    return f'NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nServer: UPnP/1.0\r\nLocation: {location}\r\nNT: {nt}\r\nUSN: {usn}\r\n\r\n'.encode()
+
+def test_only_a_bambu_printers_announcement_is_taken_for_a_printer(monkeypatch):
+    """Every datagram with a USN line was taken: a television or a router announcing itself on the same ports was kept
+    in the state file as a printer's address."""
+    found = announcements(monkeypatch, notice('uuid:a-television', 'http://192.0.2.9:8080/desc.xml', 'urn:schemas-upnp-org:device:MediaRenderer:1'),
+                          notice('SERIAL', '192.0.2.50', 'urn:bambulab-com:device:3dprinter'), b'not an announcement at all')
+    assert found == {'SERIAL': '192.0.2.50'}
+
+def test_a_printer_that_is_not_heard_is_not_only_asked_whether_it_is_on(state, monkeypatch, capsys):
+    """Windows Firewall keeping the printer's announcements from the guard gives the same silence as a printer that is
+    off: the answer names both, and the address that can be given in config.json, whose shape no document showed."""
+    running(monkeypatch, ENOUGH); monkeypatch.setattr(fg, 'printer_ip', lambda *a, **k: None)
+    said = ('is not announcing itself on this network. Is it on? If it is, Windows Firewall may keep its announcements from the guard: allow the guard on private networks, '
+            'or give the printer\'s address in config.json: {"printers": {"<serial>": {"ip": "<address>"}}}')
+    assert fg.evaluate(BLUE, CFG, 'Benchy')['error'] == f'the Bambu Lab H2D {said}'
+    assert fg.main(['trays']) == 0 and f'Bambu Lab H2D: {said[3:]}' in capsys.readouterr().out

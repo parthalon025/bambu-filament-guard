@@ -63,7 +63,7 @@ The file can be written by hand; the guard reads it when it starts, so a change 
 {"printers": {"<serial>": {"ip": "192.168.1.50"}}}
 ```
 
-The address as plain text, `{"printers": {"<serial>": "192.168.1.50"}}`, is read as well.
+The address as plain text, `{"printers": {"<serial>": "192.168.1.50"}}`, is read as well. The guard finds a printer by listening for what the printer announces on the local network (UDP ports 2021 and 1990). When a card says that a printer is not announcing itself although it is on, Windows Firewall may be keeping those announcements from the guard: allow the guard (`pythonw.exe`) on private networks, or give the address as above.
 
 ## What the results mean
 
