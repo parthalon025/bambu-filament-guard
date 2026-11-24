@@ -8,6 +8,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import guard_ui
 from PIL import ImageGrab
 
+def within(widget):
+    """A window's widgets, at any depth."""
+    for child in widget.winfo_children(): yield child; yield from within(child)
+
 folder = sys.argv[1]; os.makedirs(folder, exist_ok=True)
 root = guard_ui.make_root()
 card = guard_ui.Card(root); card.spot = (300, 500)
@@ -24,13 +28,18 @@ for name, mode, tray, weigh, typed, tare in SHOTS:
         for entry, text in zip(entries, typed):
             if text is not None: entry.delete(0, 'end'); entry.insert(0, text)
     for _ in range(5): root.update()
+    save = next(b for b in within(d) if b.winfo_class() == 'Button' and b.cget('text') == 'Save')
     if name.endswith('refused-light'):                                  # Save, by the button's own command: a key event sent to a window without the focus goes nowhere
-        save = next(b for f in d.winfo_children() if f.winfo_class() == 'Frame' for b in f.winfo_children() if b.winfo_class() == 'Button' and b.cget('text') == 'Save')
         save.invoke(); root.update()
         assert any('no more than the empty spool' in str(c.cget('text')) for c in d.winfo_children() if c.winfo_class() == 'Label'), 'the window did not say why it refused'
     x, y, w, h = d.winfo_rootx(), d.winfo_rooty(), d.winfo_width(), d.winfo_height()
     path = os.path.join(folder, name + '.png')
-    ImageGrab.grab((x - 12, y - 40, x + w + 12, y + h + 12)).save(path, optimize=True)
+    shot = ImageGrab.grab((x - 12, y - 40, x + w + 12, y + h + 12)); shot.save(path, optimize=True)
+    # A button's border is drawn, in the theme's colour: looked for in the picture itself, at the corner of the frame
+    # around Save (the tests' stand-in for tkinter cannot tell what Windows draws).
+    edge = save.master; corner = shot.convert('RGB').getpixel((edge.winfo_rootx() - (x - 12), edge.winfo_rooty() - (y - 40)))
+    border = tuple(int(card.t['border'][i:i + 2], 16) for i in (1, 3, 5))
+    assert max(abs(a - b) for a, b in zip(corner, border)) <= 8, f"{name}: no border at Save's corner: {corner} is not {border}"
     print(f'{name}: {w} x {h} at {x}, {y}; widgets: ' + ' | '.join(str(c.cget('text')) for c in d.winfo_children() if c.winfo_class() == 'Label'))
     print(f'-----BEGIN {name}-----\n{base64.b64encode(open(path, "rb").read()).decode()}\n-----END {name}-----')
     d.destroy(); root.update()

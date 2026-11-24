@@ -217,11 +217,17 @@ class Card:
         the card's own never take the focus."""
         import tkinter as tk
         t = self.t
-        b = tk.Button(parent, text=text, command=command, bg=t['raised'], fg=t['text'], activebackground=t['border'], activeforeground=t['text'],
-                      disabledforeground=t['muted'], relief='flat', bd=0, font=('Segoe UI', 9), padx=2 * SPACE, pady=SPACE // 2, takefocus=1 if focus else 0,
-                      highlightthickness=1, highlightbackground=t['border'], highlightcolor=t['ok'])   # a border: 'raised' on 'surface' is 1.11 to 1 in the light theme, plain text to the eye
-        if focus: b.bind('<Return>', lambda event: command())
-        b.grid(**grid); return b
+        # A border: 'raised' on 'surface' is 1.11 to 1 in the light theme, plain text to the eye. It is a frame of the
+        # border's colour one pixel around the button: Windows draws no highlight ring on a flat button (seen in the
+        # release workflow's pictures, where an Entry has its ring and a button had none).
+        edge = tk.Frame(parent, bg=t['border'])
+        b = tk.Button(edge, text=text, command=command, bg=t['raised'], fg=t['text'], activebackground=t['border'], activeforeground=t['text'],
+                      disabledforeground=t['muted'], relief='flat', bd=0, font=('Segoe UI', 9), padx=2 * SPACE, pady=SPACE // 2, takefocus=1 if focus else 0, highlightthickness=0)
+        b.pack(padx=1, pady=1)
+        if focus:                                                           # the keyboard's place shows on the edge, as on the fields
+            b.bind('<Return>', lambda event: command())
+            b.bind('<FocusIn>', lambda event: edge.configure(bg=t['ok'])); b.bind('<FocusOut>', lambda event: edge.configure(bg=t['border']))
+        edge.grid(**grid); return b
 
     def _place(self):
         """Puts the finished card on the screen: inside the window that owns it, without activating it."""

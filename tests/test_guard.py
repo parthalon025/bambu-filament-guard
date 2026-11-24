@@ -40,7 +40,7 @@ def tk_stand_in(monkeypatch):
     100 pixels on a screen at 100 %, and keeps where it was put (k['geometry'])."""
     made = []
     class Widget:
-        def __init__(self, *a, **k): self.k, self.keys = dict(k), {}; made.append(self)
+        def __init__(self, *a, **k): self.k, self.keys, self.parent = dict(k), {}, (a[0] if a else None); made.append(self)
         def configure(self, **k): self.k.update(k)
         def bind(self, key, then): self.keys[key] = then
         def destroy(self): self.k['destroyed'] = True
@@ -1672,14 +1672,17 @@ def test_an_ampersand_in_a_projects_title_shows_as_one_in_the_icons_menu(state, 
 @pytest.mark.windows
 def test_buttons_have_a_border_from_the_theme(state, monkeypatch):
     """In the light theme a button's background is 1.11 to 1 against the card's surface (1.21 to 1 in the dark one), and
-    buttons had no border: they read as plain text. One pixel of the theme's own border colour, in both themes."""
+    buttons had no border: they read as plain text. One pixel of the theme's own border colour, in both themes: a
+    frame of that colour around the button, because Windows draws a flat button no highlight ring (the release
+    workflow looks at the real picture)."""
     import guard_ui
     running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 2))); res = fg.evaluate(fg.parse_plate(gcode()), CFG, 'Benchy')
+    edged = lambda w: (type(w.parent).__name__, w.parent.k.get('bg'), w.k.get('highlightthickness'))
     for theme in ('light', 'dark'):
         buttons = [w for w in card_widgets(monkeypatch, res, theme=theme) if type(w).__name__ == 'Button']
         assert [w.k['text'] for w in buttons] == ['Check again', 'Ignore for this project']
-        assert {(w.k.get('highlightthickness'), w.k.get('highlightbackground')) for w in buttons} == {(1, guard_ui.THEMES[theme]['border'])}
-    assert {(w.k.get('highlightthickness'), w.k.get('highlightbackground')) for w in amount_asked(monkeypatch, EXT).made if type(w).__name__ == 'Button'} == {(1, guard_ui.THEMES['dark']['border'])}
+        assert {edged(w) for w in buttons} == {('Frame', guard_ui.THEMES[theme]['border'], 0)}
+    assert {edged(w) for w in amount_asked(monkeypatch, EXT).made if type(w).__name__ == 'Button'} == {('Frame', guard_ui.THEMES['dark']['border'], 0)}
 
 @pytest.mark.windows
 def test_the_icon_is_stopped_whatever_ends_the_cards_loop(state):
