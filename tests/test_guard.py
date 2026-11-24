@@ -1492,3 +1492,41 @@ def test_the_startup_shortcut_is_made_and_read_by_windows_own_powershell(tmp_pat
     own = tmp_path / 'Windows' / 'System32' / 'WindowsPowerShell' / 'v1.0' / 'powershell.exe'; own.parent.mkdir(parents=True); own.write_text('')
     del ran[:]; fg.make_shortcut(); fg.shortcut_folder()
     assert ran == [str(own), str(own)]
+
+NO_AMS = {'gcode_state': 'IDLE', 'vt_tray': {'id': '254', 'tray_type': 'PLA', 'tray_color': '0A2989FF', 'remain': 0, 'tray_weight': '0'}}
+
+def entered(monkeypatch, status):
+    """The printer reports `status`; 640 g were entered for its AMS tray A1 and 400 g for its external spool."""
+    import guard_ledger as gl
+    running(monkeypatch, status)
+    gl.enter('SERIAL', {'label': 'A1', 'type': 'PLA', 'colour': '#0A2989'}, 640); gl.enter('SERIAL', {'label': 'Ext', 'type': 'PLA', 'colour': '#0A2989'}, 400)
+    return lambda: {label: e['grams'] for label, e in fg.load_state()['spools']['SERIAL'].items()}
+
+def test_a_printer_without_an_ams_is_judged_on_its_external_spool(state, monkeypatch, capsys):
+    """A status is judged in two cases: it has the list of its AMS units, or it has no "ams" at all and names an external
+    spool, which is a printer with no AMS: such a one was answered "did not report its spools" at every check. With
+    "ams" there and no list in it, it is the report in pieces, and with neither there is nothing to judge: not judged.
+    No amount entered for an AMS tray ends on a status without the list."""
+    kept = entered(monkeypatch, NO_AMS); res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['error'] is None and res['worst'] == 'OK' and [(t['label'], t['grams']) for t in res['rows'][0]['trays']] == [('Ext', 400.0)]
+    assert kept() == {'A1': 640.0, 'Ext': 400.0}                                             # A1 is not in this status: its amount is left alone
+    assert fg.main(['trays']) == 0 and 'Bambu Lab H2D (printer), IDLE\n  Ext   PLA ' in capsys.readouterr().out and kept() == {'A1': 640.0, 'Ext': 400.0}
+    slots = {'gcode_state': 'IDLE', 'vir_slot': [dict(NO_AMS['vt_tray'])]}                   # the external holders as newer firmware names them
+    assert fg.can_judge(slots) and fg.can_judge(ENOUGH) and fg.evaluate(BLUE, CFG, 'Benchy', seen={'SERIAL': slots})['worst'] == 'OK'
+    for status in (dict(NO_AMS, ams={'tray_now': '255', 'version': 4}), {'gcode_state': 'IDLE'}, {'gcode_state': 'IDLE', 'vir_slot': []}, dict(NO_AMS, ams=None)):
+        kept = entered(monkeypatch, status)
+        assert not fg.can_judge(status) and fg.evaluate(BLUE, CFG, 'Benchy')['error'] == 'the Bambu Lab H2D did not report its spools'
+        assert fg.main(['trays']) == 0 and 'Bambu Lab H2D: did not report its spools' in capsys.readouterr().out and kept() == {'A1': 640.0, 'Ext': 400.0}
+    entered(monkeypatch, dict(NO_AMS, ams={'ams': []}))                                      # the list, with no AMS in it: judged, as before
+    assert fg.evaluate(BLUE, CFG, 'Benchy')['worst'] == 'OK'
+
+@pytest.mark.windows
+def test_the_self_test_counts_the_external_spool_of_a_printer_without_an_ams(state, monkeypatch):
+    """The same rule as a check: no "ams" at all and an external spool is a printer the guard can read; "ams" without its
+    list is not. Neither ends an amount entered for an AMS tray."""
+    import guard_ui
+    monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None); monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {})
+    kept = entered(monkeypatch, NO_AMS)
+    assert (True, 'Bambu Lab H2D: 1 spool(s), 1 with a known amount') in fg.selftest(CFG) and kept() == {'A1': 640.0, 'Ext': 400.0}
+    kept = entered(monkeypatch, dict(NO_AMS, ams={'tray_now': '255'}))
+    assert (None, 'Bambu Lab H2D: it did not report its spools') in fg.selftest(CFG) and kept() == {'A1': 640.0, 'Ext': 400.0}

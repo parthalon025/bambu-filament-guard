@@ -735,6 +735,12 @@ def has_spools(status):
     printer with nothing loaded, and ended every amount entered for an AMS tray. Without the list nothing is judged."""
     return isinstance(status.get('ams'), dict) and isinstance(status['ams'].get('ams'), list)
 
+def can_judge(status):
+    """Can the spools of this status be judged? With the list of its AMS units (has_spools); or with no "ams" at all and
+    an external spool named (vt_tray, vir_slot), which is a printer that has no AMS: judged on its external spool,
+    and no amount entered for an AMS tray ends on it. "ams" there without its list is the report still in pieces."""
+    return has_spools(status) or ('ams' not in status and bool(status.get('vir_slot') or isinstance(status.get('vt_tray'), dict)))
+
 def code_refused(why):
     """Is this refusal of a connection about the access code? why: the reason as the link gives it, paho 2's name for it
     or paho 1's number (4 = bad user name or password, 5 = not authorised). Any other is not: a printer that is still
@@ -743,7 +749,8 @@ def code_refused(why):
 
 def read_status(ip, serial, code, wait=10.0):
     """The printer's full status, read once: waited for until it has its spools (has_spools), three seconds at most
-    after its first piece, and returned as it then is. The caller asks has_spools before it judges by it."""
+    after its first piece, and returned as it then is. The caller asks can_judge before it judges by it: a printer
+    without an AMS never has that list, and is told from a report in pieces only once the three seconds are over."""
     state, lock, full, refused = {}, threading.Lock(), threading.Event(), []
     def on_report(d):
         with lock: merge(state, d)
@@ -1104,7 +1111,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
                 status = read_status(new_ip, printer['serial'], code)
             if seen is not None: seen[printer['serial']] = status
         if cfg.get('learn'): mark_looked(printer['serial'])
-        if not has_spools(status): raise PrinterError(f"the {printer['name']} did not report its spools")
+        if not can_judge(status): raise PrinterError(f"the {printer['name']} did not report its spools")
     except Exception as e:                   # whatever goes wrong before the printer has answered is an answer too: a card with the reason, not a line in the log
         res['error'] = str(e) if isinstance(e, PrinterError) else f'{e.__class__.__name__}: {e}'
         return res
@@ -1846,8 +1853,8 @@ def selftest_lines(cfg, out):
             ip = printer_ip(p['serial'], cfg)
             if not ip: raise PrinterError(f'it is {NOT_ANNOUNCED}')
             status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
-            if not has_spools(status): raise PrinterError('it did not report its spools')
-            trays, _ = trays_of(status); guard_ledger.apply(trays, p['serial'])
+            if not can_judge(status): raise PrinterError('it did not report its spools')
+            trays, _ = trays_of(status); guard_ledger.apply(trays, p['serial'], has_spools(status))
             out.append((True, f"{p['name']}: {len(trays)} spool(s), {sum(t['grams'] is not None for t in trays)} with a known amount")); answered += 1
         except PrinterError as e: out.append((False if 'refused the access code' in str(e) else None, f"{p['name']}: {e}"))
         except Exception as e: out.append((False, f"{p['name']}: {e.__class__.__name__}: {e}"))     # one printer's error does not cost the others their line
@@ -2073,8 +2080,8 @@ def main(argv=None):
                 ip = printer_ip(p['serial'], cfg)
                 if not ip: raise PrinterError(NOT_ANNOUNCED)
                 status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
-                if not has_spools(status): raise PrinterError('did not report its spools')
-                trays, two = trays_of(status); guard_ledger.apply(trays, p['serial'])
+                if not can_judge(status): raise PrinterError('did not report its spools')
+                trays, two = trays_of(status); guard_ledger.apply(trays, p['serial'], has_spools(status))
             except PrinterError as e: print(f"{p['name']}: {e}"); continue
             except Exception as e: print(f"{p['name']}: {e.__class__.__name__}: {e}"); continue      # one printer's error does not cost the others their answer
             print(f"{p['name']} ({ip}), {status.get('gcode_state')}")
