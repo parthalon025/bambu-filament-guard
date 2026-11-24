@@ -409,3 +409,42 @@ def test_an_amount_whose_spool_is_first_seen_in_its_tray_half_an_hour_later_is_o
     assert applied(out) is None and gl.serials() == []                                   # taken out: the entry ends
     typed(0); watch = gl.JobWatch('SERIAL', dict(CFG, learn=False)); watch.see(out)       # the printer is followed, the tray still empty
     typed(31); watch.see(loaded); assert fg.load_state()['spools']['SERIAL']['A1']['stale']
+
+def test_an_amount_out_of_date_says_why(state, monkeypatch):
+    """The note of a filament whose entered amount is out of date names what made it so, each in its own words: the
+    printer not followed (and for how long), an amount entered long before the printer was first followed, a spool not
+    seen back in its tray, a print on a tray without an amount, a print the guard could not count. An entry made out of
+    date by an earlier version, which kept no reason, is blamed on nothing."""
+    part(120.0); spools = [spool(0), spool(2)]; idle = printing('IDLE', spools, task='1')
+    def note(label='A3'):
+        running(monkeypatch, idle); res = fg.evaluate(needing(100), CFG, 'Next')
+        return next(r['note'] for r in res['rows'] if any(t['label'] == label for t in r['trays']))
+    enter = lambda label='A3': gl.enter('SERIAL', {'label': label, 'type': 'PLA', 'colour': '#101010'}, 400)
+    enter(); watch = gl.JobWatch('SERIAL', dict(CFG, learn=False)); watch.see(idle, at=time.time() - 1200); watch.see(printing('FINISH', spools, task='9', mapping=(2,), layer=100))
+    assert note() == 'the amount entered for A3 is out of date: the printer was not followed for 20 minutes and has printed since'
+    enter(); watch.see(printing('RUNNING', spools, name='Sent from the phone', task='12', mapping=(2,), layer=1))
+    assert note() == 'the amount entered for A3 is out of date: a print the guard could not count has drawn on it'
+    enter(); watch.see(printing('RUNNING', spools, task='13', mapping=(0,), layer=1))                   # A1, the same filament, has no amount
+    assert note() == 'the amount entered for A3 is out of date: a print on A1, whose amount is not known, may have gone on from it'
+    enter(); fg.update_state(lambda st: st['spools']['SERIAL']['A3'].update(at=time.time() - 2400, loaded=False))
+    assert note() == 'the amount entered for A3 is out of date: its spool was not seen back in its tray within 30 minutes'
+    fg.update_state(lambda st: (st['spools']['SERIAL'].clear(), st.pop('followed')))     # as if no guard had run since
+    enter(); fg.update_state(lambda st: st['spools']['SERIAL']['A3'].__setitem__('at', time.time() - 86400)); gl.JobWatch('SERIAL', dict(CFG, learn=False)).see(idle)
+    assert note() == 'the amount entered for A3 is out of date: it was entered long before the printer was first followed, which may have printed since'
+    fg.update_state(lambda st: st['spools']['SERIAL']['A3'].pop('why')); assert note() == 'the amount entered for A3 is out of date'
+
+def test_the_line_on_the_running_print_does_not_call_it_counted_above_an_amount_out_of_date(state, monkeypatch):
+    """The print that runs is one the guard can count, but it draws on A3, whose entered amount is out of date: nothing
+    can be taken off that. The report's line says what is taken off where, not that the running print is counted, and
+    the card's words get the same proviso; with every amount known they are as they were."""
+    part(120.0, type='PLA', colour='#101010', fid='', nozzle=None); spools = [spool(2), spool(1, 500, colour='C12E1F', fid='GFA00')]
+    job = printing('RUNNING', spools, mapping=(2,), layer=30)
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 400)
+    running(monkeypatch, job); res = fg.evaluate(needing(100), CFG, 'Next'); report = fg.report_text(res)
+    assert res['printer']['counted'] is True and res['printer']['dated'] == [] and fg.known_text(res['printer']) == ''
+    assert 'RUNNING (Part, layer 30 of 100): the running print is counted: what it still needs is taken off its spools' in report
+    fg.update_state(lambda st: st['spools']['SERIAL']['A3'].update(stale=True, why='the printer was not followed for 20 minutes and has printed since'))
+    res = fg.evaluate(needing(100), CFG, 'Next'); report = fg.report_text(res)
+    assert res['rows'][0]['status'] == 'UNKNOWN' and res['printer']['counted'] is True and res['printer']['dated'] == ['A3']
+    assert 'is counted' not in report and "RUNNING (Part, layer 30 of 100): what the running print still needs is taken off the spools whose amount is known" in report
+    assert fg.known_text(res['printer']) == " where a spool's amount is known"

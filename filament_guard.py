@@ -859,9 +859,11 @@ def assess(fil, trays, cfg, times=1):
     rho, pre = max(group, key=lambda t: t.get('rho') or 0), max(group, key=lambda t: t.get('pre') or 0)
     need = row['need'] = need * max(1.0, rho.get('rho') or 1.0) + (pre.get('pre') or 0) * times
     if not known:
-        stale = [t['label'] for t in group if t.get('stale')]
+        whys = {}                                            # why each entered amount is out of date (guard_ledger.lapse): {reason: [trays]}
+        for t in group:
+            if t.get('stale'): whys.setdefault(t.get('why') or '', []).append(t['label'])
         row['status'] = 'UNKNOWN'
-        row['note'] = (f"the amount entered for {', '.join(stale)} is out of date: a print the guard could not count has drawn on it" if stale
+        row['note'] = ('; '.join(f"the amount entered for {', '.join(labels)} is out of date" + (f': {why}' if why else '') for why, labels in whys.items()) if whys
                        else f"{', '.join(unknown)} reports no remaining amount") + (f'; {stands_in}' if stands_in else '')
         return row
     row['best'], row['total'] = max(known), sum(known)
@@ -1121,8 +1123,9 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
     except Exception as e:                   # a status the guard does not understand must end as a card that says so, not as a line in the log
         res['error'] = f"the {printer['name']}'s report could not be worked out ({e.__class__.__name__}: {e})"
         return res
+    dated = sorted({t['label'] for r in rows if r['status'] == 'UNKNOWN' and r['best'] is None for t in r['trays'] if t.get('stale')})   # the spools a row is unknown for, their entered amount out of date
     res['printer'] = {'model': printer['model'], 'name': printer['name'], 'serial': printer['serial'], 'state': status.get('gcode_state', '?'), 'job': status.get('subtask_name', ''),
-                      'percent': status.get('mc_percent'), 'layer': status.get('layer_num'), 'layers': status.get('total_layer_num'), 'counted': counted,
+                      'percent': status.get('mc_percent'), 'layer': status.get('layer_num'), 'layers': status.get('total_layer_num'), 'counted': counted, 'dated': dated,
                       'beyond': {t['label']: t['beyond'] for t in trays + gone if round(t.get('beyond') or 0)}, 'reserve': reserve, 'unlearned': unlearned}
     res['rows'] = rows
     res['worst'] = max((r['status'] for r in rows), key=SEVERITY.get, default='OK')
@@ -1160,13 +1163,19 @@ def beyond_text(p):
     """The running print's own shortfall, in words: what it needs beyond every loaded spool of a tray's filament."""
     return ''.join(f"; it needs {g:.0f} g more of {label}'s filament than the loaded spools hold" for label, g in (p.get('beyond') or {}).items())
 
+def known_text(p):
+    """The proviso to "less what the print running there still needs" where a filament is unknown because its entered
+    amount is out of date: nothing can be taken off such a spool, and the line above it must not say it was."""
+    return " where a spool's amount is known" if p.get('dated') else ''
+
 def report_text(res):
     lines = [headline(res) + (f": {res['title']}" if res['title'] else '') + (f" x {res['times']}" if res['times'] != 1 else '')]
     if res['error']: return lines[0] + '\n  ' + res['error']
     p, busy = res['printer'], ''
     if p['state'] in BUSY:
-        busy = f"{job_text(p)}: " + ('the running print is counted: what it still needs is taken off its spools' if p.get('counted') else
-                                                    "its spools are still being used, and the guard could not count that print: the amounts are the spools' amounts now")
+        busy = f"{job_text(p)}: " + ('what the running print still needs is taken off the spools whose amount is known' if p.get('counted') and p.get('dated') else
+                                     'the running print is counted: what it still needs is taken off its spools' if p.get('counted') else
+                                     "its spools are still being used, and the guard could not count that print: the amounts are the spools' amounts now")
         busy += beyond_text(p)
     lines.append(f"  {p.get('name') or p['model']}, {p['state']}" + busy + ''.join(f'; {p[key]}' for key in ('reserve', 'unlearned') if p.get(key)))
     for r in res['rows']:
