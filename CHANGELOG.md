@@ -18,6 +18,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - No weigh-in is offered while a job is on the printer: the readings are moving then.
 - The window for a spool's amount ("Amount in …", "Weigh C3…") takes what the scale shows and what the empty spool weighs, and takes one from the other: the filament shows as you type. It starts with the empty spool's weight entered last (`empty_spool_g`, 250 g at first); 0 there is the filament weighed alone, as before.
 - A command line that cannot be read (a mistyped option, an unknown command) ends with exit code 3, "not checked", for every command. Python's own code for it is 2, which the README gives as "not enough" for `check`. `check --times` takes 1 or more; 0 and negative numbers, which read "enough" with exit code 0, are such a command line.
+- For the reserve's share of a spool's full weight, a spool whose full weight the printer does not report, and a spool whose amount was entered by hand, count as a 1 kg spool: 30 g at 3 %. Such a spool had only 10 % of the need for a reserve, or 3 % of the amount first entered, so a check of it can be "tight" where it was "enough".
 
 ### Fixed
 

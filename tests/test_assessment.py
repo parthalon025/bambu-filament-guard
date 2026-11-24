@@ -26,7 +26,7 @@ def test_the_reserve_is_a_share_of_the_largest_spool_the_filament_could_be_print
     for trays in ([small, large], [large, small]):
         row = fg.assess(fil(180), [dict(t) for t in trays], CFG)
         assert (row['status'], row['reserve'], row['best']) == ('TIGHT', 30.0, 200) and "the AMS's figure can be 30 g out" in row['note']
-    assert fg.assess(fil(180), [dict(small), tray('C1', 10)], CFG)['reserve'] == 18.0      # a spool whose full weight the printer does not know adds nothing
+    assert fg.assess(fil(180), [dict(small), tray('C1', 10)], CFG)['reserve'] == 30.0      # a spool whose full weight the printer does not know counts as a 1 kg spool
 
 def test_two_spools_of_the_same_filament():
     row = fg.assess(fil(50), [tray('B2', 30), tray('C1', 40)], CFG)
@@ -75,7 +75,7 @@ def test_trays_of_a_two_nozzle_status():
     assert fg.trays_of(status)[0][0]['weight'] == 1000
 
 def test_two_slots_of_one_colour_are_judged_together():
-    fils = [dict(fil(80), slot=1), dict(fil(80), slot=2)]; trays = [tray('B2', 100)]
+    fils = [dict(fil(80), slot=1), dict(fil(80), slot=2)]; trays = [tray('B2', 100, weight=250)]
     rows = [fg.assess(f, trays, CFG) for f in fils]
     assert [r['status'] for r in rows] == ['OK', 'OK']                                  # each alone fits the spool
     fg.share_spools(rows, fils, trays, CFG, 1)
@@ -190,3 +190,14 @@ def test_a_filament_without_a_weight_is_unknown_and_says_why():
     assert fg.exit_code(res) == 1 and fg.report_text(res).splitlines()[2] == (
         "   2 PLA      #0A2989 Bambu PLA Basic        needs         ?   -          has -                      unknown"
         "  (Bambu Studio gives no weight for this filament (its profile's density is 0))")
+
+def test_a_spool_of_unknown_full_weight_or_with_an_entered_amount_counts_as_1_kg_for_the_reserve():
+    """Such a tray had 10 % of the need for a reserve and nothing of the spool: 100 g of a spool put at 115 g read
+    "enough" where a 1 kg spool at 115 g is "tight". An amount typed in rests on a kitchen scale and a typed empty-spool
+    weight, and had 3 % of itself."""
+    row = fg.assess(fil(100), [tray('B2', 115)], CFG)                                      # the printer reports no full weight
+    assert (row['status'], row['reserve']) == ('TIGHT', 30.0) and "15 g to spare, and the AMS's figure can be 30 g out" in row['note']
+    row = fg.assess(fil(100), [dict(tray('A3', 115, weight=115.0), entered=1.7e9)], CFG)   # as guard_ledger gives it: the amount first entered for a weight
+    assert (row['status'], row['reserve']) == ('TIGHT', 30.0)
+    assert fg.assess(fil(100), [tray('B2', 115, weight=250)], CFG)['status'] == 'OK'       # a 250 g spool by the printer's word: 10 % of the need is the larger
+    assert fg.assess(fil(400), [tray('B2', 445)], CFG)['reserve'] == 40.0                  # as it is of a large need

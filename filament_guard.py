@@ -705,7 +705,11 @@ def assess(fil, trays, cfg, times=1):
     # fullest spool's: which spool is the fullest changes with what was learned of the trays, and the reserve must never
     # be smaller for that. (A 1 kg spool counted lower by another tray's run-dry once left a 250 g spool the fullest,
     # with 7.5 g for a reserve where 1.3.0 asked 30 g.) The spools are the same whatever was learned, so their largest is.
-    reserve = max(need * cfg['margin_pct'] / 100.0, max(t.get('weight') or 0 for t in group) * cfg['spool_reserve_pct'] / 100.0)
+    # A spool whose full weight the printer does not report counts as a 1 kg spool, and so does one whose amount was
+    # entered by hand: that figure rests on a kitchen scale and a typed empty-spool weight, and its "full weight" is
+    # only the amount first entered. Either had nothing of the spool for a reserve, or 3 % of what was typed.
+    full = max(1000.0 if t.get('entered') or not t.get('weight') else t['weight'] for t in group)
+    reserve = max(need * cfg['margin_pct'] / 100.0, full * cfg['spool_reserve_pct'] / 100.0)
     # Measured from the guard's own past forecasts (guard_learn), within its floor. In use ('margin': the setting on, and
     # earned) it replaces the fixed reserve and may be smaller. Otherwise ('floor') it can only raise the fixed one:
     # where past prints fell further short than the fixed reserve covers, the answer must not be the looser of the two.
