@@ -121,6 +121,7 @@ def enter(serial, tray, grams):
         if grams is None: book.pop(tray['label'], None)
         else: book[tray['label']] = {'type': tray['type'].upper(), 'colour': tray['colour'], 'grams': float(grams), 'first': float(grams), 'at': time.time()}
     fg.update_state(change)
+    if grams is None: fg.forget_copy(fg.os.path.join(fg.STATE_DIR, 'state.json'))
     fg.log(f"{tray['label']}: amount " + ('removed' if grams is None else f'entered, {float(grams):.0f} g'))
 
 def job_key(status):

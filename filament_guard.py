@@ -324,6 +324,12 @@ def write_json(path, data, **how):
         with contextlib.suppress(OSError): os.remove(temp)
     raise StateBusy(f'{os.path.basename(path)} could not be written: another program holds it')
 
+def forget_copy(path):
+    """Removes the last good copy of a state file (<path>.bak), for whatever has just written out of that file something
+    the user asked to forget (an entered amount, a tray's history, a weigh-in): the copy still held it, and gave it
+    back when the file was next damaged. The file's next write keeps a copy again."""
+    with state_lock(), contextlib.suppress(OSError): os.remove(path + '.bak')
+
 def load_state():
     """The state file ({} when there is none; see read_json)."""
     return read_json(os.path.join(STATE_DIR, 'state.json'), {})

@@ -228,3 +228,25 @@ def test_a_margin_stricter_than_any_default_is_a_setting_not_a_mistake(state):
     assert fg.load_config()['margin_pct'] == 150 and '_wrong' not in fg.load_config()
     (state / 'config.json').write_text('{"margin_pct": -5}')
     assert fg.load_config()['margin_pct'] == 10 and fg.load_config()['_wrong'] == ['margin_pct in config.json is -5, not a number from 0 to 1000: the default is in use']
+
+def test_what_is_forgotten_is_not_kept_in_the_last_good_copy(state):
+    """The file a state file replaces stays beside it as its .bak, which the guard goes back to when the file is damaged.
+    After one tray's history, a weigh-in or an entered amount was forgotten, that copy still held it, and gave it back
+    then. Whatever forgets takes the copy with it; the next write of the file makes a new one."""
+    import guard_learn as gn, guard_ledger as gl
+    spool = {'id': 'A TAG', 'type': 'PLA', 'colour': '#0A2989', 'fid': 'GFA00', 'weight': 1000.0}
+    for now in (100.0, 200.0, 300.0): gn.weigh('SERIAL', 'C3', 110.0, 92.0, spool, now=now)
+    gn.weigh('SERIAL', 'A1', 80.0, 60.0, spool, now=400.0)
+    assert 'C3' in json.load(open(state / 'learned.json.bak'))['SERIAL']
+    gn.forget_weigh('C3')                                                                  # the latest weigh-in of C3 ("learned --forget-weigh C3")
+    assert len(gn.load()['SERIAL']['C3']['weighs']) == 2 and not (state / 'learned.json.bak').exists()
+    gn.weigh('SERIAL', 'A1', 80.0, 61.0, spool, now=500.0); assert (state / 'learned.json.bak').exists()   # the next write keeps a copy again
+    gn.forget('C3')                                                                        # one tray's history ("learned --forget C3")
+    assert list(gn.load()['SERIAL']) == ['A1'] and not (state / 'learned.json.bak').exists()
+    tray = {'label': 'Ext', 'type': 'PLA', 'colour': '#0A2989'}
+    gl.enter('SERIAL', tray, 400); fg.update_state(lambda st: st.__setitem__('looked', {'SERIAL': 1.0}))
+    assert json.load(open(state / 'state.json.bak'))['spools']['SERIAL']['Ext']['grams'] == 400
+    gl.enter('SERIAL', tray, None)                                                         # "Forget this amount" in the amount window
+    assert not (state / 'state.json.bak').exists()
+    (state / 'state.json').write_bytes(b'\0' * 64)                                         # and the file lost to a power cut right after
+    assert fg.load_state().get('spools', {}).get('SERIAL', {}) == {}                       # does not bring the amount back

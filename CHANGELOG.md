@@ -86,6 +86,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - `Install.cmd` showed nothing until the install was over, which can take a minute and more (it waits for a guard that runs to go, and listens for each printer that is off), and a second double click in that time started a second install beside the first. A line, "Installing Bambu Filament Guard…", now shows at once, the install runs behind it, and its card follows; a second `Install.cmd` opened meanwhile does nothing.
 - The self-test and `status` said "It starts automatically" whenever a Startup shortcut existed, also when that shortcut starts another copy of the guard, in another folder. They say so now only when it points into their own folder, and otherwise "It starts another copy, in …", with the folder.
 - "Start automatically" in the icon's menu removed the Startup shortcut whenever there was one, also the one of another copy of the guard, installed from another folder. It removes only a shortcut that points into its own folder; another is left alone, and a card says which copy it starts.
+- A weigh-in taken back with `learned --forget-weigh`, and an amount removed with "Forget this amount", stayed in the copy the guard keeps of its state files (`learned.json.bak`, `state.json.bak`), and came back from there when the file was next damaged. Whatever is forgotten now takes that copy with it, as forgetting what was learned already did.
 
 ## [1.4.0] - 2026-11-20
 
