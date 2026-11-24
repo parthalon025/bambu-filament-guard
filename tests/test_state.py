@@ -31,7 +31,8 @@ def test_state_file_is_never_replaced_by_an_empty_one(state):
 
 def test_damaged_settings_fall_back_to_the_defaults(state):
     (state / 'config.json').write_text('{"ok_seconds": ')
-    assert fg.load_config() == fg.DEFAULTS
+    cfg = fg.load_config(); wrong = cfg.pop('_wrong')
+    assert cfg == fg.DEFAULTS and wrong == ['config.json cannot be read (Expecting value: line 1 column 16 (char 15)): the defaults are in use']
 
 @pytest.mark.windows
 def test_two_processes_writing_the_state_file_lose_nothing(state):
@@ -49,3 +50,28 @@ def test_two_processes_writing_the_state_file_lose_nothing(state):
     finally: stop.set(); r.join()
     st = fg.load_state()
     assert (st['watcher'], st['command'], len(st['slices']), failed) == (150, 150, 30, []) and not (state / 'state.json.damaged').exists()
+
+def test_a_setting_of_the_wrong_kind_falls_back_to_its_default_alone_and_is_named(state):
+    """config.json written by hand: a number as text, an on/off setting as text or a number, a list that is none, a
+    weight below zero, one printer's address as a number. Each falls back to its own default; the rest of the file is in
+    use; what was wrong is kept for the card at start and the self-test. An address may be plain text or {"ip": text}."""
+    (state / 'config.json').write_text(json.dumps({'margin_pct': '25', 'spool_reserve_pct': 5, 'measured_reserve': 'false', 'learn': 0, 'popup_on': None, 'poll_seconds': '2',
+                                                  'empty_spool_g': -1, 'printers': {'SERIAL1': '192.0.2.50', 'SERIAL2': {'ip': '192.0.2.51'}, 'SERIAL3': 5}}))
+    cfg = fg.load_config(); bad = ('margin_pct', 'measured_reserve', 'learn', 'popup_on', 'poll_seconds', 'empty_spool_g')
+    assert {k: cfg[k] for k in bad} == {k: fg.DEFAULTS[k] for k in bad} and cfg['spool_reserve_pct'] == 5
+    assert cfg['printers'] == {'SERIAL1': {'ip': '192.0.2.50'}, 'SERIAL2': {'ip': '192.0.2.51'}}
+    assert len(cfg['_wrong']) == 7 and 'margin_pct in config.json is "25", not a number from 0 to 100: the default is in use' in cfg['_wrong']
+    assert 'measured_reserve in config.json is "false", not true or false: the default is in use' in cfg['_wrong']
+    assert any(line.startswith('printers in config.json: the address for the printer …IAL3 is 5') for line in cfg['_wrong'])
+    cfg['ok_seconds'] = 0; fg.save_config(cfg)
+    assert '_wrong' not in json.load(open(fg.CONFIG))                                    # what was wrong is said, never saved
+
+def test_settings_that_are_no_json_object_leave_the_defaults_in_use_and_say_so(state):
+    """config.json holding null, a list or a number ended the guard at its start (TypeError), with nothing on screen."""
+    for text in ('null', '[1, 2]', '5', '"margin_pct"'):
+        (state / 'config.json').write_text(text); cfg = fg.load_config()
+        assert {k: v for k, v in cfg.items() if k != '_wrong'} == fg.DEFAULTS and len(cfg['_wrong']) == 1 and cfg['_wrong'][0].startswith('config.json cannot be read')
+    (state / 'config.json').write_text('{"popup_on": ["SHORT", "short"]}')              # a name that is no result
+    assert fg.load_config()['popup_on'] == fg.DEFAULTS['popup_on'] and fg.load_config()['_wrong']
+    (state / 'config.json').write_text('{"popup_on": ["SHORT"], "at_send": false}')
+    assert (fg.load_config()['popup_on'], fg.load_config()['at_send'], fg.load_config().get('_wrong')) == (['SHORT'], False, None)

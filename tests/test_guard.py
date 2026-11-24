@@ -351,3 +351,54 @@ def test_the_card_is_on_the_screen_before_its_weigh_in_offer_is_noted(state, mon
     assert 'C3: that a weigh-in was offered could not be noted (StateBusy: the state folder was held elsewhere for more than 10 s): it may be offered again' in log and 'could not be noted (PermissionError' in log
     assert 'weigh_asked' not in fg.load_state() and fg.evaluate(BLUE, CFG, 'Benchy')['weigh']['label'] == 'C3'   # not noted: offered again
 
+
+def test_a_failure_before_the_printer_answers_is_an_answer_with_its_reason(state, monkeypatch):
+    """Whatever goes wrong while the printer is chosen and asked ends as "Filament could not be checked" with its reason,
+    and is never quiet. An error the first part of evaluate did not list left as a raised error: a line in the log, the
+    "Checking…" line closed, and no card."""
+    running(monkeypatch, ENOUGH); monkeypatch.setattr(fg, 'printer_ip', lambda *a, **k: {}.missing)
+    res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['error'] == "AttributeError: 'dict' object has no attribute 'missing'" and not res.get('quiet')
+    assert fg.headline(res) == 'Filament could not be checked' and fg.exit_code(res) == 3
+
+def test_a_printers_address_given_as_plain_text_in_the_settings_is_used(state, monkeypatch):
+    """{"printers": {"<serial>": "address"}}, the shape a user writes from the one-line hint: every check ended in an
+    AttributeError that only the log saw."""
+    (state / 'config.json').write_text('{"printers": {"SERIAL": "192.0.2.50"}}'); asked = []
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {'SERIAL': 'code'}}); monkeypatch.setattr(fg, 'model_by_serial_prefix', lambda: {'SER': 'Bambu Lab H2D'})
+    monkeypatch.setattr(fg, 'read_status', lambda ip, serial, code: (asked.append(ip), ENOUGH)[1])
+    res = fg.evaluate(BLUE, fg.load_config(), 'Benchy')
+    assert asked == ['192.0.2.50'] and res['error'] is None and res['worst'] == 'OK'
+
+def started(monkeypatch):
+    """watch() run from its start to its end, on stand-ins for the mutex, Tk, the icon and the watcher's thread:
+    (what it returned, the cards it showed as (headline, lines, tone))."""
+    import guard_ui
+    notes = []
+    monkeypatch.setattr(fg, 'sole_guard', lambda: 0); monkeypatch.setattr(guard_ui, 'make_root', lambda: None); monkeypatch.setattr(guard_ui, 'Tray', lambda guard: None)
+    monkeypatch.setattr(guard_ui.Card, 'note', lambda card, headline, lines, tone='muted', pid=None: notes.append((headline, lines, tone)))
+    monkeypatch.setattr(fg.Guard, 'watch_slices', lambda guard: None); monkeypatch.setattr(fg.Guard, 'loop', run_queued)
+    return fg.watch(), notes
+
+@pytest.mark.windows
+def test_the_guard_says_at_its_start_which_settings_are_not_in_use(state, monkeypatch):
+    """A value in config.json the guard cannot use: it starts on the default for that setting, and a card says which."""
+    (state / 'config.json').write_text('{"margin_pct": "25", "spool_reserve_pct": 5}')
+    assert started(monkeypatch) == (0, [('Settings in config.json are not in use', [
+        (False, 'margin_pct in config.json is "25", not a number from 0 to 100: the default is in use.'),
+        (None, f'The file is {fg.CONFIG}. The guard reads it when it starts.')], 'danger')])
+    (state / 'config.json').write_text('{"spool_reserve_pct": 5}')
+    assert started(monkeypatch) == (0, [])                                                # nothing wrong: no card
+
+def no_studio():
+    raise FileNotFoundError('BambuStudio.conf')
+
+@pytest.mark.windows
+def test_the_self_test_fails_on_a_setting_that_is_not_in_use(state, monkeypatch):
+    import guard_ui
+    (state / 'config.json').write_text('{"margin_pct": "25"}'); wrong = (False, 'margin_pct in config.json is "25", not a number from 0 to 100: the default is in use')
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'app': {'version': '02.09.01.70'}}); monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None)
+    monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {})
+    assert fg.selftest(fg.load_config())[0] == wrong
+    monkeypatch.setattr(fg, 'bs_conf', no_studio)
+    assert fg.selftest(fg.load_config())[0] == wrong                                      # also where Bambu Studio's configuration is not found

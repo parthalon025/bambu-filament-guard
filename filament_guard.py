@@ -64,7 +64,7 @@ DEFAULTS = {
     'ok_seconds': 8,             # a result that is not in popup_on shows as one line for this long; 0 = shows nothing
     'at_send': True,             # check again when "Send print job" opens, and show a warning beside that dialog
     'poll_seconds': 2,
-    'printers': {},              # optional, per serial: {"ip": "192.168.1.50"} when the printer is not announced on this LAN
+    'printers': {},              # optional, per serial: {"ip": "192.168.1.50"}, or that address as plain text, when the printer is not announced on this LAN
     # Learn from previous prints, per tray, how far its reading can be trusted (guard_learn.py): the guard follows a
     # printer it has checked while it prints (read only, as for entered amounts), and a check counts a tray with less
     # where the tray's history shows its reading runs high, and a print with more where it shows prints take more. Off:
@@ -84,13 +84,56 @@ STATE_LOCK = threading.RLock()                            # where Windows' named
 LINK_NUMBER = itertools.count(1)
 
 
+def number(low, high):
+    return (lambda v: type(v) in (int, float) and low <= v <= high), f'a number from {low} to {high}'
+
+ON_OFF = (lambda v: type(v) is bool), 'true or false'
+# What config.json may hold for each setting: (is this value one?, what one is, in words). A value that is none is not
+# used: "poll_seconds": "2" once ended the watcher's thread, "popup_on": null every card, "learn": "off" left learning on.
+SETTINGS = {'margin_pct': number(0, 100), 'spool_reserve_pct': number(0, 100), 'colour_tolerance': number(0, 765),
+            'popup_on': ((lambda v: type(v) is list and all(type(s) is str and s in SEVERITY for s in v)), 'a list of ' + ', '.join(f'"{s}"' for s in SEVERITY)),
+            'ok_seconds': number(0, 3600), 'at_send': ON_OFF, 'poll_seconds': number(0.2, 30), 'learn': ON_OFF, 'measured_reserve': ON_OFF, 'empty_spool_g': number(0, 5000)}
+
+def shown(value):
+    """A value of config.json as it is written there, cut short."""
+    text = json.dumps(value)
+    return text if len(text) <= 40 else text[:39] + '…'
+
+def fixed_addresses(held, wrong):
+    """config.json's "printers" as {serial: {'ip': address}}. An address may be written {"ip": "192.168.1.50"} or as the
+    plain text "192.168.1.50"; an entry that is neither is left out, and `wrong` gets a line for it."""
+    if type(held) is not dict:
+        wrong.append(f'printers in config.json is {shown(held)}, not {{"<serial>": {{"ip": "<address>"}}}}: the default is in use'); return {}
+    out = {}
+    for serial, entry in held.items():
+        ip = entry.get('ip') if type(entry) is dict else entry
+        if type(ip) is str and ip.strip(): out[serial] = dict(entry if type(entry) is dict else {}, ip=ip.strip())
+        else: wrong.append(f'printers in config.json: the address for the printer …{serial[-4:]} is {shown(entry)}, not "<address>" or {{"ip": "<address>"}}: it is left out')
+    return out
+
 def load_config():
-    cfg = dict(DEFAULTS)
+    """The settings: DEFAULTS, with what config.json holds in their place. Every value is checked (SETTINGS,
+    fixed_addresses): one that is not what its setting takes leaves that setting alone at its default. cfg['_wrong'] has
+    a line for each, and for a file that cannot be read (and is not there when nothing is wrong): the guard shows them
+    on a card when it starts, the self-test as failures. They are logged here and never saved."""
+    cfg, wrong, held = dict(DEFAULTS), [], {}
     try:
-        with open(CONFIG, encoding='utf-8') as f: cfg.update(json.load(f))
+        with open(CONFIG, encoding='utf-8') as f: held = json.load(f)
+        if type(held) is not dict: held = {}; wrong.append('config.json cannot be read (it does not hold a JSON object): the defaults are in use')
     except FileNotFoundError: pass
-    except ValueError as e: log(f'config.json cannot be read ({e}): the defaults are used')
+    except (OSError, ValueError) as e: wrong.append(f'config.json cannot be read ({e}): the defaults are in use')
+    for key, (fits, what) in SETTINGS.items():
+        if key in held and fits(held[key]): cfg[key] = held[key]
+        elif key in held: wrong.append(f'{key} in config.json is {shown(held[key])}, not {what}: the default is in use')
+    if 'printers' in held: cfg['printers'] = fixed_addresses(held['printers'], wrong)
+    for line in wrong: log(line)
+    if wrong: cfg['_wrong'] = wrong
     return cfg
+
+def settings_note(cfg):
+    """The card for settings that are not in use, as Card.note takes it: (headline, lines, tone). None: nothing is wrong."""
+    if not cfg.get('_wrong'): return None
+    return 'Settings in config.json are not in use', [(False, line + '.') for line in cfg['_wrong']] + [(None, f'The file is {CONFIG}. The guard reads it when it starts.')], 'danger'
 
 def typed_grams(text):
     """The grams typed into a field ('1 012,5 g'), or None when that is not a number."""
@@ -121,7 +164,7 @@ def weigh_doubt(grams, reading):
 def save_config(cfg):
     """Only what differs from DEFAULTS goes into config.json: a full copy would pin today's defaults for good."""
     os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
-    json.dump({k: v for k, v in cfg.items() if DEFAULTS.get(k) != v}, open(CONFIG, 'w', encoding='utf-8'), indent=1)
+    json.dump({k: v for k, v in cfg.items() if DEFAULTS.get(k) != v and k != '_wrong'}, open(CONFIG, 'w', encoding='utf-8'), indent=1)
 
 def log(msg):
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -792,7 +835,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
                 status = read_status(new_ip, printer['serial'], code)
             if seen is not None: seen[printer['serial']] = status
         if cfg.get('learn'): mark_looked(printer['serial'])
-    except (PrinterError, OSError, ValueError, KeyError) as e:
+    except Exception as e:                   # whatever goes wrong before the printer has answered is an answer too: a card with the reason, not a line in the log
         res['error'] = str(e) if isinstance(e, PrinterError) else f'{e.__class__.__name__}: {e}'
         return res
     try:
@@ -1261,20 +1304,28 @@ class Guard:
         for job in self.jobs.values(): job.stopped.set()
 
 
-def watch(start_line=True):
-    import ctypes, guard_ui
+def sole_guard():
+    """The named mutex that makes this process the one running guard: its handle, or None when another guard holds it
+    (0 when Windows made none: the guard runs all the same)."""
     k32 = ctypes.WinDLL('kernel32', use_last_error=True); k32.CreateMutexW.restype = ctypes.c_void_p
     handle = k32.CreateMutexW(None, False, MUTEX)
-    if ctypes.get_last_error() == 183: return 0                                   # ERROR_ALREADY_EXISTS: one guard is enough
+    return None if ctypes.get_last_error() == 183 else handle or 0               # ERROR_ALREADY_EXISTS: one guard is enough
+
+def watch(start_line=True):
+    import guard_ui
+    handle = sole_guard()
+    if handle is None: return 0
     os.makedirs(STATE_DIR, exist_ok=True)
     stop_flag = os.path.join(STATE_DIR, 'stop')
     if os.path.exists(stop_flag): os.remove(stop_flag)
     with open(os.path.join(STATE_DIR, 'guard.pid'), 'w') as f: f.write(str(os.getpid()))
     guard = Guard(load_config(), guard_ui.make_root()); guard.greeted = not start_line
+    note = settings_note(guard.cfg)
+    if note: guard.todo.put(lambda: guard.card.note(*note))                      # the guard runs on defaults the user did not choose: said at once, not only in the log
     log(f'watching for sliced plates (pid {os.getpid()}, guard {VERSION}, Bambu Studio {studio_version() or "not found"})')
     threading.Thread(target=guard.watch_slices, daemon=True).start()
     guard.loop()
-    log('stopped'); k32.CloseHandle(ctypes.c_void_p(handle))
+    log('stopped'); ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
     return 0
 
 def is_running():
@@ -1298,11 +1349,12 @@ def selftest(cfg):
     """[(True = works, False = does not, None = cannot be told now, text)]: can the guard read this Bambu Studio and
     reach its printers? Run it after a Bambu Studio update."""
     import guard_ui, guard_ledger
+    out = [(False, line) for line in cfg.get('_wrong') or []]
     try: conf = bs_conf()
     except (OSError, ValueError) as e:
-        return [(False, f"Bambu Studio's configuration cannot be read ({e.__class__.__name__}): is Bambu Studio installed for this Windows user?")]
+        return out + [(False, f"Bambu Studio's configuration cannot be read ({e.__class__.__name__}): is Bambu Studio installed for this Windows user?")]
     version = str(conf.get('app', {}).get('version', '?'))
-    out = [(True, f'Bambu Studio {version}: its configuration is readable')]
+    out.append((True, f'Bambu Studio {version}: its configuration is readable'))
     verified, newest = load_state().get('verified') or {}, newest_gcode()
     if newest:
         try:

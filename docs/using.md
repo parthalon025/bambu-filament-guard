@@ -57,6 +57,14 @@ Its colour and tooltip are the last result. A click shows that result again; bef
 
 Settings are saved to `config.json` beside the script, which holds only what was changed. The keys, their defaults and their meaning are `DEFAULTS` at the top of [`filament_guard.py`](../filament_guard.py).
 
+The file can be written by hand; the guard reads it when it starts. Every value is checked. One the guard cannot use (a number in quotes, `"false"` in quotes where `false` belongs, a name in `popup_on` that is no result) is not used: that setting alone stays at its default, and a card when the guard starts and the self-test say which. A printer that does not announce itself on your network can be given its address there, by its serial number:
+
+```json
+{"printers": {"<serial>": {"ip": "192.168.1.50"}}}
+```
+
+The address as plain text, `{"printers": {"<serial>": "192.168.1.50"}}`, is read as well.
+
 ## What the results mean
 
 | Result | Meaning |
