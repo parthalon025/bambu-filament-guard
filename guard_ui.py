@@ -4,7 +4,7 @@ The card is a window of the guard that Bambu Studio's window owns: it is above t
 moves, minimises and closes with it, follows its dark or light mode, and never takes the keyboard. After a slice it
 sits in the bottom right corner of the preview, under the slicing result; when "Send print job" opens with a warning
 standing, it sits beside that dialog."""
-import os, ctypes, ctypes.wintypes as wt
+import os, time, ctypes, ctypes.wintypes as wt
 import filament_guard as fg
 
 # Colour tokens: every colour of the card and the icon is named here once, for Bambu Studio's dark and light mode, and used by name.
@@ -29,6 +29,39 @@ def theme():
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize') as k:
             return THEMES['light' if winreg.QueryValueEx(k, 'AppsUseLightTheme')[0] else 'dark']
     except OSError: return THEMES['light']
+
+def when_text(res):
+    """'at 14:32' for an answer whose check (res['at']) is more than a minute old, with the day ('on 23 Nov at 14:32')
+    when that was not today; '' for one as it comes. A card made from an old answer says when the printer reported its
+    spools, not "now": hours-old amounts once read as what the printer "reports now"."""
+    at = res.get('at')
+    if not at or time.time() - at < 60: return ''
+    when = time.localtime(at)
+    return time.strftime('at %H:%M' if when[:3] == time.localtime()[:3] else 'on %d %b at %H:%M', when)
+
+def counted_now(res, tray):
+    """The grams the guard counts for a tray now: its entry in the ledger (state.json, 'spools': guard_ledger), read when
+    asked. None when there is none, it is out of date, or it cannot be read. The row of a card holds what was counted
+    when the card was made: the amount window started from that, and Save wrote it back over every print counted since."""
+    try: entry = fg.load_state().get('spools', {}).get(res['printer']['serial'], {}).get(tray['label']) if res else None
+    except (OSError, TypeError, KeyError, AttributeError): return None
+    grams = entry.get('grams') if isinstance(entry, dict) and not entry.get('stale') else None
+    return grams if isinstance(grams, (int, float)) and not isinstance(grams, bool) else None
+
+def swatch(colour, t):
+    """The colour of the square before a row: the filament's own when it is '#RRGGBB', else the theme's neutral one. The
+    G-code's text was passed on as it came, and one Tk refuses (five digits, a name it does not know) raised inside
+    show(), after the window was made: that warning never showed."""
+    return colour if isinstance(colour, str) and len(colour) == 7 and colour[0] == '#' and all(c in '0123456789abcdefABCDEF' for c in colour[1:]) else t['raised']
+
+def amounts_text(res):
+    """Whose the amounts under "Has" are, for the rows shown, as the footnote's clause ('; the amounts are ...', or '' when
+    no row has one): "the AMS's estimate" stood under amounts entered by hand too, and for a printer without an AMS."""
+    known = {t['label']: t for r in res['rows'] for t in r['trays'] if t['grams'] is not None}
+    typed = [label for label, t in known.items() if t.get('entered')]; read = [label for label in known if label not in typed]
+    whose = "the printer's" if any(label.startswith('Ext') for label in read) else "the AMS's"
+    if read: return f'; the amounts are {whose} estimate' + (f", but for {' and '.join(typed)}: entered by hand, less the prints since" if typed else '')
+    return '; the amounts are the ones entered by hand, less the prints since' if typed else ''
 
 def tone_of(res):
     return 'muted' if res['error'] else {0: 'ok', 1: 'muted', 2: 'warn', 3: 'warn', 4: 'danger'}[fg.SEVERITY[res['worst']]]
@@ -94,10 +127,11 @@ def send_dialogs():
     windows = top_windows(); studios = studio_windows(windows)
     return {h: pid for h, pid, cls, title in windows if pid in studios and cls == '#32770' and title in send_titles(pid)}
 
+class MONITORINFO(ctypes.Structure):                    # defined once: made inside work_area, each call left a class and its pointer type behind for good
+    _fields_ = [('cbSize', wt.DWORD), ('rcMonitor', wt.RECT), ('rcWork', wt.RECT), ('dwFlags', wt.DWORD)]
+
 def work_area(hwnd):
     """The usable rectangle of the screen a window is on."""
-    class MONITORINFO(ctypes.Structure):
-        _fields_ = [('cbSize', wt.DWORD), ('rcMonitor', wt.RECT), ('rcWork', wt.RECT), ('dwFlags', wt.DWORD)]
     u32.MonitorFromWindow.restype = wt.HANDLE; u32.MonitorFromWindow.argtypes = (wt.HWND, wt.DWORD)
     u32.GetMonitorInfoW.argtypes = (wt.HANDLE, ctypes.POINTER(MONITORINFO))
     mi = MONITORINFO(); mi.cbSize = ctypes.sizeof(MONITORINFO)
@@ -111,18 +145,26 @@ class Card:
     """One card at a time; each newer answer replaces it. act(name, res, arg) is told what its buttons ask for:
     'recheck', 'ignore', 'details', 'amount' with arg (tray, grams or None), 'weigh' with arg (tray, grams), 'asked'
     with the tray a weigh-in is offered for, and 'spool' with the empty spool's weight typed in the amount window.
-    empty_spool is the weight that window starts with."""
+    empty_spool is the weight that window starts with. alone: the card of a guard that is not the watcher."""
     def __init__(self, root, act=None, on_close=None):
         self.root, self.win, self.act, self.on_close = root, None, act or (lambda *a: None), on_close
         self.owner, self.beside, self.spot, self.held = None, None, None, False
-        self.empty_spool = fg.DEFAULTS['empty_spool_g']
+        self.empty_spool, self.alone = fg.DEFAULTS['empty_spool_g'], False
+        self.asking, self.asked = None, None                                 # the amount window that is open, if one is, and what it asks (tray, weigh): one at a time, and it goes with its card
         self.one_line = False                                                # the card open is one line, which a new line may replace
         self.closes_after = 0                                                # seconds the open card stays once it is on screen; 0 = until closed
 
     def is_open(self):
         return bool(self.win and self.win.winfo_exists())
 
+    def _unask(self):
+        """Closes the amount window with the card it came from: it belonged to nothing, and stayed topmost over every
+        program after the card and Bambu Studio had gone."""
+        if self.asking is not None and self.asking.winfo_exists(): self.asking.destroy()
+        self.asking = None
+
     def close(self):
+        self._unask()
         if self.is_open(): self.win.destroy()
         self.win = None
         if self.on_close: self.on_close()
@@ -149,6 +191,7 @@ class Card:
     # -- building blocks
     def _open(self, pid=None, beside=None, hold=False):
         import tkinter as tk
+        self._unask()
         if self.is_open(): self.win.destroy()
         t = self.t = theme()
         self.beside = beside if visible(beside) else None
@@ -169,12 +212,22 @@ class Card:
         l = tk.Label(parent, text=text, bg=parent['bg'], fg=self.t[colour], font=('Segoe UI', size, 'bold' if bold else 'normal'), justify='left', anchor='w', wraplength=wrap)
         l.grid(sticky='w', **grid); return l
 
-    def _button(self, parent, text, command, **grid):
+    def _button(self, parent, text, command, focus=False, **grid):
+        """focus: a button of a window that takes the keyboard (the amount window), reached by Tab and pressed by Return;
+        the card's own never take the focus."""
         import tkinter as tk
         t = self.t
-        b = tk.Button(parent, text=text, command=command, bg=t['raised'], fg=t['text'], activebackground=t['border'], activeforeground=t['text'],
-                      disabledforeground=t['muted'], relief='flat', bd=0, font=('Segoe UI', 9), padx=2 * SPACE, pady=SPACE // 2, takefocus=0)
-        b.grid(**grid); return b
+        # A border: 'raised' on 'surface' is 1.11 to 1 in the light theme, plain text to the eye. It is a frame of the
+        # border's colour one pixel around the button: Windows draws no highlight ring on a flat button (seen in the
+        # release workflow's pictures, where an Entry has its ring and a button had none).
+        edge = tk.Frame(parent, bg=t['border'])
+        b = tk.Button(edge, text=text, command=command, bg=t['raised'], fg=t['text'], activebackground=t['border'], activeforeground=t['text'],
+                      disabledforeground=t['muted'], relief='flat', bd=0, font=('Segoe UI', 9), padx=2 * SPACE, pady=SPACE // 2, takefocus=1 if focus else 0, highlightthickness=0)
+        b.pack(padx=1, pady=1)
+        if focus:                                                           # the keyboard's place shows on the edge, as on the fields
+            b.bind('<Return>', lambda event: command())
+            b.bind('<FocusIn>', lambda event: edge.configure(bg=t['ok'])); b.bind('<FocusOut>', lambda event: edge.configure(bg=t['border']))
+        edge.grid(**grid); return b
 
     def _place(self):
         """Puts the finished card on the screen: inside the window that owns it, without activating it."""
@@ -210,18 +263,25 @@ class Card:
         w, t = self._open(res.get('pid'), beside, hold), self.t
         self.one_line = bool(brief)
         self._label(w, fg.headline(res), tone_of(res), 12, True, row=1, column=0)
+        n = res.get('unchecked') or 0                                        # at "Send print job", of a project with more plates than are checked there
+        more = (f" {n} older plate{'s' if n != 1 else ''} of the project {'were' if n != 1 else 'was'} not checked: "
+                f'at "Send print job" only the {fg.SEND_MOST} sliced last are.' if n else '')
+        then = when_text(res)
+        if then: more += ' "Check again" asks the printer now.'
         if brief:
             line = tk.Frame(w, bg=t['surface']); line.grid(row=2, column=0, sticky='ew'); line.columnconfigure(0, weight=1)
             p = res['printer']
-            busy = ((', less what the print running there still needs' if p.get('counted') else ', which is printing a job the guard could not count')
+            busy = ((', less what the print running there still needs' + fg.known_text(p) if p.get('counted') else ', which is printing a job the guard could not count')
                     + fg.beyond_text(p)) if p['state'] in fg.BUSY else ''
-            text = 'Ignored for this project' if res.get('ignored') else f"{len(res['rows'])} filament{'s' if len(res['rows']) != 1 else ''} against the spools on the {p['model']}" + busy
-            self._label(line, text, 'muted', 9, row=0, column=0)
+            text = 'Ignored for this project' if res.get('ignored') else f"{len(res['rows'])} filament{'s' if len(res['rows']) != 1 else ''} against the spools on the {p.get('name') or p['model']}" + busy
+            if p.get('unlearned'): text += '; what was learned could not be used'
+            self._label(line, text, 'muted', 9, wrap=520, row=0, column=0)   # with a print running it is some 190 characters: unwrapped, wider than a small window
             self._button(line, 'Details', lambda: self.act('details', res), row=0, column=1, padx=(3 * SPACE, 0))
             self.closes_after = brief
             return self._place()
         if res['error']:
             self._label(w, res['error'][:1].upper() + res['error'][1:] + '.', wrap=560, row=2, column=0)
+            if more: self._label(w, ((f'Checked {then}.' if then else '') + more).strip(), 'muted', 9, wrap=560, row=4, column=0, pady=(2 * SPACE, 0))
         else:
             sub = ' · '.join(x for x in (res['title'] + (f" × {res['times']}" if res['times'] != 1 else ''), f"plate {res['plate_no']}" if res.get('plate_no') else '',
                                          res['model'], f"prints in {res['time']}" if res['time'] and res['times'] == 1 else '') if x)
@@ -230,32 +290,35 @@ class Card:
             for col, head_text in enumerate(('', 'Filament', 'Needs', 'Spool', 'Has', 'Result')):
                 self._label(table, head_text, 'muted', 9, row=0, column=col, padx=(0, 3 * SPACE), pady=(0, SPACE))
             for i, r in enumerate(res['rows'], start=1):
-                tk.Frame(table, bg=r['colour'], width=18, height=18, highlightthickness=1, highlightbackground=t['border']).grid(row=2 * i, column=0, padx=(0, 2 * SPACE), pady=SPACE // 2)
+                tk.Frame(table, bg=swatch(r['colour'], t), width=18, height=18, highlightthickness=1, highlightbackground=t['border']).grid(row=2 * i, column=0, padx=(0, 2 * SPACE), pady=SPACE // 2)
                 name = f"{r['slot']}  {r['name'] or r['type']}" + (f"  ({r['nozzle']} nozzle)" if r['nozzle'] else '')
                 word, colour = STATUS_LOOK[r['status']]
-                for col, (text, c, bold) in enumerate(((name, 'text', False), (f"{r['need']:.1f} g", 'text', False), (fg.tray_text(r), 'text', False),
+                for col, (text, c, bold) in enumerate(((name, 'text', False), (fg.need_text(r), 'text', False), (fg.tray_text(r), 'text', False),
                                                        (fg.has_text(r), 'text', False), (word, colour, True)), start=1):
                     self._label(table, text, c, 10, bold, row=2 * i, column=col, padx=(0, 3 * SPACE))
                 if r['note']: self._label(table, r['note'][:1].upper() + r['note'][1:], 'muted', 9, wrap=600, row=2 * i + 1, column=1, columnspan=5, pady=(0, SPACE // 2))
-            p = res['printer']
+            p, job = res['printer'], fg.job_text(res['printer'])
+            told, runs, needs, hold = (f'reported them {then}', 'then', 'needed', 'held') if then else ('reports them', 'now', 'needs', 'hold')
             if p['state'] in fg.BUSY and p.get('counted'):
-                spools = f"Spools as the {p['model']} reports them, less what the print running there{fg.job_text(p)} still needs; the amounts are the AMS's estimate."
+                spools = f"Spools as the {p.get('name') or p['model']} {told}, less what the print running there{' then' if then else ''}{job} still {needs}{fg.known_text(p)}{amounts_text(res)}."
             else:
-                spools = f"Spools as the {p['model']} reports them now; the amounts are the AMS's estimate." + (
-                    f" It is printing now{fg.job_text(p)}: that job is still drawing from these spools, and the guard could not count what it still needs."
+                spools = f"Spools as the {p.get('name') or p['model']} {told}{'' if then else ' now'}{amounts_text(res)}." + (
+                    f" It {'was' if then else 'is'} printing {runs}{job}: that job {'was' if then else 'is'} still drawing from these spools, and the guard could not count what it still {needs}."
                     if p['state'] in fg.BUSY else '')
-            spools += ''.join(f" The print running now needs {g:.0f} g more of {label}'s filament than the loaded spools hold." for label, g in (p.get('beyond') or {}).items())
-            if p.get('reserve'): spools += f" {p['reserve'][:1].upper()}{p['reserve'][1:]}."
+            spools += ''.join(f" The print running {runs} {needs} {g:.0f} g more of {label}'s filament than the loaded spools {hold}." for label, g in (p.get('beyond') or {}).items())
+            for key in ('reserve', 'unlearned'):
+                if p.get(key): spools += f" {p[key][:1].upper()}{p[key][1:]}."
             if res.get('weigh'):
                 spools += f" Weighing the spool in {res['weigh']['label']} would settle it: the guard then counts that spool by what it held."
-            ignored = ' Ignored for this project: it shows as one line until the finding changes.' if res.get('ignored') else ''
-            self._label(w, spools + ignored, 'muted', 9, wrap=620, row=4, column=0, pady=(2 * SPACE, 0))
+            ignored = (f' Ignored for this plate of the project: it shows as one line for {fg.IGNORE_DAYS} days from then, unless a result changes or a filament '
+                       f'falls more than {fg.IGNORE_GROWTH:g} g further short.') if res.get('ignored') else ''
+            self._label(w, spools + ignored + more, 'muted', 9, wrap=620, row=4, column=0, pady=(2 * SPACE, 0))
         bar = tk.Frame(w, bg=t['surface']); bar.grid(row=5, column=0, sticky='w', pady=(2 * SPACE, 0))
         again = self._button(bar, 'Check again', None, row=0, column=0, padx=(0, SPACE))
         again.configure(command=lambda: (again.configure(text='Checking…', state='disabled'), self.act('recheck', res)))
         col = 1
         if not res['error']:
-            if res.get('ignored') or fg.SEVERITY[res['worst']] >= 2:
+            if res.get('ignored') or (fg.SEVERITY[res['worst']] >= 2 and fg.ignore_key(res)):     # no key: a project never saved, checked from no G-code the guard knows
                 self._button(bar, 'Stop ignoring' if res.get('ignored') else 'Ignore for this project', lambda: self.act('ignore', res), row=0, column=col, padx=(0, SPACE)); col += 1
             seen = set()
             for r in res['rows']:
@@ -266,15 +329,22 @@ class Card:
             if res.get('weigh') and not res['error']:
                 tray = res['weigh']
                 self._button(bar, f"Weigh {tray['label']}…", lambda: self.ask_amount(res, tray, weigh=True), row=0, column=col, padx=(0, SPACE)); col += 1
-                self.act('asked', res, tray)                        # offered: not again for a week (this tray) or a day (any)
         self._place()
+        # Offered: not again for a week (this tray) or a day (any). Noted only once the card is placed: the card is made
+        # unseen, and a note that failed before this (the state file held elsewhere) left a warning that never showed.
+        if not res['error'] and res.get('weigh'): self.act('asked', res, res['weigh'])
 
-    def note(self, headline, lines, tone='muted', pid=None):
-        """A card that says something other than a result: the self-test, the welcome after installing."""
-        w = self._open(pid); self.one_line = False
+    def note(self, headline, lines, tone='muted', pid=None, beside=None, buttons=()):
+        """A card that says something other than a result: the self-test, the welcome after installing. beside: as for show.
+        buttons: [(text, what it does)] under the lines, for a card that asks before something is done."""
+        import tkinter as tk
+        w = self._open(pid, beside); self.one_line = False
         self._label(w, headline, tone, 12, True, row=1, column=0, pady=(0, SPACE))
         for i, (mark, text) in enumerate(lines):
             self._label(w, {True: '✓  ', False: '✗  ', None: '–  '}[mark] + text, {True: 'text', False: 'danger', None: 'muted'}[mark], 9, wrap=620, row=2 + i, column=0)
+        if buttons:
+            bar = tk.Frame(w, bg=self.t['surface']); bar.grid(row=2 + len(lines), column=0, sticky='w', pady=(2 * SPACE, 0))
+            for col, (text, then) in enumerate(buttons): self._button(bar, text, then, row=0, column=col, padx=(0, SPACE))
         self._place()
 
     def line(self, text, tone='muted', seconds=0, pid=None, hold=False):
@@ -291,17 +361,22 @@ class Card:
         against: what the scale shows and what the empty spool weighs, the filament being the difference. An ordinary
         small window: it has to take the keyboard."""
         import tkinter as tk
-        t = self.t; d = tk.Toplevel(self.root, bg=t['surface'], padx=3 * SPACE, pady=3 * SPACE)
+        if self.asking is not None and self.asking.winfo_exists() and self.asked == (tray['label'], weigh): self.asking.lift(); self.asking.focus_force(); return   # every click on the button opened another
+        self._unask(); self.asked = (tray['label'], weigh)                  # another tray's button: its window in the open one's place
+        t = self.t; d = self.asking = tk.Toplevel(self.root, bg=t['surface'], padx=3 * SPACE, pady=3 * SPACE)
         d.title('Bambu Filament Guard'); d.attributes('-topmost', True); d.resizable(False, False)
         self._label(d, f"Filament {'on the spool' if weigh else 'left'} in {tray['label']} ({tray['name'] or tray['type']})", size=10, bold=True, row=0, column=0, columnspan=3)
         self._label(d, 'Put the spool on a scale. The filament is what the scale shows less the empty spool (a Bambu spool: about 250 g; 0 if you weighed the filament alone). '
                        + (f"The printer reads {tray['reading']:.0f} g; from now on the guard counts this spool with no more than it held, and a spool weighed near empty "
                           'teaches it what the tray reads at empty.' if weigh else
-                          'The guard counts down from this with every print it sees start; a print it cannot count makes the amount unknown again.'),
+                          'The guard counts down from this with every print it sees start; a print it cannot count makes the amount unknown again.'
+                          + (' The guard is not running: the amount is kept, and counted down only while the guard runs.' if self.alone and not fg.is_running() else '')),
                     'muted', 9, wrap=420, row=1, column=0, columnspan=3, pady=(SPACE, 2 * SPACE))
-        tare = f'{self.empty_spool:g}'
-        scale = tk.StringVar(value='' if weigh or tray['grams'] is None else f"{tray['grams'] + self.empty_spool:.0f}")
-        spool = tk.StringVar(value=tare)
+        last = self.empty_spool                                             # the last weight above 0; a config.json that holds anything else starts as a new one does
+        if isinstance(last, bool) or not isinstance(last, (int, float)) or not 0 < last <= 5000: last = fg.DEFAULTS['empty_spool_g']
+        now = None if weigh else counted_now(res, tray)
+        scale, spool = tk.StringVar(value='' if now is None else f'{now + last:.0f}'), tk.StringVar(value=f'{last:g}')
+        opened = (scale.get(), spool.get())                                 # with a figure of the guard's own in it: saved as it opened, it is no amount anyone entered
         def field(row, text, var):
             self._label(d, text, size=9, row=row, column=0, padx=(0, 2 * SPACE))
             e = tk.Entry(d, textvariable=var, width=10, bg=t['raised'], fg=t['text'], insertbackground=t['text'], relief='flat', font=('Segoe UI', 11),
@@ -310,28 +385,47 @@ class Card:
         entry, empty = field(2, 'On the scale, in grams', scale), field(3, 'Empty spool, in grams', spool)
         result = self._label(d, '', size=10, bold=True, row=4, column=0, columnspan=3)
         wrong = self._label(d, '', 'danger', 9, wrap=420, row=5, column=0, columnspan=3)
+        doubted = []                                                        # a weigh-in far from the reading has had its line shown: Save again saves it
+        def tare(): return fg.typed_grams(spool.get()) if spool.get().strip() else 0
         def show(*_):
             grams, _why = fg.filament_on(scale.get(), spool.get())
-            result.configure(text=f'{grams:.0f} g of filament' if grams is not None else ''); wrong.configure(text='')
+            result.configure(text='' if grams is None else f'{grams:.0f} g of filament' + ('' if tare() else ': nothing taken off for the spool'))
+            wrong.configure(text=''); del doubted[:]                        # a number changed: asked anew
         scale.trace_add('write', show); spool.trace_add('write', show); show()
-        def done(grams):
-            d.destroy(); self.act('weigh' if weigh else 'amount', res, (tray, grams))
+        def done(grams):                                                    # stored first, closed after: closed first, the window took the weight typed with it when the state file was held elsewhere
+            try: self.act('weigh' if weigh else 'amount', res, (tray, grams))
+            except OSError as e: wrong.configure(text=f'Not saved: {e if isinstance(e, fg.StateBusy) else e.__class__.__name__}. Save again in a moment.'); return False
+            d.destroy(); return True
         def accept(*_):
+            if opened[0] and (scale.get(), spool.get()) == opened: d.destroy(); return
             grams, why = fg.filament_on(scale.get(), spool.get())
             if grams is None: wrong.configure(text=why); return
-            self.act('spool', res, fg.typed_grams(spool.get()) or 0)       # the next window starts with this spool's weight
-            done(grams)
+            doubt = fg.weigh_doubt(grams, tray['reading']) if weigh else ''
+            if doubt and not doubted: doubted.append(grams); wrong.configure(text=doubt); return
+            spool_g = tare()
+            if done(grams) and spool_g: self.act('spool', res, spool_g)     # after the amount, which it must not cost: the next window starts with this spool's weight (not with 0)
         bar = tk.Frame(d, bg=t['surface']); bar.grid(row=6, column=0, columnspan=3, sticky='w', pady=(SPACE, 0))
-        self._button(bar, 'Save', accept, row=0, column=0)
-        if not weigh and (tray.get('entered') or tray.get('stale')): self._button(bar, 'Forget this amount', lambda: done(None), row=0, column=1, padx=(SPACE, 0))
+        self._button(bar, 'Save', accept, focus=True, row=0, column=0)
+        if not weigh and (tray.get('entered') or tray.get('stale')): self._button(bar, 'Forget this amount', lambda: done(None), focus=True, row=0, column=1, padx=(SPACE, 0))
         for e in (entry, empty): e.bind('<Return>', accept)
         d.bind('<Escape>', lambda e: d.destroy())
         d.update_idletasks()
-        x, y = (self.spot or (200, 200)); d.geometry(f'+{max(0, x)}+{max(0, y - d.winfo_reqheight() - 48)}')
+        # Above the card's corner, on the screen the card is on: held to x and y of 0 or more, it opened a screen away
+        # from the card with Bambu Studio left of or above the primary screen. The gap is scaled like the card's distances.
+        (x, y), w, h = self.spot or (200, 200), d.winfo_reqwidth(), d.winfo_reqheight()
+        y -= h + int(8 * SPACE * d.winfo_fpixels('1i') / 96.0)
+        area = work_area(self.owner or int((self.win if self.is_open() else d).wm_frame(), 16))
+        if area.right - area.left >= w and area.bottom - area.top >= h: x, y = min(max(area.left, x), area.right - w), min(max(area.top, y), area.bottom - h)
+        d.geometry(f'+{x}+{y}')
         d.focus_force(); entry.focus_set(); entry.select_range(0, 'end')
 
 
 def make_root():
+    # The packaged guard has its own Tcl/Tk beside it. TCL_LIBRARY or TK_LIBRARY, set by another program for its own Tcl,
+    # sends ours to a library that is not its own: the first window never comes, and under pythonw nothing says why. A
+    # run from source keeps them: there the Python and its Tcl are the user's, who may have set them for it.
+    if fg.packaged():
+        for name in ('TCL_LIBRARY', 'TK_LIBRARY'): os.environ.pop(name, None)
     import tkinter as tk
     try: ctypes.windll.shcore.SetProcessDpiAwareness(1)        # sharp text on a scaled screen
     except (AttributeError, OSError): pass
@@ -356,16 +450,16 @@ class Tray:
         self.guard, self.icon, self.shown = guard, None, None
         try: import pystray
         except ImportError:
-            fg.log('no icon in the notification area: the Python package pystray is missing (pip install pystray)'); return
+            fg.log('no icon in the notification area: ' + fg.missing('pystray')); return
         Item, Menu, g = pystray.MenuItem, pystray.Menu, guard
         def do(fn): return lambda icon, item: g.todo.put(fn)
         def option(text, key, on, off): return Item(text, do(lambda: g.set_option(key, off if g.cfg[key] == on else on)), checked=lambda item: g.cfg[key] == on)
-        def warns(text, status): return Item(text, do(lambda: g.toggle_warning(status)), checked=lambda item: status in g.cfg['popup_on'])
+        def warns(text, status): return Item(text, do(lambda: g.toggle_warning(status)), checked=lambda item: status in g.popup_on())
         menu = Menu(
             Item(f'Bambu Filament Guard {fg.VERSION}', None, enabled=False),
-            Item(lambda item: g.last_text(), None, enabled=False),
+            Item(lambda item: g.last_text().replace('&', '&&'), None, enabled=False),      # a menu reads one "&" as "underline the next letter"
             Menu.SEPARATOR,
-            Item('Show last result', do(g.show_last), default=True),
+            Item('Check last plate again', do(g.check_last), default=True),
             Item('Check newest slice now', do(g.check_newest)),
             Item('Settings', Menu(
                 option('One line when there is enough', 'ok_seconds', fg.DEFAULTS['ok_seconds'], 0),
@@ -373,15 +467,15 @@ class Tray:
                 warns("Warn when a spool's amount is unknown", 'UNKNOWN'),
                 option('Check again at "Send print job"', 'at_send', True, False),
                 option('Learn from prints, tray by tray', 'learn', True, False),
-                option('Measure the reserve from past prints', 'measured_reserve', True, False),
+                option('Measure the reserve from past prints (experimental)', 'measured_reserve', True, False),
                 Item('Reserve', Menu(*[Item(f'{p} % of the full spool', do(lambda p=p: g.set_option('spool_reserve_pct', p)),
                                             checked=lambda item, p=p: g.cfg['spool_reserve_pct'] == p, radio=True) for p in (2, 3, 5)])),
-                Item('Start automatically', do(g.toggle_autostart), checked=lambda item: os.path.exists(fg.STARTUP_LNK)))),
+                Item('Start automatically', do(g.toggle_autostart), checked=lambda item: os.path.exists(fg.STARTUP_LNK)),
+                Item('Forget what was learned…', do(g.forget_learned)))),      # asks first, and here: beside Quit, one slip of the mouse emptied the history
             Item('Pause checks', do(g.toggle_pause), checked=lambda item: g.paused),
             Menu.SEPARATOR,
             Item('Self-test', do(g.run_selftest)),
             Item('Open log', do(g.open_log)),
-            Item('Forget what was learned', do(g.forget_learned)),
             Item('Quit', do(g.quit)))
         self.icon = pystray.Icon(fg.APP, icon_image('muted'), 'Bambu Filament Guard', menu)
         self.icon.run_detached()

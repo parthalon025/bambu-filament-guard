@@ -11,10 +11,13 @@ short. The card comes back beside the "Send print job" dialog while a warning st
   filament_guard.py status | stop      is the guard running / stop it
   filament_guard.py check [FILE]       check one file now: .gcode or .gcode.3mf; no FILE = the newest slice of the
                                        running Bambu Studio. Options: --times N (N prints of it), --popup, --json.
-                                       Exit code 0 enough, 1 tight / unknown, 2 short, 3 not checked.
+                                       A file with several plates: each plate, then all its plates together.
+                                       Exit code 0 enough, 1 tight / unknown, 2 short, 3 not checked (also a file
+                                       or a command line that cannot be read: one line says why).
   filament_guard.py trays              the spools every known printer reports
   filament_guard.py learned [--forget [TRAY]] what was learned from previous prints, per tray (--forget: start again,
-                                       for one tray only when named; --printer names the printer where two have it)
+                                       for one tray only when named; --forget-weigh TRAY: take back that tray's latest
+                                       weigh-in; --printer names the printer where two have the tray)
   filament_guard.py selftest           can the guard read this Bambu Studio and reach the printers? Exit code 1 = no
   filament_guard.py watch              the guard itself (what the shortcut runs; --no-start-line: setup's card says it)
   filament_guard.py setup              install, and say so on a card (what Install.cmd of the packaged guard runs)
@@ -33,45 +36,52 @@ What it reads, and from where:
             %LOCALAPPDATA%/BambuFilamentGuard/profiles/), is taken off the spools first. The answer is for the moment
             the checked print could start.
 
-The access code goes from Bambu Studio's configuration to the printer and nowhere else: not into the log, the state
-file, a window or the output. Settings: the icon's menu, or config.json (see DEFAULTS). Log and state:
+The access code goes from Bambu Studio's configuration to the printer's address (config.json's, or a local one that an
+announcement names for it: see discover and SECURITY.md) and nowhere else: not into the log, the state file, a window
+or the output. Settings: the icon's menu, or config.json (see DEFAULTS). Settings, log and state:
 %LOCALAPPDATA%/BambuFilamentGuard/. The card and the icon are in guard_ui.py."""
-import sys, os, re, json, ssl, time, glob, math, ctypes, hashlib, itertools, contextlib, zipfile, socket, struct, threading, queue, subprocess, argparse, tempfile
+import sys, os, re, json, ssl, time, glob, math, ctypes, hashlib, itertools, contextlib, zipfile, socket, struct, threading, queue, subprocess, argparse, tempfile, traceback, ipaddress
 
 APP = 'BambuFilamentGuard'
 VERSION = '1.5.0'
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_DIR = os.path.join(os.environ.get('LOCALAPPDATA') or HERE, APP)
-CONFIG = os.path.join(HERE, 'config.json')
+CONFIG = os.path.join(STATE_DIR, 'config.json')
+CONFIG_BEFORE = os.path.join(HERE, 'config.json')         # where the settings were up to 1.4.0: an update unzipped into a new folder left them behind
 BS_DATA = os.path.join(os.environ.get('APPDATA', ''), 'BambuStudio')
 MUTEX = 'Local\\' + APP
 STARTUP_LNK = os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'Bambu Filament Guard.lnk')
 
 DEFAULTS = {
     # "Enough" asks for the need plus a reserve, because the AMS's figure is an estimate: the larger of margin_pct of
-    # the need and spool_reserve_pct of the spool's full weight (30 g on a 1 kg spool). The AMS counts what it feeds,
-    # so its error grows with what the spool has given, and is largest when the spool is nearly empty.
+    # the need and spool_reserve_pct of a spool's full weight (30 g on a 1 kg spool), the largest spool's of those the
+    # filament could be printed from; a spool whose full weight the printer does not report, or whose amount was
+    # entered by hand, counts as a 1 kg spool there. The AMS counts what it feeds, so its error grows with what the
+    # spool has given, and is largest when the spool is nearly empty.
     # Measured 2026-11-19 (H2D): a 1 kg spool reported at 105 g ran dry after 84-85 g of a print that needed 85.3 g.
     'margin_pct': 10,
     'spool_reserve_pct': 3,
     'colour_tolerance': 40,      # how far a spool's colour may be from the project's and still count as that colour (0..765;
                                  # Bambu's PLA Basic red and PLA Silk+ red are 31 apart, black and dark grey 190)
     # Which results open the full card, which stays until closed. Add "UNKNOWN" to be told about spools without a
-    # remaining amount; remove "COLOUR" when the colours of your projects are not the colours you print in.
+    # remaining amount; remove "COLOUR" when the colours of your projects are not the colours you print in. SHORT and
+    # MISSING open it whether named here or not (Guard.opening).
     'popup_on': ['SHORT', 'MISSING', 'COLOUR', 'SPLIT', 'TIGHT'],
     'ok_seconds': 8,             # a result that is not in popup_on shows as one line for this long; 0 = shows nothing
     'at_send': True,             # check again when "Send print job" opens, and show a warning beside that dialog
     'poll_seconds': 2,
-    'printers': {},              # optional, per serial: {"ip": "192.168.1.50"} when the printer is not announced on this LAN
+    'printers': {},              # optional, per serial: {"ip": "192.168.1.50"}, or that address as plain text, when the printer is not announced on this LAN
     # Learn from previous prints, per tray, how far its reading can be trusted (guard_learn.py): the guard follows a
     # printer it has checked while it prints (read only, as for entered amounts), and a check counts a tray with less
     # where the tray's history shows its reading runs high, and a print with more where it shows prints take more. Off:
     # nothing is followed or corrected for it; what was learned is kept.
     'learn': True,
-    # With learning on: once the printer has enough scored prints and readings at empty, the reserve is measured from the
-    # guard's own past forecast errors instead of the fixed one above, and may be smaller (never below 5 g or 2 % of the
-    # need). Off: the fixed reserve, and no answer looser than learning without it.
-    'measured_reserve': True,
+    # Experimental, with learning on: once the printer has enough scored prints and readings at empty, the reserve is
+    # measured from the guard's own past forecast errors instead of the fixed one above, and may be smaller (never below
+    # 5 g or 2 % of the need). Off unless turned on: it loosens a check on evidence that cannot see a change in what
+    # spools read at empty (docs/learning.md, "What the measured reserve cannot see"), and nothing of the learning has
+    # yet followed a real print. Off, no answer is looser than the fixed reserve and 1.3.0's rules give.
+    'measured_reserve': False,
     'empty_spool_g': 250,        # the empty spool's weight the amount window starts with: the last one entered there (a Bambu spool: about 250 g)
 }
 SEVERITY = {'OK': 0, 'UNKNOWN': 1, 'TIGHT': 2, 'SPLIT': 3, 'SHORT': 4, 'MISSING': 4, 'COLOUR': 4}
@@ -80,13 +90,79 @@ STATE_LOCK = threading.RLock()                            # where Windows' named
 LINK_NUMBER = itertools.count(1)
 
 
-def load_config():
-    cfg = dict(DEFAULTS)
+def number(low, high):
+    return (lambda v: type(v) in (int, float) and low <= v <= high), f'a number from {low} to {high}'
+
+ON_OFF = (lambda v: type(v) is bool), 'true or false'
+# What config.json may hold for each setting: (is this value one?, what one is, in words). A value that is none is not
+# used: "poll_seconds": "2" once ended the watcher's thread, "popup_on": null every card, "learn": "off" left learning on.
+SETTINGS = {'margin_pct': number(0, 1000), 'spool_reserve_pct': number(0, 100), 'colour_tolerance': number(0, 765),
+            'popup_on': ((lambda v: type(v) is list and all(type(s) is str and s.upper() in SEVERITY and s.upper() != 'OK' for s in v)),   # in any case of letters; read in capitals
+                         'a list of ' + ', '.join(f'"{s}"' for s in SEVERITY if s != 'OK')),
+            'ok_seconds': number(0, 3600), 'at_send': ON_OFF, 'poll_seconds': number(0.2, 30), 'learn': ON_OFF, 'measured_reserve': ON_OFF, 'empty_spool_g': number(0, 5000)}
+
+def shown(value):
+    """A value of config.json as it is written there, cut short."""
+    text = json.dumps(value)
+    return text if len(text) <= 40 else text[:39] + '…'
+
+def fixed_addresses(held, wrong):
+    """config.json's "printers" as {serial: {'ip': address}}. An address may be written {"ip": "192.168.1.50"} or as the
+    plain text "192.168.1.50"; an entry that is neither is left out, and `wrong` gets a line for it."""
+    if type(held) is not dict:
+        wrong.append(f'printers in config.json is {shown(held)}, not {{"<serial>": {{"ip": "<address>"}}}}: the default is in use'); return {}
+    out = {}
+    for serial, entry in held.items():
+        ip = entry.get('ip') if type(entry) is dict else entry
+        if type(ip) is str and ip.strip(): out[serial] = dict(entry if type(entry) is dict else {}, ip=ip.strip())
+        else: wrong.append(f'printers in config.json: the address for the printer …{serial[-4:]} is {shown(entry)}, not "<address>" or {{"ip": "<address>"}}: it is left out')
+    return out
+
+def config_held():
+    """(the JSON object config.json holds, None), or ({}, why) when it cannot be read as one; ({}, None) without a file.
+    A byte order mark before the JSON is fine: Windows PowerShell 5.1 and older Notepad write one."""
     try:
-        with open(CONFIG, encoding='utf-8') as f: cfg.update(json.load(f))
-    except FileNotFoundError: pass
-    except ValueError as e: log(f'config.json cannot be read ({e}): the defaults are used')
+        with open(CONFIG, encoding='utf-8-sig') as f: held = json.load(f)
+    except FileNotFoundError: return {}, None
+    except ValueError as e: return {}, str(e)
+    return (held, None) if type(held) is dict else ({}, 'it does not hold a JSON object')
+
+def bring_settings(before):
+    """Copies the config.json of the layout up to 1.4.0 (`before`: beside a guard's script) to where the settings are
+    now, as it is, when there are none there yet; True when it did. The old file stays where an older guard reads it."""
+    if os.path.exists(CONFIG) or not os.path.isfile(before): return False
+    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+    temp = f'{CONFIG}.{os.getpid()}.new'
+    try:
+        with open(before, 'rb') as f, open(temp, 'wb') as copy: copy.write(f.read()); copy.flush(); os.fsync(copy.fileno())
+        os.replace(temp, CONFIG)
+    finally:
+        with contextlib.suppress(OSError): os.remove(temp)
+    log(f'settings brought over from {before}')
+    return True
+
+def load_config():
+    """The settings: DEFAULTS, with what config.json holds in their place; with none in the state folder yet, a
+    config.json beside the script is brought over first (bring_settings). Every value is checked (SETTINGS,
+    fixed_addresses): one that is not what its setting takes leaves that setting alone at its default. cfg['_wrong'] has
+    a line for each, and for a file that cannot be read (and is not there when nothing is wrong): the guard shows them
+    on a card when it starts, the self-test as failures. They are logged here and never saved."""
+    cfg, wrong = dict(DEFAULTS), []
+    try: bring_settings(CONFIG_BEFORE); held, why = config_held()
+    except OSError as e: held, why = {}, f'{e.__class__.__name__}: {e}'
+    if why: wrong.append(f'config.json cannot be read ({why}): the defaults are in use')
+    for key, (fits, what) in SETTINGS.items():
+        if key in held and fits(held[key]): cfg[key] = held[key] if key != 'popup_on' else list(dict.fromkeys(s.upper() for s in held[key]))
+        elif key in held: wrong.append(f'{key} in config.json is {shown(held[key])}, not {what}: the default is in use')
+    if 'printers' in held: cfg['printers'] = fixed_addresses(held['printers'], wrong)
+    for line in wrong: log(line)
+    if wrong: cfg['_wrong'] = wrong
     return cfg
+
+def settings_note(cfg):
+    """The card for settings that are not in use, as Card.note takes it: (headline, lines, tone). None: nothing is wrong."""
+    if not cfg.get('_wrong'): return None
+    return 'Settings in config.json are not in use', [(False, line + '.') for line in cfg['_wrong']] + [(None, f'The file is {CONFIG}. The guard reads it when it starts.')], 'danger'
 
 def typed_grams(text):
     """The grams typed into a field ('1 012,5 g'), or None when that is not a number."""
@@ -104,18 +180,66 @@ def filament_on(scale, spool):
     if gross - tare > 10000: return None, 'More than 10000 g of filament: not a spool.'
     return gross - tare, None
 
-def save_config(cfg):
-    """Only what differs from DEFAULTS goes into config.json: a full copy would pin today's defaults for good."""
+def weigh_doubt(grams, reading):
+    """'' when a spool weighed at `grams` of filament is within what a gauge can be out of the printer's `reading`, either
+    way (guard_learn.DRY_MOST); else the line the weigh-in window shows in place of saving. A slipped key, another spool
+    on the scale or a reading that has moved on since would be kept as what the tray reads at empty, and count every
+    tray of the printer lower. Saving again takes the weight as right."""
+    import guard_learn
+    apart = abs(grams - reading)
+    if apart <= guard_learn.DRY_MOST: return ''
+    return f'{grams:.0f} g weighed, {reading:.0f} g read by the printer: {apart:.0f} g apart. Save again if the weight is right.'
+
+def save_config(cfg, key=None):
+    """Sets one setting (key) in config.json to what cfg has for it; without a key, every setting cfg has. The file is
+    read again and that key alone changed in it: the guard's own copy is as old as its start, and writing that would
+    undo what was edited by hand since. Only what differs from DEFAULTS is in the file (a full copy would pin today's
+    defaults for good), so a setting back at its default leaves it. The new file is written beside the old one, flushed
+    to the disk and put in place by a replace: a guard ended meanwhile leaves the settings as they were, not an empty
+    file. A file that cannot be read (written by hand, with a comma too many) is copied to config.json.unreadable
+    first: what was written in it can then be put right, where the saved setting alone would have taken its place."""
     os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
-    json.dump({k: v for k, v in cfg.items() if DEFAULTS.get(k) != v}, open(CONFIG, 'w', encoding='utf-8'), indent=1)
+    held, why = config_held()
+    if why:
+        with open(CONFIG, 'rb') as f, open(CONFIG + '.unreadable', 'wb') as copy: copy.write(f.read())
+        log('config.json could not be read: copied to config.json.unreadable before a setting was saved')
+    for k in ([key] if key else [k for k in DEFAULTS if k in cfg]):
+        if cfg[k] == DEFAULTS[k]: held.pop(k, None)
+        else: held[k] = cfg[k]
+    temp = f'{CONFIG}.{os.getpid()}.new'
+    try:
+        with open(temp, 'w', encoding='utf-8') as f: json.dump(held, f, indent=1); f.flush(); os.fsync(f.fileno())
+        os.replace(temp, CONFIG)
+    finally:
+        with contextlib.suppress(OSError): os.remove(temp)
+
+LOST = [0]                                                # the lines guard.log did not take since the last one it took
+CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f\u2028\u2029]')   # line breaks and the other control characters: none of them goes into the log
 
 def log(msg):
-    os.makedirs(STATE_DIR, exist_ok=True)
-    path = os.path.join(STATE_DIR, 'guard.log')
+    """One line into guard.log, with its time. It raises nothing: a log that could not be written (the disk full, the file
+    held by another program) once cost a warning its card, and ended the watcher and the card's loop for good. The lines
+    lost are counted, and the next line that is written says how many. A message is one line whatever it holds: a job
+    or project name with a line break in it, from the printer or a file, forged lines of a log users paste into reports."""
     try:
-        if os.path.getsize(path) > 1_000_000: os.replace(path, path + '.1')
-    except OSError: pass
-    with open(path, 'a', encoding='utf-8') as f: f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + msg + '\n')
+        os.makedirs(STATE_DIR, exist_ok=True)
+        path, lost = os.path.join(STATE_DIR, 'guard.log'), LOST[0]
+        try:
+            if os.path.getsize(path) > 1_000_000: os.replace(path, path + '.1')
+        except OSError: pass
+        with open(path, 'a', encoding='utf-8', errors='backslashreplace') as f:
+            f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + (f"({lost} line{'s' if lost != 1 else ''} before this one could not be written) " if lost else '') + CONTROL.sub(' ', f'{msg}') + '\n')
+        LOST[0] -= lost
+    except (OSError, ValueError): LOST[0] += 1
+
+def packaged():
+    """Whether this is the packaged guard: build.py puts the scripts in app/, beside a Python and a Tcl/Tk of their own."""
+    return os.path.basename(HERE) == 'app'
+
+def missing(package):
+    """What to say of a Python package the guard cannot import. Run from source: how to install it. The packaged guard
+    has no pip and a Python of its own: there its folder is incomplete, and unzipping it again is what helps."""
+    return f"the guard's folder is incomplete ({package} is missing): unzip the guard again" if packaged() else f'the Python package {package} is missing (pip install {package})'
 
 class StateBusy(OSError):
     """The state folder's files could not be had: another holder kept them past the wait, or a program outside the guard
@@ -145,43 +269,82 @@ def state_lock(wait=10.0):
         with STATE_LOCK: yield
         return
     name = 'Local\\' + APP + '-files-' + hashlib.sha1(os.path.abspath(STATE_DIR).lower().encode('utf-8')).hexdigest()[:16]
-    handle = _MUTEXES.get(name) or _MUTEXES.setdefault(name, k32.CreateMutexW(None, False, name))
+    handle = _MUTEXES.get(name) or k32.CreateMutexW(None, False, name)
     if not handle: raise StateBusy(f'no lock could be made for the state folder (error {ctypes.get_last_error()})')
+    handle = _MUTEXES.setdefault(name, handle)                                    # kept only once made: a None kept here was StateBusy for good
     if k32.WaitForSingleObject(handle, int(wait * 1000)) not in (0, 0x80):        # 0x80: its last holder ended without letting go: ours now
         raise StateBusy(f'the state folder was held elsewhere for more than {wait:.0f} s')
     try: yield
     finally: k32.ReleaseMutex(handle)
 
+KEPT = ('state.json', 'learned.json')                    # the files whose last good copy is kept beside them (<name>.bak): what they hold cannot be had
+                                                          # again. A per-layer profile can, from its slice, and goes with it: it keeps none.
+
+def held_json(path, empty):
+    """What a JSON file holds, when that is of the kind of `empty` (an object); ValueError as for a file that is no JSON
+    when it is not (null, a list): the guard wrote no such file, and every change of it would raise."""
+    with open(path, encoding='utf-8') as f: data = json.load(f)
+    if type(data) is not type(empty): raise ValueError(f'it holds a {type(data).__name__}')
+    return data
+
 def read_json(path, empty):
     """A JSON file of the state folder, read under state_lock: `empty` when there is none. A program outside the guard
-    holding it is waited for, then StateBusy. A damaged file is set aside (and logged), and `empty` is returned: kept
-    in place, it would make every later read fail."""
+    holding it is waited for, then StateBusy. A damaged file (cut short, zeros after a power cut, JSON that is no
+    object) is set aside as <name>.damaged: kept in place, it would make every later read fail. In its place, or in
+    place of a file that is gone (a guard ended between the two steps of a write), its last good copy is taken,
+    <name>.bak (write_json): the file as it was one write earlier, where `empty` would lose every entered amount. That
+    copy then is the file. Only without one is `empty` returned. The log says which."""
+    name, bak = os.path.basename(path), path + '.bak'
     with state_lock():
         for attempt in range(40):
-            try:
-                with open(path, encoding='utf-8') as f: return json.load(f)
-            except FileNotFoundError: return empty
-            except PermissionError: time.sleep(0.05)
+            try: return held_json(path, empty)
+            except FileNotFoundError:
+                if not os.path.exists(bak): return empty
+                lost = f'{name} was gone'
+            except PermissionError: time.sleep(0.05); continue
             except ValueError:
-                try: os.replace(path, path + '.damaged')
-                except OSError: pass
-                log(f'{os.path.basename(path)} was damaged: set aside as {os.path.basename(path)}.damaged, starting empty')
-                return empty
-        raise StateBusy(f'{os.path.basename(path)} is held by another program')
+                with contextlib.suppress(OSError): os.replace(path, path + '.damaged')
+                lost = f'{name} was damaged: set aside as {name}.damaged'
+            try: data = held_json(bak, empty); os.replace(bak, path)
+            except PermissionError: time.sleep(0.05); continue
+            except FileNotFoundError: log(f'{lost}, starting empty'); return empty
+            except ValueError:
+                with contextlib.suppress(OSError): os.replace(bak, bak + '.damaged')
+                log(f'{lost}, and its last good copy cannot be read either: starting empty'); return empty
+            log(f'{lost}: its last good copy, {name}.bak, is used'); return data
+        raise StateBusy(f'{name} is held by another program')
 
 def write_json(path, data, **how):
     """Writes a JSON file of the state folder whole (call under state_lock): to a temp file of this process and thread,
-    put in place by a replace, which a reader never sees half done. Windows refuses the replace while a program outside
-    the guard holds the file: it is tried again for two seconds, then StateBusy, and the file is as it was."""
+    flushed to the disk, then put in place by a replace, which a reader never sees half done. Flushed first: NTFS
+    journals the rename and not the file's data, and a power cut seconds later left the new name on a file of zeros.
+    The file a KEPT one replaces stays beside it as <name>.bak (a rename, not a copy), for read_json to fall back on.
+    Windows refuses a replace while a program outside the guard holds the file: it is tried again for two seconds,
+    then StateBusy, and the file is as it was (or is its .bak, which the next read puts back). The temp file goes
+    whatever ended the write."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temp = f'{path}.{os.getpid()}.{threading.get_ident()}.new'
-    with open(temp, 'w', encoding='utf-8') as f: json.dump(data, f, **how)
-    for attempt in range(40):
-        try: os.replace(temp, path); return
-        except PermissionError: time.sleep(0.05)
-    try: os.remove(temp)
-    except OSError: pass
+    try:
+        with open(temp, 'w', encoding='utf-8') as f: json.dump(data, f, **how); f.flush(); os.fsync(f.fileno())
+        for attempt in range(40):
+            try:
+                if os.path.basename(path) in KEPT and os.path.exists(path): os.replace(path, path + '.bak')
+                os.replace(temp, path); return
+            except PermissionError: time.sleep(0.05)
+    finally:
+        with contextlib.suppress(OSError): os.remove(temp)
     raise StateBusy(f'{os.path.basename(path)} could not be written: another program holds it')
+
+def forget_copy(path):
+    """Removes the last good copy of a state file (<path>.bak), for whatever has just written out of that file something
+    the user asked to forget (an entered amount, a tray's history, a weigh-in): the copy still held it, and gave it
+    back when the file was next damaged. The file's next write keeps a copy again. A copy that cannot be removed now
+    (the folder held elsewhere) is said in the log, not raised: what was to be forgotten is out of the file itself."""
+    name = os.path.basename(path)
+    try:
+        with state_lock(): os.remove(path + '.bak')
+    except FileNotFoundError: pass
+    except OSError as e: log(f'{name}.bak could not be removed ({e.__class__.__name__}): what was forgotten stays in it until {name} is next written')
 
 def load_state():
     """The state file ({} when there is none; see read_json)."""
@@ -219,19 +382,21 @@ def split_list(value):
     return [p.strip().strip('"') for p in parts]
 
 def parse_plate(text):
-    """{'printer_model', 'time', 'layers', 'filaments': [{slot, type, fid, colour, name, grams, nozzle}]} from the head of a
-    Bambu Studio G-code. None while the file is not complete (Bambu Studio writes the totals last)."""
+    """{'printer_model', 'time', 'layers', 'filaments': [{slot, type, fid, colour, name, grams, nozzle, density}]} from the
+    head of a Bambu Studio G-code. None while the file is not complete (Bambu Studio writes the totals last). grams is
+    None for a filament in use that Bambu Studio gives no weight: how much it needs cannot be told."""
     if '; HEADER_BLOCK_END' not in text or '; CONFIG_BLOCK_END' not in text: return None
     head, _, body = text.partition('; HEADER_BLOCK_END')
     def header(key):
-        m = re.search(r'^; ' + re.escape(key) + r'\s*:\s*(.*)$', head, re.M)
+        m = re.search(r'^; ' + re.escape(key) + r'[ \t]*:[ \t]*(.*)$', head, re.M)       # not \s: across a line end, a line without a value takes the next line for it
         return m.group(1).strip() if m else None
     def setting(key):
         m = re.search(r'^; ' + re.escape(key) + r' = (.*)$', body, re.M)
         return split_list(m.group(1)) if m and m.group(1).strip() else []
     weights = header('total filament weight [g]')
     if weights is None: return None
-    weights = [float(w) for w in weights.split(',') if w.strip()]
+    totals, weights = weights, [float(w) for w in weights.split(',') if w.strip()]
+    if not all(math.isfinite(w) for w in weights): raise ValueError(f'a filament total that is not an amount: "{totals}"')    # float() takes "nan" and "inf"
     types, colours, fids, names = setting('filament_type'), setting('filament_colour'), setting('filament_ids'), setting('filament_settings_id')
     used = header('filament')                      # the slots the totals belong to, e.g. "1,3,4"
     if used: slots = [int(s) for s in used.split(',') if s.strip()]
@@ -242,31 +407,59 @@ def parse_plate(text):
     # be used by the nozzle its AMS is plumbed to, so the nozzle is part of what "enough" means.
     nozzle_of = setting('filament_map') if len(setting('nozzle_diameter')) > 1 else []
     def at(lst, slot, default=''): return lst[slot - 1] if 0 < slot <= len(lst) else default
+    def numbers(key):
+        try: return [float(v) for v in (header(key) or '').split(',') if v.strip()]
+        except ValueError: return []
+    lengths, densities = numbers('total filament length [mm]'), numbers('filament_density')    # for each filament in use, like the totals; for each slot
+    if len(lengths) != len(weights): lengths = []
     filaments = []
-    for slot, grams in zip(slots, weights):
-        if grams <= 0: continue
+    for n, (slot, grams) in enumerate(zip(slots, weights), start=1):
+        if grams <= 0:
+            # 0.00 g is also what Bambu Studio writes for a filament that is printed, when its profile has density 0 (a
+            # profile made by hand, until one is entered). Dropped as not in use, a two-colour plate once read "enough" on
+            # the other colour alone. In use: named by "; filament:", and with a length, or a density of 0.
+            if not used or not (at(lengths, n, 0.0) > 0 or at(densities, slot, None) == 0): continue
+            grams = None
         filaments.append({'slot': slot, 'type': at(types, slot, '?'), 'fid': at(fids, slot), 'colour': at(colours, slot, '#808080')[:7].upper(),
                           'name': re.sub(r'\s*@.*$', '', at(names, slot)), 'grams': grams,
-                          'nozzle': {'1': 'left', '2': 'right'}.get(at(nozzle_of, slot))})
+                          'nozzle': {'1': 'left', '2': 'right'}.get(at(nozzle_of, slot)), 'density': at(densities, slot, None)})
     time_line = re.search(r'total estimated time: ([^;\n]+)', head)
     layers = header('total layer number')
     return {'printer_model': (setting('printer_model') or [''])[0], 'time': time_line.group(1).strip() if time_line else '',
             'layers': int(layers) if layers and layers.isdigit() else None, 'filaments': filaments}
 
 def plates_of_file(path):
-    """[(label, plate)] of a .gcode file or of every sliced plate in a .gcode.3mf."""
-    if zipfile.is_zipfile(path):
+    """[(label, plate)] of a .gcode file or of every sliced plate in a .gcode.3mf; the plate is None for a plate of a 3MF
+    whose G-code is not complete, which the caller has to say: left out, the rest would pass for the whole file.
+    ValueError, with the reason, for a file that is not one or cannot be read: a 3MF that is damaged, cut short or
+    encrypted included."""
+    with open(path, 'rb') as f: zipped = f.read(2) == b'PK'  # a 3MF by how it begins: cut short, is_zipfile no longer knows it (Python 3.15), and it was then called an incomplete G-code file
+    if zipped or zipfile.is_zipfile(path):
+        import zlib
         out = []
-        with zipfile.ZipFile(path) as z:
-            names = sorted((n for n in z.namelist() if re.fullmatch(r'Metadata/plate_\d+\.gcode', n)), key=lambda n: int(re.findall(r'\d+', n)[0]))
-            for n in names:
-                with z.open(n) as f: plate = parse_plate(read_head(f))
-                if plate: out.append(('plate ' + re.findall(r'\d+', n)[0], plate))
+        try:
+            with zipfile.ZipFile(path) as z:
+                names = sorted((n for n in z.namelist() if re.fullmatch(r'Metadata/plate_\d+\.gcode', n)), key=lambda n: int(re.findall(r'\d+', n)[0]))
+                for n in names:
+                    with z.open(n) as f: out.append(('plate ' + re.findall(r'\d+', n)[0], parse_plate(read_head(f))))
+        except (zipfile.BadZipFile, zlib.error, RuntimeError, EOFError) as e: raise ValueError(f'this 3MF cannot be read ({e})')
         if not out: raise ValueError('no sliced plate in this 3MF: slice it first (a project file holds no G-code)')
         return out
     with open(path, 'rb') as f: plate = parse_plate(read_head(f))
     if not plate: raise ValueError('not a complete Bambu Studio G-code file')
     return [('', plate)]
+
+def plates_together(plates):
+    """One plate that needs what the plates of a file need together, for "Print all plates": the grams of each filament
+    added up over the plates. A filament is one material, colour, product and nozzle, whichever slot it is in; without
+    a weight on one plate (parse_plate) it has none in all."""
+    sums = {}
+    for plate in plates:
+        for f in plate['filaments']:
+            key = (f['type'].upper(), f['colour'], f['fid'], f['nozzle'])
+            if key in sums: sums[key]['grams'] = None if None in (sums[key]['grams'], f['grams']) else sums[key]['grams'] + f['grams']
+            else: sums[key] = dict(f)
+    return {'printer_model': plates[0]['printer_model'], 'time': '', 'layers': None, 'filaments': list(sums.values())}
 
 def lines_of(stream, size=1 << 20):
     """The lines of a binary stream, read in large pieces: a 3MF member's own readline is too slow for 4 million lines."""
@@ -281,8 +474,11 @@ def lines_of(stream, size=1 << 20):
 # The lines that move filament or say where it goes, indented or not: a move or "G92" with an E, read only up to a
 # comment, and an X or Y before or after the E when there is one (a move along X or Y, not of the filament alone); a
 # filament selected; the start of a layer; absolute or relative extrusion. The X or Y is caught as one letter, not cut
-# out of the line: a 100 MB file has two and a half million such moves.
-GCODE_STEP = re.compile(rb'[ \t]*(?:G([0-3]|92)[ \t](?:[^;E\n]*?([XY]))?[^;E\n]*E([-+]?(?:\d+\.?\d*|\.\d+))(?:[^;\n]*?([XY]))?|T(\d+)|M73 L(\d+)|M8([23])(?![\d.]))')
+# out of the line: a 100 MB file has two and a half million such moves. What comes before the E is read once and
+# never again ("*+" and "?+" give nothing back; Python 3.11 on). Read as "any text, then an X or Y, then any text",
+# a line of 60,000 characters without an E had every X and Y of it tried as that one: seconds, and four times as
+# many at twice the length, on the watcher's thread. Custom G-code goes into a slice as its author wrote it.
+GCODE_STEP = re.compile(rb'[ \t]*(?:G([0-3]|92)[ \t][^;EXY\n]*+([XY])?+[^;E\n]*+E([-+]?(?:\d+\.?\d*|\.\d+))(?:[^;\n]*?([XY]))?|T(\d+)|M73 L(\d+)|M8([23])(?![\d.]))')
 PURGE_MARKS = (b'; FLUSH_START', b'; FLUSH_END', b'; VFLUSH_START', b'; VFLUSH_END', b';VG1')
 VG1_E = re.compile(rb';VG1[^;\n]*?[ \t]E([-+]?(?:\d+\.?\d*|\.\d+))')
 PROFILE_TOLERANCE = (0.02, 0.002)            # grams, and share of the total: how far a filament's sum may be from the header's
@@ -304,7 +500,7 @@ def layer_profile(stream, plate, why=None):
     command. A filament whose sum is further from the header's total than PROFILE_TOLERANCE is not understood; within it,
     its lists are scaled to the total, so they add up to it exactly. None also for a file that is not the one the plate
     was read from (its totals differ), that ends before its first or its last layer, whose layers are out of order, or
-    that lacks a filament's density or diameter."""
+    that lacks a filament's density or diameter, or the weight of a filament in use (parse_plate)."""
     def refuse(reason):
         if why is not None: why.append(reason)
     head, lines = {}, lines_of(stream)
@@ -321,6 +517,7 @@ def layer_profile(stream, plate, why=None):
     def numbers(key):
         try: return [float(v) for v in head.get(key, b'').split(b',') if v.strip()]
         except ValueError: return []
+    if any(f['grams'] is None for f in plate['filaments']): return refuse('a filament of it has no weight in the header')
     if [w for w in numbers(b'total filament weight [g]') if w > 0] != [f['grams'] for f in plate['filaments']]: return refuse('its totals are not the plate\'s: the file has changed')
     density, diameter, holds = numbers(b'filament_density'), numbers(b'filament_diameter'), numbers(b'nozzle_volume')
     nozzle_of = [int(z) - 1 for z in numbers(b'filament_map')] if len(numbers(b'nozzle_diameter')) > 1 else []
@@ -396,13 +593,29 @@ def layer_profile(stream, plate, why=None):
         return None
     return out
 
+def temp_roots():
+    """The folders Bambu Studio may write its temporary G-code under, each once. Its temp folder is the one Windows
+    gives a program (GetTempPath: %TMP%, else %TEMP%), not always the one Python goes by (%TEMP% before %TMP%, and
+    TMPDIR before both): with only one of the two moved, the guard would watch a folder Bambu Studio never writes to.
+    So that one, both variables', Python's, and Bambu Studio's own data folder."""
+    roots, k32 = [], _kernel32()
+    if k32:
+        buf = ctypes.create_unicode_buffer(1024)
+        if 0 < k32.GetTempPathW(len(buf), buf) < len(buf): roots.append(buf.value)
+    roots += [os.environ.get('TMP'), os.environ.get('TEMP'), tempfile.gettempdir(), os.path.join(BS_DATA, 'tmp')]
+    distinct = {}
+    for root in roots:
+        if root: distinct.setdefault(os.path.normcase(os.path.realpath(root)), os.path.abspath(root))    # one folder under two spellings would show each slice twice
+    return list(distinct.values())
+
 def temp_gcodes():
     """The G-code of every plate the running Bambu Studio copies have sliced: <temp>/bamboo_model/<day>/<time>#<pid>#<id>/
     Metadata/.<pid>.<n>.gcode (PartPlate::get_tmp_gcode_path, v02.09.01.70). With under 2 GB free in the temp folder
-    Bambu Studio uses its own data folder instead."""
+    Bambu Studio uses its own data folder instead. The folder's own path is taken as it is spelt (glob.escape): a
+    "[" in it would otherwise be read as part of the pattern, and nothing found."""
     out = []
-    for root in (tempfile.gettempdir(), os.path.join(BS_DATA, 'tmp')):
-        out += glob.glob(os.path.join(root, 'bamboo_model', '*', '*', 'Metadata', '.*.gcode'))
+    for root in temp_roots():
+        out += glob.glob(os.path.join(glob.escape(root), 'bamboo_model', '*', '*', 'Metadata', '.*.gcode'))
     return out
 
 def project_title(gcode_path):
@@ -418,6 +631,8 @@ def project_title(gcode_path):
 
 class PrinterError(Exception): pass
 
+UNKNOWN_MODEL = 'unknown model'                         # of a printer whose serial Bambu Studio's list of printers does not name
+
 def bs_conf():
     s = open(os.path.join(BS_DATA, 'BambuStudio.conf'), encoding='utf-8', errors='replace').read()
     return json.loads(s[:s.rfind('}') + 1])                    # a checksum line follows the JSON
@@ -432,14 +647,36 @@ def model_by_serial_prefix():
     return out
 
 def known_printers(conf):
-    """[{'serial', 'model'}] for every printer Bambu Studio holds a LAN access code for; the one selected there first."""
+    """[{'serial', 'model', 'name'}] for every printer Bambu Studio holds a LAN access code for; the one selected there
+    first. name is what an answer calls the printer: its model, with the last four characters of its serial where
+    another known printer is of the same model ("Bambu Lab P1S (…0002)"), so that the answer says which was asked."""
     models = model_by_serial_prefix()
     last = conf.get('app', {}).get('user_last_selected_machine')
     serials = sorted(conf.get('access_code', {}), key=lambda s: s != last)
-    return [{'serial': s, 'model': models.get(s[:3], 'unknown model')} for s in serials]
+    out = [{'serial': s, 'model': models.get(s[:3], UNKNOWN_MODEL)} for s in serials]
+    for p in out: p['name'] = p['model'] + (f" (…{p['serial'][-4:]})" if sum(o['model'] == p['model'] for o in out) > 1 else '')
+    return out
 
-def discover(seconds=8.0, want=None):
-    """{serial: ip} of the Bambu printers announcing themselves on the LAN (SSDP notices on UDP 2021 / 1990)."""
+# A printer the guard does not hear may be off, or Windows Firewall keeps what it announces from pythonw (a network marked
+# Public, a prompt answered "no"): the guard only listens, so both are the same silence, and the answer names both.
+NOT_ANNOUNCED = ('not announcing itself on this network. Is it on? If it is, Windows Firewall may keep its announcements from the guard: allow the guard on private networks, '
+                 'or give the printer\'s address in config.json: {"printers": {"<serial>": {"ip": "<address>"}}}. A printer with a public address must be named there: '
+                 'an announcement is taken for a local address only')
+
+def local_address(text):
+    """text when it is an IPv4 address a printer on a local network can have, else None: no host name, no address of the
+    internet at large, not this computer itself, no multicast, unspecified or reserved one."""
+    try: a = ipaddress.ip_address(text if isinstance(text, str) else '')      # a number would be read as an address
+    except ValueError: return None
+    return text if a.version == 4 and not (a.is_global or a.is_loopback or a.is_multicast or a.is_unspecified or a.is_reserved) else None
+
+def discover(want, seconds=8.0):
+    """{serial: ip} of those of the printers `want` (serials) that announce themselves on the LAN (SSDP notices on UDP
+    2021 / 1990). Only a notice whose NT is Bambu's counts: other devices announce themselves on these ports too.
+    An announcement is not authenticated, and the access code is sent to the address it names. So it counts only for
+    a serial that was asked for, and only with a local address (local_address): its Location, taken as it came, let
+    one packet from any device on the network name a host on the internet. A device on the network that names itself
+    is still taken for the printer (SECURITY.md); an address given in config.json is not looked for here at all."""
     socks, found = [], {}
     for port in (2021, 1990):
         try:
@@ -450,26 +687,40 @@ def discover(seconds=8.0, want=None):
             s.settimeout(0.3); socks.append(s)
         except OSError: pass
     t0 = time.time()
-    while socks and time.time() - t0 < seconds and not (want and set(want) <= set(found)):
+    while socks and time.time() - t0 < seconds and not set(want) <= set(found):
         for s in socks:
             try: data, addr = s.recvfrom(4096)
             except OSError: continue
             h = {k.strip().lower(): v.strip() for k, v in (l.split(':', 1) for l in data.decode('utf-8', 'replace').split('\r\n') if ':' in l)}
-            if h.get('usn'): found[h['usn']] = h.get('location') or addr[0]
+            where = local_address(h.get('location') or addr[0])
+            if h.get('usn') in want and where and h.get('nt', '').lower() == 'urn:bambulab-com:device:3dprinter': found[h['usn']] = where
     for s in socks: s.close()
     return found
 
 def printer_ip(serial, cfg, refresh=False):
-    """The printer's IP: config.json, else the last one seen, else its LAN announcement (asked for at most every 10 minutes)."""
+    """The printer's IP: config.json, else the last one seen, else its LAN announcement (asked for at most every 10
+    minutes, by a time of this printer's own, 'listened': one time for all kept a second printer from being looked for
+    within ten minutes of the first). Of what discover heard, the address of this serial alone is kept. What an
+    earlier version kept is not used and goes from the state file at this look, listened or not: an address that is no
+    local one (it took whatever an announcement named), and whatever is kept under a key that is no serial Bambu
+    Studio knows (it kept every USN it heard, for good: a burst of junk made the state file, read whole every 3
+    seconds, hundreds of MB)."""
     fixed = cfg.get('printers', {}).get(serial, {}).get('ip')
     if fixed: return fixed
-    state = load_state(); ips = state.get('ips', {})
-    if serial in ips and not refresh: return ips[serial]
-    if time.time() - state.get('discovered_at', 0) > (0 if serial not in ips else 600):
-        found = discover(want=[serial])
-        def change(st): st.setdefault('ips', {}).update(found); st['discovered_at'] = time.time(); return st['ips'].get(serial)
-        return update_state(change)
-    return ips.get(serial)
+    try: known = set(bs_conf().get('access_code', {})) | {serial}
+    except Exception: known = {serial}
+    tidy = lambda kept: {s: a for s, a in (kept.items() if isinstance(kept, dict) else ()) if s in known and local_address(a)}
+    times = lambda kept: {s: t for s, t in (kept.items() if isinstance(kept, dict) else ()) if s in known and type(t) in (int, float)}
+    state = load_state(); ips = tidy(state.get('ips', {}))
+    listen = (refresh or serial not in ips) and time.time() - times(state.get('listened')).get(serial, 0) > (0 if serial not in ips else 600)
+    if not listen and ips == state.get('ips', {}): return ips.get(serial)
+    found = local_address(discover([serial]).get(serial)) if listen else None
+    def change(st):
+        st['ips'], st['listened'] = tidy(st.get('ips', {})), times(st.get('listened')); st.pop('discovered_at', None)   # 1.4.0's one time for all
+        if listen: st['listened'][serial] = time.time()
+        if found: st['ips'][serial] = found
+        return st['ips'].get(serial)
+    return update_state(change)
 
 def merge(a, b):
     for k, v in b.items():
@@ -482,7 +733,7 @@ def printer_link(ip, serial, code, client_id, on_report, on_refused=None):
     on_report gets the "print" part of every report, on the link's own thread. Returns the client; loop_stop() and
     disconnect() end it."""
     try: import paho.mqtt.client as mqtt
-    except ImportError: raise PrinterError('the Python package paho-mqtt is missing (pip install paho-mqtt)')
+    except ImportError: raise PrinterError(missing('paho-mqtt'))
     def on_connect(c, userdata, flags, rc, *rest):
         if rc.is_failure if hasattr(rc, 'is_failure') else rc != 0:
             if on_refused: on_refused(str(rc))
@@ -492,19 +743,39 @@ def printer_link(ip, serial, code, client_id, on_report, on_refused=None):
     def on_message(c, userdata, msg):
         try: d = json.loads(msg.payload)
         except ValueError: return
-        if isinstance(d.get('print'), dict): on_report(d['print'])
+        if isinstance(d, dict) and isinstance(d.get('print'), dict): on_report(d['print'])   # anything else is passed over: an error here ends the link's thread
     try: c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
     except AttributeError: c = mqtt.Client(client_id=client_id)
     c.username_pw_set('bblp', code)
-    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE      # the printer signs its own certificate
+    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE      # no public authority has signed the printer's certificate: whatever is shown is accepted (SECURITY.md)
     c.tls_set_context(ctx); c.on_connect = on_connect; c.on_message = on_message
     try: c.connect(ip, 8883, keepalive=30)
     except OSError as e: raise PrinterError(f'no connection to {ip} ({e.__class__.__name__})')
     c.loop_start()
     return c
 
+def has_spools(status):
+    """Is this status whole as far as the spools go? Only with the list of its AMS units in it (empty when there is
+    none). A printer sends its report in pieces: a small piece of "ams" ahead of the whole ({"tray_now": ...}) read as a
+    printer with nothing loaded, and ended every amount entered for an AMS tray. Without the list nothing is judged."""
+    return isinstance(status.get('ams'), dict) and isinstance(status['ams'].get('ams'), list)
+
+def can_judge(status):
+    """Can the spools of this status be judged? With the list of its AMS units (has_spools); or with no "ams" at all and
+    an external spool named (vt_tray, vir_slot), which is a printer that has no AMS: judged on its external spool,
+    and no amount entered for an AMS tray ends on it. "ams" there without its list is the report still in pieces."""
+    return has_spools(status) or ('ams' not in status and bool(status.get('vir_slot') or isinstance(status.get('vt_tray'), dict)))
+
+def code_refused(why):
+    """Is this refusal of a connection about the access code? why: the reason as the link gives it, paho 2's name for it
+    or paho 1's number (4 = bad user name or password, 5 = not authorised). Any other is not: a printer that is still
+    starting refuses with "Server unavailable", and the access code is right."""
+    return str(why).strip().lower() in ('4', '5', 'bad user name or password', 'not authorized')
+
 def read_status(ip, serial, code, wait=10.0):
-    """The printer's full status, read once."""
+    """The printer's full status, read once: waited for until it has its spools (has_spools), three seconds at most
+    after its first piece, and returned as it then is. The caller asks can_judge before it judges by it: a printer
+    without an AMS never has that list, and is told from a report in pieces only once the three seconds are over."""
     state, lock, full, refused = {}, threading.Lock(), threading.Event(), []
     def on_report(d):
         with lock: merge(state, d)
@@ -513,11 +784,11 @@ def read_status(ip, serial, code, wait=10.0):
     c = printer_link(ip, serial, code, f'bambu-filament-guard-{os.getpid()}-{next(LINK_NUMBER)}', on_report, lambda rc: (refused.append(rc), full.set()))
     try:
         if not full.wait(wait): raise PrinterError(f'{ip} did not report its status')
-        if refused: raise PrinterError(f'{ip} refused the access code Bambu Studio holds for it')
+        if refused: raise PrinterError(f'{ip} refused the access code Bambu Studio holds for it' if code_refused(refused[0]) else f'{ip} refused the connection ({refused[0]})')
         for tenth in range(30):                           # the H2D sends its report in pieces: a second at least, three at most, for the spools
             time.sleep(0.1)
             with lock:
-                if tenth >= 9 and 'ams' in state: break
+                if tenth >= 9 and has_spools(state): break
         with lock: return json.loads(json.dumps(state))
     finally:
         c.loop_stop(); c.disconnect()
@@ -545,14 +816,23 @@ def trays_of(status):
     spool. weight is the full spool's filament in grams (tray_weight), None when the printer does not know it; spool the
     spool's tag (spool_id).
     label is the tray as Bambu Studio shows it (A1..D4, HT-A, Ext). nozzle is the one the tray's AMS feeds, where the
-    printer has two: the low half of the top byte of the AMS 'info' word, 1 = left, 0 = right (H2D, firmware 01.04);
-    the tray each nozzle has loaded confirms it. None = not known, and then the tray counts for either nozzle."""
+    printer has two; None = not known, and then the tray counts for either nozzle. It is read from the AMS's 'info'
+    word, hexadecimal text:
+      - bits 8-11, as Bambu Studio reads them (DevFilaSystem.cpp, ParseAmsInfo): the extruder the AMS is bound to, 0 =
+        the main one = right, 1 = the deputy = left, 0xE = bound to none;
+      - where those are neither 0 nor 1, bits 24-27, 1 = left, else right: an H2D on firmware 01.04 sends "51001E03" for
+        its two AMS on the left nozzle and "50001E03" for the one on the right, 0xE in bits 8-11.
+    The tray each nozzle has loaded confirms it. An 'info' that is not such text tells nothing. An external holder is
+    told by its id: 254 the left nozzle's (Bambu Studio's "Ext-L"), 255 the right's ("Ext-R"); the H2D lists them in
+    that order, so 'Ext' is its left one and 'Ext2' its right (amounts entered by hand are kept under these labels)."""
     extruders = status.get('device', {}).get('extruder', {}).get('info', []) or []
     two = len(extruders) > 1
     side = {}
     for a in status.get('ams', {}).get('ams', []) or []:
-        try: side[int(a['id'])] = 'left' if (int(a.get('info', ''), 16) >> 24) & 0xF == 1 else 'right'
-        except (ValueError, KeyError): pass
+        try: info, aid = int(a['info'], 16), int(a['id'])
+        except (ValueError, KeyError, TypeError): continue                # no 'info', or one that is not hexadecimal text (a number raises TypeError here)
+        bound = (info >> 8) & 0xF
+        side[aid] = ('right', 'left')[bound] if bound in (0, 1) else 'left' if (info >> 24) & 0xF == 1 else 'right'
     for e in extruders:
         for key in ('snow', 'spre'):
             v = e.get(key)
@@ -570,7 +850,7 @@ def trays_of(status):
             label = f'HT-{chr(65 + aid - 128)}' if aid >= 128 else f"{chr(65 + aid)}{int(t.get('id', 0)) + 1}"
             add(label, t, side.get(aid))
     external = status.get('vir_slot') or ([status['vt_tray']] if isinstance(status.get('vt_tray'), dict) else [])
-    for i, t in enumerate(external): add('Ext' if i == 0 else f'Ext{i + 1}', t, None)
+    for i, t in enumerate(external): add('Ext' if i == 0 else f'Ext{i + 1}', t, {'254': 'left', '255': 'right'}.get(str(t.get('id'))))
     return out, two
 
 
@@ -587,13 +867,17 @@ def assess(fil, trays, cfg, times=1):
     """One filament of the print against the loaded spools.
     OK       one spool holds the need plus the reserve (see DEFAULTS)
     TIGHT    one spool holds the need, without the reserve
-    SPLIT    no single spool holds it, the matching spools together do (the AMS must refill from one to the next)
-    SHORT    the matching spools together hold less than the need
+    SPLIT    no single spool holds it; matching spools that AMS auto refill goes on between do together (same_filament,
+             both in an AMS)
+    SHORT    the matching spools together hold less than the need, or hold it only with a spool the AMS does not go
+             on to by itself (another product or shade, the external spool): those are named, with their amounts
     MISSING  no spool of this material is loaded where the print's nozzle can reach it
     COLOUR   the material is loaded, this colour of it is not: the nearest spool is named, and counts for nothing
-    UNKNOWN  the matching spool reports no remaining amount
-    Matching: same material type, on the nozzle that prints it, of the project's colour (the same product first)."""
-    need = fil['grams'] * times
+    UNKNOWN  the matching spool reports no remaining amount, or Bambu Studio gives the filament no weight (parse_plate)
+    Matching: same material type, on the nozzle that prints it, of the project's colour. Of the project's own product
+    while a spool of it is loaded; otherwise of any product, since that spool can be picked at "Send print job", and
+    the note then names it, whatever the answer."""
+    need = fil['grams'] * times if fil['grams'] is not None else None
     row = {'slot': fil['slot'], 'type': fil['type'], 'name': fil['name'], 'colour': fil['colour'], 'nozzle': fil['nozzle'], 'need': need,
            'trays': [], 'best': None, 'total': None, 'note': ''}
     same = [t for t in trays if t['type'].upper() == fil['type'].upper()]
@@ -610,38 +894,70 @@ def assess(fil, trays, cfg, times=1):
                        + (f", {t['grams']:.0f} g" if t['grams'] is not None else ''))
         return row
     group = [t for t in near if fil['fid'] and t['fid'] == fil['fid']] or near
-    plainest = max(group, key=lambda t: t.get('plain', t['grams']) or 0)   # the fullest spool had nothing been learned: taken before the sort by learned grams, so a tie goes as it would
     group.sort(key=lambda t: -(t['grams'] or 0))
-    row['sliced'] = need                                     # what the slicer says; the need below never falls under it
-    # What was learned of the trays (guard_learn): the largest rate and loss before layer 1 of the matching spools, as
-    # which of them the print draws on first cannot be read; so learning another tray first never lowers the need.
-    rho, pre = max(group, key=lambda t: t.get('rho') or 0), max(group, key=lambda t: t.get('pre') or 0)
-    need = row['need'] = need * max(1.0, rho.get('rho') or 1.0) + (pre.get('pre') or 0) * times
     row['trays'] = [{'label': t['label'], 'grams': t['grams'], 'colour': t['colour'], 'name': t['name'], 'type': t['type'], 'entered': t.get('entered'),
                      'stale': t.get('stale'), 'reads': t.get('reads'), 'reserved': t.get('reserved'), 'credited': t.get('credited'), 'evidence': t.get('evidence'),
                      'pre': t.get('pre'), 'owes': t.get('owes'), 'refills': t.get('refills'), 'beyond': t.get('beyond'), 'reading': t.get('reading'),
                      'spool': t.get('spool'), 'fid': t.get('fid'), 'weight': t.get('weight')} for t in group]
     known = [t['grams'] for t in group if t['grams'] is not None]
     unknown = [t['label'] for t in group if t['grams'] is None]
-    if not known:
-        stale = [t['label'] for t in group if t.get('stale')]
+    other = [t for t in group if fil['fid'] and t['fid'] and t['fid'] != fil['fid']]     # no spool of the project's product is loaded: these count in its place (a spool that names no product is not called another)
+    stands_in = (' and '.join(f"{t['label']} is {t['name'] or t['type']}" for t in other) + f", another product than the project's {fil['name'] or fil['type']}") if other else ''
+    if need is None:                                         # nothing to hold against the spools: not "enough", whatever they hold. The row keeps
+        if known: row['best'], row['total'] = max(known), sum(known)   # its spools: the filaments that share one are not "enough" either (share_spools)
         row['status'] = 'UNKNOWN'
-        row['note'] = (f"the amount entered for {', '.join(stale)} is out of date: a print the guard could not count has drawn on it" if stale
-                       else f"{', '.join(unknown)} reports no remaining amount")
+        row['note'] = ('Bambu Studio gives no weight for this filament' + (" (its profile's density is 0)" if fil.get('density') == 0 else '')
+                       + (f'; {stands_in}' if stands_in else ''))
+        return row
+    row['sliced'] = need                                     # what the slicer says; the need below never falls under it
+    # What was learned of the trays (guard_learn): the largest rate and loss before layer 1 of the matching spools, as
+    # which of them the print draws on first cannot be read; so learning another tray first never lowers the need.
+    rho, pre = max(group, key=lambda t: t.get('rho') or 0), max(group, key=lambda t: t.get('pre') or 0)
+    need = row['need'] = need * max(1.0, rho.get('rho') or 1.0) + (pre.get('pre') or 0) * times
+    if not known:
+        whys = {}                                            # why each entered amount is out of date (guard_ledger.lapse): {reason: [trays]}
+        for t in group:
+            if t.get('stale'): whys.setdefault(t.get('why') or '', []).append(t['label'])
+        row['status'] = 'UNKNOWN'
+        row['note'] = ('; '.join(f"the amount entered for {', '.join(labels)} is out of date" + (f': {why}' if why else '') for why, labels in whys.items()) if whys
+                       else f"{', '.join(unknown)} reports no remaining amount") + (f'; {stands_in}' if stands_in else '')
         return row
     row['best'], row['total'] = max(known), sum(known)
-    # The reserve is a share of the fullest spool's full weight. Learning may make another spool the fullest: the larger
-    # of the two weights is taken, so that the reserve is never smaller for having learned (see credit).
-    reserve = max(need * cfg['margin_pct'] / 100.0, max(group[0].get('weight') or 0, plainest.get('weight') or 0) * cfg['spool_reserve_pct'] / 100.0)
-    if group[0].get('margin') is not None:                   # measured from the guard's own past forecasts (guard_learn), within its floor
+    # The reserve is a share of the largest full weight among the spools the filament could be printed from, not of the
+    # fullest spool's: which spool is the fullest changes with what was learned of the trays, and the reserve must never
+    # be smaller for that. (A 1 kg spool counted lower by another tray's run-dry once left a 250 g spool the fullest,
+    # with 7.5 g for a reserve where 1.3.0 asked 30 g.) The spools are the same whatever was learned, so their largest is.
+    # A spool whose full weight the printer does not report counts as a 1 kg spool, and so does one whose amount was
+    # entered by hand: that figure rests on a kitchen scale and a typed empty-spool weight, and its "full weight" is
+    # only the amount first entered. Either had nothing of the spool for a reserve, or 3 % of what was typed.
+    full = max(1000.0 if t.get('entered') or not t.get('weight') else t['weight'] for t in group)
+    reserve = max(need * cfg['margin_pct'] / 100.0, full * cfg['spool_reserve_pct'] / 100.0)
+    # Measured from the guard's own past forecasts (guard_learn), within its floor. In use ('margin': the setting on, and
+    # earned) it replaces the fixed reserve and may be smaller. Otherwise ('floor') it can only raise the fixed one:
+    # where past prints fell further short than the fixed reserve covers, the answer must not be the looser of the two.
+    fixed, floors = reserve, [t['floor'] for t in group if t.get('floor') is not None]
+    if group[0].get('margin') is not None or floors:
         import guard_learn
         floor_g, floor_share = guard_learn.RESERVE_FLOOR
-        reserve = max(floor_g, floor_share * need, group[0]['margin'] * (row['sliced'] + guard_learn.MARGIN_K))
-    row['reserve'], row['measured'] = reserve, group[0].get('margin') is not None
+        measure = lambda q: max(floor_g, floor_share * need, q * (row['sliced'] + guard_learn.MARGIN_K))
+        reserve = measure(group[0]['margin']) if group[0].get('margin') is not None else max(fixed, measure(max(floors)))
+    row['reserve'], row['measured'], row['raised'] = reserve, group[0].get('margin') is not None, group[0].get('margin') is None and reserve > fixed
+    # Two spools hold it together only where the AMS goes on from one to the other by itself: the spools of one filament
+    # (same_filament), both in an AMS. The sum of any others once read "AMS auto refill must be on" across an AMS tray
+    # and the external spool, and across two products 31 apart in colour.
+    in_ams = lambda t: t['grams'] is not None and not t['label'].startswith('Ext')
+    chain = max(([t] + [o for o in group if in_ams(t) and in_ams(o) and same_filament(t, o)] for t in group if t['grams'] is not None), key=lambda c: sum(t['grams'] for t in c))
+    reach, apart = sum(t['grams'] for t in chain), [t for t in group if t['grams'] and t not in chain]
     if row['best'] >= need + reserve: row['status'] = 'OK'
     elif row['best'] >= need: row['status'] = 'TIGHT'; row['note'] = (f"{row['best'] - need:.0f} g to spare, and " + (
-        f"past prints put the figure up to {reserve:.0f} g out" if group[0].get('margin') is not None else f"the AMS's figure can be {reserve:.0f} g out"))
-    elif row['total'] >= need: row['status'] = 'SPLIT'; row['note'] = 'only across these spools: AMS auto refill must be on'
+        f"past prints put the figure up to {reserve:.0f} g out" if row['measured'] or row['raised'] else f"the AMS's figure can be {reserve:.0f} g out"))
+    elif reach >= need:
+        row['status'] = 'SPLIT'
+        row['note'] = f"only across {'these spools' if len(chain) == len(group) else ' + '.join(t['label'] for t in chain)}: AMS auto refill must be on"
+    elif row['total'] >= need:
+        row['status'] = 'SHORT'
+        row['note'] = (f"short by {need - reach:.0f} g; AMS auto refill does not go on from {' + '.join(t['label'] for t in chain)} to "
+                       + ', '.join(f"{t['label']} ({t['grams']:.0f} g)" for t in apart))
     else: row['status'] = 'SHORT'; row['note'] = f"short by {need - row['total']:.0f} g"
     if unknown and row['status'] in ('SHORT', 'SPLIT', 'TIGHT'): row['note'] += f"; {', '.join(unknown)} holds an unknown amount more"
     said = [x for x in (tray_note(t) for t in group) if x]
@@ -654,6 +970,7 @@ def assess(fil, trays, cfg, times=1):
     alike = [t for t in near if t not in group]              # the same colour to the eye, another product: the user's call, so named, not counted
     if alike and row['status'] in ('SHORT', 'SPLIT', 'TIGHT'):
         row['note'] += '; similar colour: ' + ', '.join(f"{t['label']} {t['name'] or t['type']}" + (f" {t['grams']:.0f} g" if t['grams'] is not None else '') for t in alike)
+    if stands_in: row['note'] += ('; ' if row['note'] else '') + stands_in
     return row
 
 def tray_note(t):
@@ -679,44 +996,61 @@ def tray_note(t):
 def same_filament(a, b):
     """Two loaded spools the AMS goes on with, one after the other, when one runs out (auto refill): the same material
     and colour, the same product where both name one, for the same nozzle (or one that may feed either). Used for
-    what the running print needs beyond its own tray; for the print checked, assess's looser match decides."""
+    what the running print needs beyond its own tray, and by assess for the spools that hold the checked print's need
+    together ("needs two spools": both must be in an AMS as well). Which spools match the checked print at all is
+    assess's own, looser rule."""
     return (a['label'] != b['label'] and a['type'].upper() == b['type'].upper() and a['colour'] == b['colour']
             and (not a['fid'] or not b['fid'] or a['fid'] == b['fid']) and (a.get('nozzle') is None or b.get('nozzle') is None or a['nozzle'] == b['nozzle']))
 
-def credit(trays, owed, learned=None, running=None, order=None):
+def credit(trays, owed, learned=None, running=None, order=None, taken=True, gone=()):
     """What each tray is counted with, for the moment the checked print could start: its reading, corrected by what was
     learned of it (learned: guard_learn.corrections; only ever lower, and never an amount entered by hand), less what the
     print running now still needs of it (owed).
+      - Off a tray the printer measures, what the running print still needs comes in the reading's grams: the sliced
+        grams by the tray's learned rate (rho), where its reading falls by more than a gram for each gram sliced, as
+        assess counts the checked print's own need. In sliced grams, a tray reading 700 g with 500 g still to print
+        and a rate of 1.10 is counted with 200 g where its reading will come to 150 g.
       - An amount entered by hand has the running print taken off it like a reading until guard_ledger has done so
-        itself (the entry's 'accounted' job is the running one, `running`, and nothing was 'missed').
+        itself: the entry's 'accounted' job is the running one, `running`, nothing was 'missed', and `taken`
+        (guard_ledger.taken_off) says it is that run: never while the printer prepares the job, nor when the job the
+        key was counted for has ended and this is another run of it (a LAN-only printer gives every job the id 0).
+        From then on only what the ledger could take off no entered spool is owed here: what the print needs beyond
+        that entry ('over') goes on to the spools the printer measures, and what an entry gave for a measured tray
+        ('gave') is not taken off again.
       - What the running print needs beyond a tray's amount comes, with AMS auto refill, from the loaded spools of the
         same filament (same_filament), the fullest first: it is taken off them ('taken' on the tray, 'refills' on
         theirs); what none of them holds is 'beyond' (assess and the card say so).
-    Keeps the amount before any of this ('reads') whenever something was corrected or taken off, and what the tray would
-    be counted with had nothing been learned ('plain'), which keeps the reserve from shrinking (see assess). The spools
-    a print goes on with are taken in the order they would be without learning (`order`), so that no tray is ever
-    counted higher for what was learned of another."""
-    plain = None
-    if learned:
-        plain = {t['label']: t for t in credit([dict(t) for t in trays], owed, None, running)}
-        order = {label: t.get('left', t['grams']) for label, t in plain.items()}
+      - What the print needs of a tray whose amount is not known (no tag and no entry, or an entry out of date), or of
+        one that is no longer loaded (gone: such trays as the slice names their filament, with what they are owed), is
+        all taken as beyond it: left out, it vanishes, and the spool the AMS has gone on with reads "enough". For a
+        tray that is gone, what no loaded spool holds is its 'beyond'; of a tray of unknown amount nobody knows that.
+    Keeps the amount before any of this ('reads') whenever something was corrected or taken off. The spools a print
+    goes on with are taken in the order they would be without learning (`order`), so that no tray is ever counted
+    higher for what was learned of another."""
+    if learned: order = {t['label']: t.get('left', t['grams']) for t in credit([dict(t) for t in trays], owed, None, running, taken=taken)}
+    counted, blind = set(), {}                                   # the entered trays guard_ledger has taken the running print off; what is owed to trays of unknown amount
     for t in trays:
-        if t['grams'] is None or t.get('stale'): continue
-        raw, share, fix = t['grams'], owed.get(t['label'], 0.0), {}
-        if not t.get('entered'): fix = (learned or {}).get(t['label'], {})
-        elif not running or (t.get('accounted') == running and t.get('missed') != running): share = 0.0
+        if t['grams'] is None or t.get('stale'): blind[t['label']] = owed.get(t['label'], 0.0); continue
+        raw, share, fix, over = t['grams'], owed.get(t['label'], 0.0), {}, 0.0
+        if not t.get('entered'): fix = (learned or {}).get(t['label'], {}); share *= max(1.0, fix.get('rho') or 1.0)
+        elif not running: share = 0.0
+        elif taken and t.get('accounted') == running and t.get('missed') != running: counted.add(t['label']); share, over = 0.0, min(share, t.get('over') or 0.0)
         base = fix.get('credited', raw)
         t['reading'] = raw
         if 'credited' in fix: t['credited'], t['evidence'] = base, fix['evidence']
-        for key in ('pre', 'rho', 'margin'):
+        for key in ('pre', 'rho', 'margin', 'floor'):
             if fix.get(key) is not None: t[key], t[key + '_note'] = fix[key], fix[key + '_note']
-        if share or base < raw: t['reads'] = raw
+        if share or over or base < raw: t['reads'] = raw
         if share: t['owes'], t['reserved'] = share, min(base, share)
+        if over: t['owes'] = over
         t['grams'] = t['left'] = base - t.get('reserved', 0.0)
     order = order or {t['label']: t['left'] for t in trays if 'left' in t}
-    for t in trays:
-        excess = (t.get('owes') or 0.0) - (t.get('reserved') or 0.0)
+    for t in trays + list(gone):
+        excess = blind.get(t['label'], 0.0) + (t.get('owes') or 0.0) - (t.get('reserved') or 0.0)
         if excess <= 1e-6: continue
+        for o in trays:
+            g = min(excess, (o.get('gave') or {}).get(t['label'], 0.0)) if o['label'] in counted else 0.0
+            if g > 0: excess -= g; t.setdefault('taken', []).append((o['label'], g))
         for o in sorted((o for o in trays if 'left' in o and same_filament(t, o)), key=lambda o: -order.get(o['label'], 0.0)):
             g = min(o['grams'], excess)
             if g <= 0: continue
@@ -724,30 +1058,50 @@ def credit(trays, owed, learned=None, running=None, order=None):
             o['grams'] -= g; excess -= g
             o.setdefault('refills', []).append((t['label'], g)); t.setdefault('taken', []).append((o['label'], g))
             if excess <= 1e-6: break
-        if excess > 1e-6: t['beyond'] = excess
-    for t in trays:
-        if 'left' in t: t['plain'] = plain[t['label']]['grams'] if plain else t['grams']
+        if excess > 1e-6 and t['label'] not in blind: t['beyond'] = excess
     return trays
 
 def pick_printer(model, printers):
     """The printer a plate is checked against: of the known printers of the model it was sliced for, the one selected
-    in Bambu Studio (known_printers lists it first)."""
+    in Bambu Studio (known_printers lists it first); with a printer of another model selected there, the first of
+    this model in Bambu Studio's configuration. The others of the model are not asked: the answer names the one that was."""
     return next((p for p in printers if p['model'] == model), None)
 
 def share_spools(rows, filaments, trays, cfg, times):
-    """Filaments that draw on the same spools (two slots of one colour) are judged on what they need together: each
-    alone can fit a spool that does not hold both."""
-    groups = {}
-    for row, fil in zip(rows, filaments):
-        if row['trays']: groups.setdefault(tuple(t['label'] for t in row['trays']), []).append((row, fil))
-    for labels, members in groups.items():
-        if len(members) < 2: continue
-        total = sum(fil['grams'] for _, fil in members)
-        joint = assess(dict(members[0][1], grams=total), trays, cfg, times)
-        for row, _ in members:
+    """Filaments that can draw on a spool in common are judged on what they need together: each alone can fit a spool
+    that does not hold both. Two slots of one colour share all their spools; one spool is enough to share (a spool that
+    stands in for another product, the external spool for both nozzles, two shades within the tolerance of one spool).
+    Which of them the print takes from the shared spool cannot be read, so each filament is judged against its own
+    spools with the need of every filament it shares one with added. One that Bambu Studio gives no weight (parse_plate)
+    adds nobody knows what: a filament that shares a spool with it is not "enough" either, and says which that is."""
+    labels = [{t['label'] for t in row['trays']} for row in rows]
+    for i, (row, fil) in enumerate(zip(rows, filaments)):
+        if fil['grams'] is None: continue                    # its own row says so
+        mates = [n for n in range(len(rows)) if n == i or labels[n] & labels[i]]
+        with_it, unweighed = [n for n in mates if filaments[n]['grams'] is not None], [n for n in mates if filaments[n]['grams'] is None]
+        shared = lambda them: ' + '.join(t['label'] for t in row['trays'] if any(t['label'] in labels[n] for n in them if n != i))
+        if len(with_it) > 1:
+            total = sum(filaments[n]['grams'] for n in with_it)
+            joint = assess(dict(fil, grams=total), trays, cfg, times)
             if SEVERITY[joint['status']] > SEVERITY[row['status']]: row['status'] = joint['status']
-            row['note'] = (f"filaments {', '.join(str(r['slot']) for r, _ in members)} share {' + '.join(labels)} and need {total * times:.0f} g together"
+            row['note'] = (f"filaments {', '.join(str(rows[n]['slot']) for n in with_it)} share {shared(with_it)} and need {total * times:.0f} g together"
                            + (f": {joint['note']}" if joint['note'] else ''))
+        if unweighed:
+            if row['status'] == 'OK': row['status'] = 'UNKNOWN'
+            one = len(unweighed) == 1
+            row['note'] += ('; ' if row['note'] else '') + (f"filament{'' if one else 's'} {', '.join(str(rows[n]['slot']) for n in unweighed)} can also print from "
+                                                            f"{shared(unweighed)}, and Bambu Studio gives {'it' if one else 'them'} no weight")
+
+def uncounted(rows, drawn):
+    """A print the guard could not count is on the printer, and of the trays it may draw on (drawn) nobody knows what
+    will be left: no filament that rests on one of them is "enough". Such a row is UNKNOWN, and one that warns already
+    keeps its warning; both say why. (Else it is the incident of 2026-11-19 over again: with a 450 g job sent from
+    elsewhere on a spool reading 500 g, a 300 g plate reads "enough" on that spool, exit code 0.)"""
+    for row in rows:
+        on = [t['label'] for t in row['trays'] if t['label'] in drawn]
+        if not on or row['status'] not in ('OK', 'TIGHT', 'SPLIT', 'SHORT'): continue
+        if row['status'] == 'OK': row['status'] = 'UNKNOWN'
+        row['note'] += ('; ' if row['note'] else '') + f"a print the guard could not count is drawing on {', '.join(on)}"
 
 def mark_looked(serial):
     """Notes in the state file that a check looked at the printer (learning follows it, guard_ledger.followed); not again
@@ -760,16 +1114,26 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
     """{'title', 'model', 'time', 'times', 'plate', 'printer', 'rows', 'worst', 'error'}: the whole answer for one sliced plate.
     seen: a dict that carries the printers' status from one call to the next, for several plates checked in one go."""
     res = {'title': title, 'model': plate['printer_model'], 'time': plate['time'], 'times': times, 'plate': plate, 'printer': None, 'rows': [], 'worst': 'OK', 'error': None}
+    if all(f['grams'] is None for f in plate['filaments']):  # no row to judge: the worst of none once read "Enough filament", exit code 0
+        res['error'] = 'this plate uses no filament the guard can weigh'
+        return res
     try:
-        conf = bs_conf()
-        printer = pick_printer(plate['printer_model'], known_printers(conf))
-        if not printer:                      # sliced for a printer that is not on this LAN (or not a Bambu printer): nothing to ask, so no card
-            res['quiet'] = True
+        conf = bs_conf(); printers = known_printers(conf)
+        printer = pick_printer(plate['printer_model'], printers)
+        if not printer:
+            sliced, odd = f"a {plate['printer_model']}" if plate['printer_model'] else 'another printer', [p['serial'][-4:] for p in printers if p['model'] == UNKNOWN_MODEL]
+            if odd:                          # it may be the very printer this plate is for: said on a card, where silence looked like "enough"
+                raise PrinterError(f"the guard cannot tell which model your printer …{' or …'.join(odd)} is (Bambu Studio's list of printers does not name its serial number), "
+                                   f"so this plate, sliced for {sliced}, was not checked")
+            res['quiet'] = True              # sliced for a printer that is not on this LAN (or not a Bambu printer): nothing to ask, so no card
+            if len(printers) == 1:           # but one line where the only printer known is of another model: the wrong preset, most likely
+                res['line'] = f"Not checked: sliced for {sliced}, your printer is a {printers[0]['model']}"
+                raise PrinterError(res['line'][:1].lower() + res['line'][1:])
             raise PrinterError(f"Bambu Studio holds no LAN access code for a {plate['printer_model'] or 'printer of this kind'}")
         status = (seen or {}).get(printer['serial'])
         if status is None:
             ip = printer_ip(printer['serial'], cfg)
-            if not ip: raise PrinterError(f"the {printer['model']} is not announcing itself on this network (is it on?)")
+            if not ip: raise PrinterError(f"the {printer['name']} is {NOT_ANNOUNCED}")
             code = conf['access_code'][printer['serial']]
             try: status = read_status(ip, printer['serial'], code)
             except PrinterError:
@@ -778,34 +1142,47 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
                 status = read_status(new_ip, printer['serial'], code)
             if seen is not None: seen[printer['serial']] = status
         if cfg.get('learn'): mark_looked(printer['serial'])
-    except (PrinterError, OSError, ValueError, KeyError) as e:
+        if not can_judge(status): raise PrinterError(f"the {printer['name']} did not report its spools")
+    except Exception as e:                   # whatever goes wrong before the printer has answered is an answer too: a card with the reason, not a line in the log
         res['error'] = str(e) if isinstance(e, PrinterError) else f'{e.__class__.__name__}: {e}'
         return res
     try:
         import guard_ledger
         trays, _ = trays_of(status)
-        guard_ledger.apply(trays, printer['serial'], 'ams' in status)   # spools the printer cannot measure get the amount entered for them
+        guard_ledger.apply(trays, printer['serial'], has_spools(status))   # spools the printer cannot measure get the amount entered for them
         # The answer is for the moment this print could start: what the print running now still needs is not there for
         # it (see credit: an entered amount the ledger has not yet taken it off included).
-        owed, counted = guard_ledger.owed(status, load_state().get('slices', []))
+        state = load_state(); guard_ledger.note_job(printer['serial'], status, state)
+        owed, counted = guard_ledger.owed(status, state.get('slices', []))
+        # What is owed to a tray that is no longer loaded: the print has gone on from another spool, of the filament the
+        # slice names for that tray. Where it names none, or no loaded spool is of it, the print is not counted.
+        absent = [l for l in owed if owed[l] and not any(t['label'] == l for t in trays)]
+        fils = guard_ledger.filaments_of(status, state.get('slices', [])) if absent else {}
+        gone = [dict(fils[l], owes=owed[l]) for l in absent if l in fils and any(t['grams'] is not None and same_filament(fils[l], t) for t in trays)]
+        if len(gone) < len(absent): owed, counted, gone = {}, False, []
         running = guard_ledger.job_key(status) if status.get('gcode_state') in BUSY else None
+        learned = reserve = unlearned = None
         if cfg.get('learn'):
             import guard_learn
-            credit(trays, owed, guard_learn.corrections(printer['serial'], trays, cfg=cfg), running)
-        else: credit(trays, owed, running=running)
+            try: history = guard_learn.load(); learned = guard_learn.corrections(printer['serial'], trays, history, cfg)
+            except Exception as e:           # what was learned may make a check stricter, never cost it: the check goes on as with learning off, and says so
+                unlearned = f'what was learned from previous prints could not be used ({e.__class__.__name__}): this check is as without it'
+                log(f'learning: {e.__class__.__name__}: {e}: this check is as with learning off')
+        credit(trays, owed, learned, running, taken=guard_ledger.taken_off(status, state, printer['serial']), gone=gone)
         rows = [assess(f, trays, cfg, times) for f in plate['filaments']]
         share_spools(rows, plate['filaments'], trays, cfg, times)
-        reserve = None
-        if cfg.get('learn'):
-            reserve = guard_learn.reserve_words(printer['serial'], cfg=cfg)
-            offer = guard_learn.weigh_offer(printer['serial'], rows, cfg)
+        if counted is False: uncounted(rows, guard_ledger.drawn_on(status))
+        if cfg.get('learn') and not unlearned:
+            reserve = guard_learn.reserve_words(printer['serial'], rows, history, cfg) or None
+            offer = guard_learn.weigh_offer(printer['serial'], rows, cfg, busy=status.get('gcode_state') in BUSY)
             if offer: res['weigh'] = offer
     except Exception as e:                   # a status the guard does not understand must end as a card that says so, not as a line in the log
-        res['error'] = f"the {printer['model']}'s report could not be worked out ({e.__class__.__name__}: {e})"
+        res['error'] = f"the {printer['name']}'s report could not be worked out ({e.__class__.__name__}: {e})"
         return res
-    res['printer'] = {'model': printer['model'], 'serial': printer['serial'], 'state': status.get('gcode_state', '?'), 'job': status.get('subtask_name', ''),
-                      'percent': status.get('mc_percent'), 'layer': status.get('layer_num'), 'layers': status.get('total_layer_num'), 'counted': counted,
-                      'beyond': {t['label']: t['beyond'] for t in trays if round(t.get('beyond') or 0)}, 'reserve': reserve}
+    dated = sorted({t['label'] for r in rows if r['status'] == 'UNKNOWN' and r['best'] is None for t in r['trays'] if t.get('stale')})   # the spools a row is unknown for, their entered amount out of date
+    res['printer'] = {'model': printer['model'], 'name': printer['name'], 'serial': printer['serial'], 'state': status.get('gcode_state', '?'), 'job': status.get('subtask_name', ''),
+                      'percent': status.get('mc_percent'), 'layer': status.get('layer_num'), 'layers': status.get('total_layer_num'), 'counted': counted, 'dated': dated,
+                      'beyond': {t['label']: t['beyond'] for t in trays + gone if round(t.get('beyond') or 0)}, 'reserve': reserve, 'unlearned': unlearned}
     res['rows'] = rows
     res['worst'] = max((r['status'] for r in rows), key=SEVERITY.get, default='OK')
     return res
@@ -821,6 +1198,9 @@ STATUS_WORD = {'OK': 'enough', 'TIGHT': 'tight', 'SPLIT': 'two spools', 'SHORT':
 
 def tray_text(row):
     return ' + '.join(t['label'] for t in row['trays']) or '-'
+
+def need_text(row):
+    return f"{row['need']:.1f} g" if row['need'] is not None else '?'
 
 def has_text(row):
     if row['best'] is None: return '?' if row['trays'] else '-'
@@ -839,17 +1219,23 @@ def beyond_text(p):
     """The running print's own shortfall, in words: what it needs beyond every loaded spool of a tray's filament."""
     return ''.join(f"; it needs {g:.0f} g more of {label}'s filament than the loaded spools hold" for label, g in (p.get('beyond') or {}).items())
 
+def known_text(p):
+    """The proviso to "less what the print running there still needs" where a filament is unknown because its entered
+    amount is out of date: nothing can be taken off such a spool, and the line above it must not say it was."""
+    return " where a spool's amount is known" if p.get('dated') else ''
+
 def report_text(res):
     lines = [headline(res) + (f": {res['title']}" if res['title'] else '') + (f" x {res['times']}" if res['times'] != 1 else '')]
     if res['error']: return lines[0] + '\n  ' + res['error']
     p, busy = res['printer'], ''
     if p['state'] in BUSY:
-        busy = f"{job_text(p)}: " + ('the running print is counted: what it still needs is taken off its spools' if p.get('counted') else
-                                                    "its spools are still being used, and the guard could not count that print: the amounts are the spools' amounts now")
+        busy = f"{job_text(p)}: " + ('what the running print still needs is taken off the spools whose amount is known' if p.get('counted') and p.get('dated') else
+                                     'the running print is counted: what it still needs is taken off its spools' if p.get('counted') else
+                                     "its spools are still being used, and the guard could not count that print: the amounts are the spools' amounts now")
         busy += beyond_text(p)
-    lines.append(f"  {p['model']}, {p['state']}" + busy + (f"; {p['reserve']}" if p.get('reserve') else ''))
+    lines.append(f"  {p.get('name') or p['model']}, {p['state']}" + busy + ''.join(f'; {p[key]}' for key in ('reserve', 'unlearned') if p.get(key)))
     for r in res['rows']:
-        lines.append(f"  {r['slot']:>2} {r['type']:<8} {r['colour']} {r['name'][:22]:<22} needs {r['need']:7.1f} g   {tray_text(r):<10} has {has_text(r):<22} {STATUS_WORD[r['status']]}"
+        lines.append(f"  {r['slot']:>2} {r['type']:<8} {r['colour']} {r['name'][:22]:<22} needs {need_text(r):>9}   {tray_text(r):<10} has {has_text(r):<22} {STATUS_WORD[r['status']]}"
                      + (f"  ({r['note']})" if r['note'] else ''))
     return '\n'.join(lines)
 
@@ -891,15 +1277,15 @@ def printer_for(plate):
     except (OSError, ValueError, KeyError): return None
 
 def checking_text(printer):
-    return f"Checking the spools on the {printer['model']}…" if printer else 'Checking the spools…'
+    return f"Checking the spools on the {printer['name']}…" if printer else 'Checking the spools…'
 
 def studio_version():
     try: return str(bs_conf().get('app', {}).get('version', ''))
     except (OSError, ValueError): return ''
 
 def profile_name(title, plate_no, plate):
-    """The file that holds a slice's per-layer profile, named from the slice: its title, plate and grams."""
-    key = json.dumps([title, plate_no, [[f['slot'], round(f['grams'], 2)] for f in plate['filaments']]])
+    """The file that holds a slice's per-layer profile, named from the slice: its title, plate, layers and grams."""
+    key = json.dumps([title, plate_no, plate.get('layers'), [[f['slot'], round(f['grams'], 2)] for f in plate['filaments']]])
     return hashlib.sha1(key.encode('utf-8')).hexdigest()[:16] + '.json'
 
 def load_profile(entry, part='layers'):
@@ -911,10 +1297,16 @@ def load_profile(entry, part='layers'):
 
 def remember_slice(title, plate_no, plate, profile=None):
     """Notes a slice that was read: which Bambu Studio version wrote it (the self-test reports that), what it needs
-    (guard_ledger counts a print down from it when the printer starts a job of that name) and, when given, its per-layer
+    of which filament (guard_ledger counts a print down from it when the printer starts a job of that name, and tells
+    by the filament which spools a print has gone on from when its own tray is empty) and, when given, its per-layer
     profile (what a print of it still needs while it runs). A profile is a file of its own in profiles/, because the
     state file is read and written whole at every change: its parts as layer_profile gives them, by slot and layer.
-    It goes with its slice, when a re-slice of the same plate replaces it or it drops out of the 30 kept."""
+    Kept are the 30 newest slices, each with its profile. A plate sliced again keeps its 3 newest slices that differ
+    (an unchanged re-slice takes the place of its like): the job on the printer may be printed from an earlier one, and
+    guard_ledger counts it by the one that needs most (versions). And no slice is let go, for either limit, that a job
+    a printer was last seen with may be printed from (the state's 'on', guard_ledger.note_job): the nine-up that
+    prints for a day is still there after thirty other plates."""
+    import guard_ledger
     version, folder = studio_version(), os.path.join(STATE_DIR, 'profiles')
     name = profile_name(title, plate_no, plate) if profile else None
     with state_lock():
@@ -927,9 +1319,14 @@ def remember_slice(title, plate_no, plate, profile=None):
         def change(st):
             st['verified'] = {'version': version, 'at': time.time()}
             mine = {'title': title, 'plate': plate_no, 'layers': plate.get('layers'), 'at': time.time(),
-                    'filaments': [{'slot': f['slot'], 'grams': f['grams']} for f in plate['filaments']]}
+                    'filaments': [{k: f[k] for k in ('slot', 'grams', 'type', 'colour', 'fid', 'nozzle') if k in f} for f in plate['filaments']]}
             if name: mine['profile'] = name
-            st['slices'] = ([mine] + [s for s in st.get('slices', []) if (s['title'], s.get('plate')) != (title, plate_no)])[:30]
+            same = lambda s: (s['title'], s.get('plate')) == (title, plate_no)
+            held = lambda s: any(guard_ledger.fits(s, job.get('name') or '', job.get('layers'), job.get('plate')) for job in st.get('on', {}).values())
+            rest = [s for s in st.get('slices', []) if not (same(s) and (s.get('layers'), s['filaments']) == (mine['layers'], mine['filaments']))]
+            older = [s for s in rest if same(s)]
+            gone = [id(s) for s in older[2:] if not held(s)]
+            st['slices'] = [s for n, s in enumerate([mine] + [s for s in rest if id(s) not in gone]) if n < 30 or held(s)]
             return {s.get('profile') for s in st['slices']}
         kept = update_state(change)
         for old in (os.listdir(folder) if os.path.isdir(folder) else []):
@@ -968,6 +1365,46 @@ class Watcher:
         return out
 
 
+SEND_MOST = 30                                            # the plates of a project checked again when "Send print job" opens: the ones sliced last
+WEIGH_MOVED = 2.0                                         # grams a tray's reading may have moved since its card for a weigh-in to be kept against it
+IGNORE_DAYS, IGNORE_GROWTH = 7, 5.0                       # "Ignore for this project" ends after as many days, or with a filament as many grams further short
+UNSAVED = 'Unsaved project'                               # what project_title calls every project that was never saved
+
+def plate_key(res):
+    """The plate an answer is for: Bambu Studio's process, the project's title, the plate's number."""
+    return (res.get('pid'), res['title'], res.get('plate_no'))
+
+def written(path):
+    """When a file was last written; 0 for one that has gone meanwhile."""
+    try: return os.path.getmtime(path)
+    except OSError: return 0.0
+
+def ignore_key(res):
+    """(project, plate) under which "Ignore for this project" is kept for an answer, both as the state file names them;
+    None when there is nothing to tell the project by. A project that was never saved shares its title with every other
+    such project (one ignored at 5 g short muted them all): it is told by the session folder of its G-code, and not at
+    all when the answer comes from no temporary G-code (`check --popup`)."""
+    project = res['title'] if res['title'] != UNSAVED else os.path.dirname(os.path.dirname(res['gcode'])) if res.get('gcode') else None
+    return (project, str(res.get('plate_no'))) if project else None
+
+def shortfalls(res):
+    """What an ignore accepts of an answer: per row its slot, its result and the grams it falls short by (the need less
+    what its spools hold; 0 when they hold it)."""
+    return [[r['slot'], r['status'], round(max(0.0, (r['need'] or 0.0) - (r['total'] or 0.0)), 1)] for r in res['rows']]   # no need: a filament without a weight (parse_plate)
+
+def ignore_lasts(entry):
+    """Whether an ignore kept in the state file ({'at', 'rows': shortfalls}) is still in its IGNORE_DAYS. 1.4 kept a bare
+    string, undated: that has lapsed."""
+    return isinstance(entry, dict) and isinstance(entry.get('at'), (int, float)) and 0 <= time.time() - entry['at'] <= IGNORE_DAYS * 86400
+
+def ignore_covers(entry, res):
+    """Whether a kept ignore covers an answer: it lasts, the rows and their results are the ones accepted, and no row is
+    more than IGNORE_GROWTH further short than it was then."""
+    if not ignore_lasts(entry): return False
+    was, now = entry['rows'], shortfalls(res)
+    return [r[:2] for r in was] == [r[:2] for r in now] and all(new[2] - old[2] <= IGNORE_GROWTH for old, new in zip(was, now))
+
+
 class Guard:
     """The running guard: it shows every answer, and does what the card and the icon ask for. Everything that
     touches the card runs on the Tk thread, through `todo`; asking the printer takes seconds and runs on threads of
@@ -977,44 +1414,141 @@ class Guard:
         self.cfg, self.root, self.standing = cfg, root, standing
         self.todo, self.stopping = queue.Queue(), threading.Event()
         self.last, self.paused, self.ticks, self.sending, self.jobs = None, False, 0, set(), {}
-        self.warning = None                                   # the warning on the full card: (title, plate, severity, when, the card's window)
+        self.warning = None                                   # the warning on the full card, while it stands: see standing_warning
+        self.held, self.icon_shows = {}, None                 # the warnings that wait for that card to go, by plate (hold); what the icon was last given
+        self.blind = None                                     # what the icon says while slices cannot be read (not_checking)
         self.busy, self.greeted = {}, False                   # the checks someone waits for, by what started them: (their line, its text)
+        self.told = set()                                     # what was said in the log once, and is not said again in this run
+        self.watcher = None                                   # the thread that watches for slices, once it runs (watch_slices)
         self.card = guard_ui.Card(root, act=self.act, on_close=None if standing else root.quit)
         self.card.empty_spool = cfg['empty_spool_g']
+        self.card.alone = not standing                        # no watcher behind this card: its amount window looks whether one runs
         self.tray = guard_ui.Tray(self) if standing else None
 
     # -- showing an answer
-    @staticmethod
-    def signature(res):
-        return json.dumps([[r['slot'], r['status']] for r in res['rows']])
-
     def ignored(self, res):
-        return load_state().get('ignored', {}).get(res['title']) == self.signature(res)
+        """Whether the answer's finding is ignored for its plate. What cannot be looked up is not: a state file held
+        elsewhere at that moment once left a warning as a line in the log, with no card."""
+        key = ignore_key(res)
+        if not key: return False
+        try:
+            plates = load_state().get('ignored', {}).get(key[0])
+            return isinstance(plates, dict) and ignore_covers(plates.get(key[1]), res)
+        except OSError as e: log(f"{res['title']}: what is ignored could not be looked up ({e.__class__.__name__}: {e}): shown as not ignored"); return False
+        except (TypeError, LookupError, AttributeError): return False   # a state, or an entry, no version of the guard wrote ignores nothing
+
+    def popup_on(self):
+        """The results popup_on names, in capitals: as the guard reads the list, and as the menu ticks it. A name that is
+        no result to warn of is said in the log, once in a run; so is a value that is no list, read as the default."""
+        on, known = self.cfg.get('popup_on'), [s for s in SEVERITY if s != 'OK']
+        names = [str(s).upper() for s in on] if isinstance(on, list) else list(DEFAULTS['popup_on'])
+        odd = ([f'names "{s}", which is no result to warn of ({", ".join(known)})' for s in names if s not in known] if isinstance(on, list)
+               else ['is not a list of results: the default is used'])
+        for what in odd:
+            if what not in self.told: self.told.add(what); log(f'popup_on in config.json {what}')
+        return names
+
+    def opening(self, res):
+        """The results among an answer's rows that open the full card. SHORT and MISSING do whatever popup_on holds: a list
+        written by hand to add UNKNOWN replaced the whole default, and turned the "not enough" card off. The others do
+        when popup_on names them; OK never does (its card would stand like a warning's, in every other answer's way).
+        Any such row opens the card, not the worst row alone: COLOUR ranks with SHORT, and a COLOUR row that was not to
+        be warned of hid the SHORT row after it."""
+        on = (set(self.popup_on()) | {'SHORT', 'MISSING'}) - {'OK'}
+        return [r['status'] for r in res['rows'] if r['status'] in on]
+
+    def rank(self, res):
+        """How much an answer asks to be seen, for choosing among a project's plates: (2, the severity of its worst row
+        that opens the card) when it opens the card by itself, which an ignored one ('ignored', as set on it) does not;
+        (1, 0) for a plate that could not be checked, which is not a fine one; (0, its severity) for the rest, a line at
+        most, and (0, -1) for a plate sliced for a printer the guard has none to ask about."""
+        if res['error']: return (0, -1) if res.get('quiet') else (1, 0)
+        opening = [] if res.get('ignored') else self.opening(res)
+        return (2, max(SEVERITY[s] for s in opening)) if opening else (0, SEVERITY[res['worst']])
+
+    def on_icon(self):
+        """The answer the icon stands for: the last one shown, or a warning that still waits to be shown (held) when that
+        is the worse. So the icon is green only when no plate that was checked has a warning that was neither shown nor
+        ignored."""
+        waits = max(list(self.held.values()), key=self.rank, default=None)   # a list: the icon's menu asks from a thread of its own
+        return waits if waits and (not self.last or self.rank(waits) > self.rank(self.last)) else self.last
 
     def last_text(self):
-        if self.paused: return 'Checks are paused'
-        return f"{headline(self.last)} · {self.last['title']}" if self.last else 'No slice checked yet'
+        res = self.on_icon()
+        if self.paused or self.blind: return 'Checks are paused' if self.paused else self.blind
+        if not res: return 'No slice checked yet'
+        return f"{headline(res)} · {res['title']}" + (f", plate {res['plate_no']}" if res.get('plate_no') else '')
+
+    def show_icon(self):
+        """The icon's colour and tooltip: those of the answer it stands for (on_icon); grey, and saying so, while checks
+        are paused (an answer asked for from the icon then turned it green, as if slices were being checked) and while
+        slices cannot be read (not_checking)."""
+        import guard_ui
+        res = self.on_icon(); now = ('muted' if self.paused or self.blind or not res else guard_ui.tone_of(res), self.last_text())
+        if self.tray and now != self.icon_shows: self.icon_shows = now; self.tray.set(*now)
+        if self.tray: self.tray.refresh()
+
+    def not_checking(self, lines=None, pid=None):
+        """Bambu Studio wrote a slice the guard cannot read: the icon goes grey and says "Filament is not being checked",
+        until a slice reads again (take_slice). It kept the colour and tooltip of the last answer, green as may be,
+        while no slice was checked. lines: the card that says why, shown once for a Bambu Studio version."""
+        self.blind = 'Filament is not being checked'; self.show_icon()
+        if lines: self.say(self.blind, lines, 'danger', pid)
+
+    def standing_warning(self):
+        """The warning whose card still stands: (its plate: Bambu Studio's process, the project, the plate number; its
+        rank; its card's window; the answer), or None."""
+        return self.warning if self.warning and self.card.is_open() and self.card.win is self.warning[2] else None
+
+    def say(self, headline, lines, tone='muted', pid=None, beside=None, buttons=()):
+        """A card of the guard's own, which is no answer (guard_ui's note). There is one card at a time: a warning whose
+        place it takes is not ended by it, but waits (held) and shows again when this card has gone. "Filament is not
+        being checked" or "This setting was not kept" once took a "Not enough" for good."""
+        stands = self.standing_warning()
+        if stands: self.held[stands[0]] = stands[3]
+        self.card.note(headline, lines, tone, pid, beside, buttons)
+
+    def hold(self, res):
+        """An answer that may not take a standing warning's place. A warning is kept, the latest of its plate, and shows
+        when that card has gone (next_held): held back and dropped, it was never shown at all. A fine answer ends what
+        was kept of its plate."""
+        if self.rank(res)[0]: self.held[plate_key(res)] = res
+        else: self.held.pop(plate_key(res), None)
+        self.show_icon()
+
+    def next_held(self):
+        """Shows the worst of the warnings that waited, as the answer it is; its card says how old it is."""
+        return self.deliver(self.held.pop(max(self.held, key=lambda plate: self.rank(self.held[plate]))))
+
+    def show_held(self):
+        """Every 0.4 s on the Tk thread: with no card in the way (the standing one closed by the user) and no check under
+        way, the next warning that waited shows."""
+        if self.held and not self.card.is_open() and not self.busy: self.next_held()
 
     def deliver(self, res, full=False, beside=None):
         """One answer: the full card for a warning (and whenever it is asked for), one line that goes away otherwise.
-        beside: the "Send print job" dialog, next to which only a warning is worth a card."""
-        import guard_ui
-        severity = -1 if res['error'] else SEVERITY[res['worst']]
-        if not full and not beside and self.warning and self.card.is_open() and self.card.win is self.warning[4]:   # the warning's own card, still open
-            title, plate_no, was, when, _ = self.warning    # "slice all" brings the plates' answers seconds apart: a plate that is
-            if title == res['title'] and plate_no != res.get('plate_no') and severity < was and time.time() - when < 120: return   # fine does not wipe another plate's warning
-        self.last = res
-        if self.tray: self.tray.set(guard_ui.tone_of(res), self.last_text()); self.tray.refresh()
-        if res['error']:
-            if full or not res.get('quiet'): self.card.show(res, beside=beside, hold=not full)
-            self.warning = None
-            return
-        res['ignored'] = self.ignored(res)
-        if full or (res['worst'] in self.cfg['popup_on'] and not res['ignored']):
+        beside: the "Send print job" dialog, next to which only a warning is worth a card. True when the full card shows.
+        A warning's card that stands (a plate that could not be checked counts as one) gives way to a new answer for its
+        own plate of its own Bambu Studio, to a worse answer, to a warning beside "Send print job" (every plate was
+        checked again for it) and to what the user asks for; to nothing else. Another plate's fine answer, or another
+        Bambu Studio's, once put a line that went after 8 seconds in its place and turned the icon green: now it does
+        not show, and the icon keeps the warning's colour. Another plate's warning that may not take its place waits
+        (hold), and shows when the standing card has gone."""
+        res.setdefault('at', time.time())                     # when it was checked, where the check did not say (`check --popup`): a card that shows it later says so
+        if not res['error']: res['ignored'] = self.ignored(res)
+        rank, plate, stands = self.rank(res), plate_key(res), self.standing_warning()
+        own = bool(stands) and stands[0] == plate
+        if stands and not full and not own and (not rank[0] if beside else rank <= stands[1]): return self.hold(res)
+        self.held.pop(plate, None); self.last = res; self.show_icon()
+        if full or rank[0]:
             self.card.show(res, beside=beside, hold=not full)
-            self.warning = (res['title'], res.get('plate_no'), severity, time.time(), self.card.win) if severity >= 2 else None
-        elif not beside and self.cfg['ok_seconds']:
-            self.card.show(res, brief=self.cfg['ok_seconds'], hold=True); self.warning = None
+            self.warning = (plate, rank, self.card.win, res) if rank[0] else None
+            return True
+        if own and self.held: self.card.close(); return self.next_held()   # its plate is fine now: the worst that waited behind it shows, not this plate's line
+        if not beside and self.cfg['ok_seconds'] and not res['error']: self.card.show(res, brief=self.cfg['ok_seconds'], hold=True)
+        elif res.get('line') and not beside and self.cfg['ok_seconds']: self.card.line(res['line'], 'muted', self.cfg['ok_seconds'], res.get('pid'), hold=True)   # a plate that is not checked, and why (evaluate)
+        elif own: self.card.close()                           # its plate is fine now and no line takes the card's place: it must not go on saying otherwise
+        if own or not beside: self.warning = None
 
     # -- what the card and the icon ask for
     def later(self, work, then, otherwise=None):
@@ -1022,8 +1556,8 @@ class Guard:
         def run():
             try: out = work()
             except Exception as e:
-                log(f'error: {e.__class__.__name__}: {e}')
                 if otherwise: self.todo.put(otherwise)
+                log(f'error: {e.__class__.__name__}: {e}')
                 return
             self.todo.put(lambda: then(out))
         threading.Thread(target=run, daemon=True).start()
@@ -1033,69 +1567,149 @@ class Guard:
         if name == 'recheck': self.recheck(res, self.card.beside)
         elif name == 'details': self.deliver(res, full=True)
         elif name == 'ignore':
-            on = not res.get('ignored')
-            def change(st):
-                if on: st.setdefault('ignored', {})[res['title']] = self.signature(res)
-                else: st.get('ignored', {}).pop(res['title'], None)
-            update_state(change); log(f"{res['title']}: this finding is " + ('ignored from now on' if on else 'no longer ignored'))
+            on, key = not res.get('ignored'), ignore_key(res)
+            if not key: return
+            def change(st):                                   # what has lapsed goes with every change: a session folder is never seen again
+                kept = {p: {n: e for n, e in plates.items() if ignore_lasts(e)} for p, plates in st.get('ignored', {}).items() if isinstance(plates, dict)}
+                if on: kept.setdefault(key[0], {})[key[1]] = {'at': time.time(), 'rows': shortfalls(res)}
+                else: kept.get(key[0], {}).pop(key[1], None)
+                st['ignored'] = {p: plates for p, plates in kept.items() if plates}
+            update_state(change)
+            log(f"{res['title']}" + (f", plate {res['plate_no']}" if res.get('plate_no') else '') + ': this finding is '
+                + (f'ignored for {IGNORE_DAYS} days, unless it changes or grows by more than {IGNORE_GROWTH:g} g' if on else 'no longer ignored'))
             if on: self.card.close()
             else: self.deliver(res, full=True, beside=self.card.beside)
         elif name == 'spool':                                 # the empty spool's weight typed in the amount window: the next one starts with it
+            if not arg or arg <= 0: return                    # 0 is the filament weighed alone, not a spool: as the next window's start it put 250 g too much on the next spool
             self.card.empty_spool = arg
-            if arg != self.cfg['empty_spool_g']: self.set_option('empty_spool_g', arg)
+            if arg != self.cfg.get('empty_spool_g'):
+                try: self.keep('empty_spool_g', arg)          # the amount is stored by now, and a folder that cannot be written must not cost it
+                except OSError as e: log(f"the empty spool's weight, {arg:g} g, could not be kept in config.json ({e.__class__.__name__}): it is used until the guard stops")
         elif name == 'amount':
             tray, grams = arg
             guard_ledger.enter(res['printer']['serial'], tray, grams); self.recheck(res, self.card.beside)
-        elif name in ('weigh', 'asked'):
-            import guard_learn
-            tray, grams = arg if name == 'weigh' else (arg, None)
-            if name == 'asked': guard_learn.asked(res['printer']['serial'], tray['label']); return
-            guard_learn.weigh(res['printer']['serial'], tray['label'], tray['reading'], grams,
-                              {'id': tray.get('spool'), 'type': tray['type'], 'colour': tray['colour'], 'fid': tray.get('fid'), 'weight': tray.get('weight')})
-            self.recheck(res, self.card.beside)
+        elif name == 'asked':                                 # asked from within the card as it shows: a state file that cannot be written now must not
+            import guard_learn                                # cost the card. The offer then may come again.
+            try: guard_learn.asked(res['printer']['serial'], arg['label'])
+            except OSError as e: log(f"{arg['label']}: that a weigh-in was offered could not be noted ({e.__class__.__name__}: {e}): it may be offered again")
+        elif name == 'weigh': self.weigh_in(res, *arg)
+
+    def weigh_in(self, res, tray, grams):
+        """A weigh-in saved in its window: kept only against a reading the printer gives now. It was set against the reading
+        of the card it came from, however old: C3 at 105 g on the card, a print, the spool weighed at 20 g, and the tray
+        was kept as one that reads 105 g with 20 g on it, which counted every tray of the printer 85 g lower. The printer
+        is asked again; the weigh-in is kept, against the reading it gives, when no job is on the printer and the tray
+        holds the same spool (tag, material, colour) at a reading within WEIGH_MOVED of the one the window showed.
+        Otherwise nothing is kept, and a card says why and offers the new check to weigh from."""
+        import guard_ui, guard_learn
+        label, beside = tray['label'], self.card.beside
+        where = lambda: beside if guard_ui.visible(beside) else None
+        def refuse(why):
+            self.say('Weigh-in not saved', [(False, f'{why}: weigh-in not saved. Check again, then weigh from the new card.')], 'warn', res.get('pid'), where(),
+                     buttons=[('Check again', lambda: self.recheck(res, where()))])
+            log(f'{label}: weigh-in not saved: {why}')
+        def then(new):
+            now = None if new['error'] else next((t for r in new['rows'] for t in r['trays'] if t['label'] == label), None)
+            if new['error']: why = f"The printer could not be asked what {label} reads now ({new['error']})"
+            elif new['printer']['state'] in BUSY: why = f"The {new['printer']['model']} is printing, and {label}'s reading is moving"
+            elif not now or now.get('reading') is None or (now.get('spool'), now['type'].upper(), now['colour']) != (tray.get('spool'), tray['type'].upper(), tray['colour']):
+                why = f'{label} no longer holds the spool that card showed'
+            elif abs(now['reading'] - tray['reading']) > WEIGH_MOVED: why = f"{label} read {tray['reading']:.0f} g on that card and reads {now['reading']:.0f} g now"
+            else:
+                try: guard_learn.weigh(res['printer']['serial'], label, now['reading'], grams,
+                                       {'id': now.get('spool'), 'type': now['type'], 'colour': now['colour'], 'fid': now.get('fid'), 'weight': now.get('weight')})
+                except OSError as e: why = f'The weigh-in of {label} could not be written ({e.__class__.__name__})'
+                else: return self.recheck(res, where())
+            refuse(why)
+        self.later(lambda: self.again(res), then, lambda: refuse(f'The printer could not be asked what {label} reads now'))
+
+    def again(self, res):
+        """The plate of an answer, checked again now: the new answer, with what tells its plate carried over. An answer
+        for a G-code that could not be read (not_read) has no plate: the file is read again, and the answer stands
+        while it still cannot be."""
+        plate = res['plate'] or (plate_at(res['gcode']) if res.get('gcode') else None)
+        new = evaluate(plate, self.cfg, res['title'], res['times']) if plate else dict(res)
+        new.update(pid=res.get('pid'), plate_no=res.get('plate_no'), gcode=res.get('gcode'), at=time.time()); return new
+
+    @staticmethod
+    def not_read(path, why):
+        """The answer for a sliced plate whose G-code could not be read: one that could not be checked, which is not a
+        fine one (rank), with nothing of the plate in it but where it is."""
+        return {'title': project_title(path), 'model': '', 'time': '', 'times': 1, 'plate': None, 'printer': None, 'rows': [], 'worst': 'OK', 'error': why,
+                'pid': studio_pid(path), 'plate_no': plate_number(path), 'gcode': path, 'at': time.time()}
 
     def recheck(self, res, beside=None):
         import guard_ui
         where = lambda: beside if guard_ui.visible(beside) else None
-        def work():
-            new = evaluate(res['plate'], self.cfg, res['title'], res['times']); new['pid'], new['plate_no'] = res.get('pid'), res.get('plate_no')
-            log('checked again: ' + report_text(new).replace('\n', ' | ')); return new
-        self.later(work, lambda new: self.deliver(new, full=True, beside=where()), lambda: self.deliver(res, full=True, beside=where()))
+        def then(new):                                        # the card first, here as after a slice: nothing of the log may hold back an answer
+            try: self.deliver(new, full=True, beside=where())
+            finally: log('checked again: ' + report_text(new).replace('\n', ' | '))
+        self.later(lambda: self.again(res), then, lambda: self.deliver(res, full=True, beside=where()))
 
     def check_newest(self, pid=None, beside=None):
         """From the icon: the newest slice, as a full card. At "Send print job" (beside): every plate of the project the
-        sending Bambu Studio has sliced, because which of them is being sent cannot be read; the worst answer shows,
-        when it is a warning, and names its plate."""
+        sending Bambu Studio has sliced, because which of them is being sent cannot be read; the answer that most asks
+        to be seen (rank) shows, when it is a warning, and names its plate. Of more than SEND_MOST plates the ones
+        sliced last are checked, and what shows says how many were not: silence beside the dialog means every sliced
+        plate is fine."""
         import guard_ui
         key = None if beside else 'icon'                      # beside the dialog only a warning shows: no line while it is checked
         if key in self.busy: self.checking(key, self.busy[key][1]); return     # asked again while its check runs: it says so, and starts nothing
         newest = newest_gcode(pid)
         if not newest:
-            if not beside: self.card.note('No sliced plate found', [(None, 'Slice a plate in Bambu Studio first.')])
+            if not beside: self.say('No sliced plate found', [(None, 'Slice a plate in Bambu Studio first.')])
             return
         folder = os.path.dirname(newest)
-        paths = sorted((p for p in temp_gcodes() if os.path.dirname(p) == folder), key=os.path.getmtime, reverse=True)[:8] if beside else [newest]
+        plates = sorted((p for p in temp_gcodes() if os.path.dirname(p) == folder), key=written, reverse=True) if beside else [newest]
+        paths, older = plates[:SEND_MOST], len(plates[SEND_MOST:])
         if key: self.checking(key, checking_text(printer_for(plate_at(newest))), studio_pid(newest))
         def work():
-            seen, out, unread = {}, [], []
+            seen, out, unread, failed = {}, [], [], {}
             for path in paths:
                 try:
                     with open(path, 'rb') as f: plate = parse_plate(read_head(f))
                 except (OSError, ValueError) as e:                       # one plate that cannot be read does not cost the others their check
-                    log(f'cannot read the slice {path}: {e.__class__.__name__}: {e}'); unread.append(f'it cannot be read ({e})'); continue
-                if plate is None: unread.append('Bambu Studio is still writing it'); continue
+                    log(f'cannot read the slice {path}: {e.__class__.__name__}: {e}'); unread.append(f'it cannot be read ({e})')
+                    if beside: out.append(self.not_read(path, f'the G-code of plate {plate_number(path)} cannot be read ({e})'))   # at the dialog it is a plate that was not checked,
+                    continue                                                                                                      # and shows as one: silence there means every plate is fine
+                if plate is None:
+                    unread.append('Bambu Studio is still writing it')
+                    if beside: out.append(self.not_read(path, f'Bambu Studio is still writing the G-code of plate {plate_number(path)}'))
+                    continue
                 if not plate['filaments']: continue
-                res = evaluate(plate, self.cfg, project_title(path), seen=seen); res['pid'], res['plate_no'] = studio_pid(path), plate_number(path)
-                log(('at "Send print job": ' if beside else 'checked on request: ') + report_text(res).replace('\n', ' | ')); out.append(res)
-            return (max(out, key=lambda r: -1 if r['error'] else SEVERITY[r['worst']]) if out else None), unread    # the newest of the worst
+                title, model = project_title(path), plate['printer_model']
+                # A check that fails is tried once more: one reading that timed out once dropped the plate being sent. A
+                # printer that gave no reading either time is not asked again for each plate (30 plates, 10 s a try):
+                # its other plates get that answer.
+                res = dict(failed[model], plate=plate, time=plate['time']) if model in failed else evaluate(plate, self.cfg, title, seen=seen)
+                if res['error'] and not res.get('quiet') and model not in failed:
+                    res = evaluate(plate, self.cfg, title, seen=seen)
+                    if res['error'] and not seen: failed[model] = res
+                res['pid'], res['plate_no'], res['gcode'], res['at'] = studio_pid(path), plate_number(path), path, time.time()
+                if not res['error']: res['ignored'] = self.ignored(res)
+                out.append(res)
+            return (max(out, key=self.rank) if out else None), unread, out        # the newest of those that most ask to be seen
         def then(found):
-            res, unread = found
+            res, unread, out = found
             try:
-                if res is not None and (not beside or guard_ui.visible(beside)): self.deliver(res, full=not beside, beside=beside)   # not: nothing sliced, or the dialog has closed meanwhile
+                for r in out:                                                     # what waited of these plates is as old as their last slice: this is their answer now
+                    if plate_key(r) in self.held: self.hold(r)
+                if res is not None and older:
+                    res['unchecked'] = older; log(f"{res['title']}: {len(plates)} sliced plates, of which the {older} sliced first were not checked when \"Send print job\" opened")
+                if beside and not guard_ui.visible(beside):                       # the dialog has closed meanwhile, as after a quick click on Send:
+                    if res is not None and self.rank(res)[0]: self.deliver(res)   # a warning found is still one, and shows as after a slice
+                elif res is not None and self.deliver(res, full=not beside, beside=beside): pass
+                elif res is not None and older and not self.standing_warning():   # nothing to warn of among those checked, and no warning standing: the rest still has to be said
+                    self.say('Not every plate was checked', [
+                        (None, f"{res['title']} has {len(plates)} sliced plates. The {SEND_MOST} sliced last were checked now, with nothing to warn of; "
+                               f"the {older} sliced before them {'were' if older != 1 else 'was'} not checked."),
+                        (None, 'Slice a plate again to have it checked.')], 'warn', studio_pid(newest), beside)
                 elif res is None and unread and not beside:                       # asked for from the icon: an answer, not a line that goes
-                    self.card.note('Filament could not be checked', [(False, f'The newest slice ({project_title(newest)}): {unread[0]}.'),
-                                                                     (None, 'Slice it again, or check again in a moment. The log has the file.')], 'danger', studio_pid(newest))
-            finally: self.checked(key)
+                    self.say('Filament could not be checked', [(False, f'The newest slice ({project_title(newest)}): {unread[0]}.'),
+                                                               (None, 'Slice it again, or check again in a moment. The log has the file.')], 'danger', studio_pid(newest))
+            finally:
+                self.checked(key)
+                for r in out: log(('at "Send print job": ' if beside else 'checked on request: ') + report_text(r).replace('\n', ' | '))
         self.later(work, then, lambda: self.checked(key))
 
     def checking(self, key, text, pid=None, asked=True):
@@ -1123,36 +1737,80 @@ class Guard:
         if self.cfg['ok_seconds'] and not self.card.is_open():
             self.card.line(f'Bambu Filament Guard {VERSION} is watching for sliced plates', 'ok', self.cfg['ok_seconds'], pid, hold=True)
 
-    def forget_learned(self):
+    def forget_learned(self, sure=False):
+        """From the icon's menu. It asks first, on a card, and forgets when "Forget" is chosen there (sure): one slip of the
+        mouse beside Quit once emptied what a spool run dry and weeks of prints had taught. The card that confirms says
+        where guard_learn.forget has kept the history as it was."""
         import guard_learn
-        guard_learn.forget(); self.card.note('What was learned is forgotten', [(None, 'The guard learns again from the next prints it follows.')])
+        if not sure:
+            self.say('Forget what was learned?', [
+                (None, 'What the guard learned of every tray, from the prints it followed, is set aside, and it starts again from nothing.'),
+                (None, 'Until it has learned again, a tray whose reading runs high is counted as it reads.')],
+                buttons=[('Forget', lambda: self.forget_learned(True)), ('Keep', self.card.close)])
+            return
+        aside = guard_learn.path() + '.forgotten'
+        try: kept = aside in guard_learn.forget()
+        except OSError as e:
+            log(f'what was learned could not be forgotten: {e.__class__.__name__}: {e}')
+            self.say('What was learned could not be forgotten',
+                     [(False, f'Its file could not be written ({e.__class__.__name__}): nothing was changed. Try again in a moment.')], 'danger'); return
+        self.say('What was learned is forgotten', [(None, 'The guard learns again from the next prints it follows.')]
+                 + ([(None, f'What it had learned is kept as {aside}: one copy, until something is forgotten again.')] if kept else []))
 
-    def show_last(self):
-        if self.last: self.deliver(self.last, full=True)
-        else: self.check_newest()
+    def check_last(self):
+        """The icon's click: the plate the icon names (on_icon) is checked again, and the fresh answer shows. The answer
+        as it was is not shown again: hours old, after a print that had taken 120 g, its card read "Enough", "as the
+        printer reports them now". A click while the check runs says so again and starts no second one; with no answer
+        yet, the newest slice is checked."""
+        res = self.on_icon()
+        if not res or not res.get('plate'): self.check_newest(); return
+        if 'icon' in self.busy: self.checking('icon', self.busy['icon'][1]); return
+        self.checking('icon', checking_text(printer_for(res['plate'])), res.get('pid'))
+        def then(new):
+            try: self.deliver(new, full=True)
+            finally: self.checked('icon'); log('checked again: ' + report_text(new).replace('\n', ' | '))
+        self.later(lambda: self.again(res), then, lambda: self.checked('icon'))
 
     def run_selftest(self):
         def then(lines):
             bad = any(mark is False for mark, _ in lines)
-            self.card.note('Self-test found a problem' if bad else 'Self-test: the guard works', lines, 'danger' if bad else 'ok')
+            self.say('Self-test found a problem' if bad else 'Self-test: the guard works', lines, 'danger' if bad else 'ok')
         self.later(lambda: selftest(self.cfg), then)
 
+    def keep(self, key, value):
+        """Puts a setting in force and writes config.json. OSError when that cannot be written: the setting is in force all
+        the same, until the guard stops."""
+        self.cfg[key] = value; save_config(self.cfg, key); log(f'setting {key} = {value}')
+
     def set_option(self, key, value):
-        self.cfg[key] = value; save_config(self.cfg); log(f'setting {key} = {value}')
+        """A setting changed from the icon's menu. With config.json not writable (the guard's folder read-only, the file
+        held elsewhere) it raised out of the menu: a line in the log, and nothing to say that the next start forgets it.
+        Nothing is raised; the log and a card say that it was not kept."""
+        try: self.keep(key, value)
+        except OSError as e:
+            log(f'setting {key} = {value}: not kept, config.json could not be written ({e.__class__.__name__}): in force until the guard stops')
+            self.say('This setting was not kept', [(False, f'config.json could not be written ({e.__class__.__name__}): is the folder the guard runs from read-only?'),
+                                                   (None, 'The setting is in force until the guard stops; at its next start it is as config.json has it.')], 'warn')
         if self.tray: self.tray.refresh()
 
     def toggle_warning(self, status):
-        on = self.cfg['popup_on']
+        on = [s for s in self.popup_on() if s in SEVERITY and s != 'OK']     # a name that is no result is not written back: config.json would not be taken with it
         self.set_option('popup_on', [s for s in on if s != status] if status in on else on + [status])
 
     def toggle_autostart(self):
-        if os.path.exists(STARTUP_LNK): os.remove(STARTUP_LNK)
-        else: make_shortcut()
+        """The menu's "Start automatically". There is one Startup shortcut, and it may be another copy's (a newer one,
+        installed from another folder): removed from here, that copy no longer started with Windows. As for uninstall,
+        only a shortcut that points into this folder is removed; another is left alone, and a card says so."""
+        starts = autostart()
+        if starts is None: make_shortcut()
+        elif starts is True: os.remove(STARTUP_LNK)
+        else: self.card.note('The Startup shortcut was left alone', [(None, 'Where it points could not be read, so it was not removed.')] if not starts else [
+            (None, f"It starts another copy of the guard, in {starts}: that copy's own menu, or its Uninstall.cmd, removes it."),
+            (None, 'To have this copy start with Windows in its place, install it: Install.cmd in its folder, or "install".')])
         if self.tray: self.tray.refresh()
 
     def toggle_pause(self):
-        self.paused = not self.paused; log('checks paused' if self.paused else 'checks resumed')
-        if self.tray: self.tray.set('muted', self.last_text()); self.tray.refresh()
+        self.paused = not self.paused; log('checks paused' if self.paused else 'checks resumed'); self.show_icon()
 
     def open_log(self):
         os.startfile(os.path.join(STATE_DIR, 'guard.log'))
@@ -1166,14 +1824,15 @@ class Guard:
         from the same file. The check comes first: the card does not wait for the profile, and a re-slice of the plate
         that is printing would otherwise replace the slice, and the profile, that the running print is counted from."""
         title, plate_no, profile, waiting = project_title(path), plate_number(path), None, False
+        if self.blind: self.blind = None; self.todo.put(self.show_icon)          # a slice that reads: slices are being checked again
         try:
             if not self.paused and plate['filaments']:
                 printer = printer_for(plate)
                 if printer and self.cfg['ok_seconds']:                          # no line for a check that ends in silence (a printer not on this LAN), nor for a quiet guard
                     waiting = True; self.todo.put(lambda: self.checking('slice', checking_text(printer), studio_pid(path), asked=False))
-                res = evaluate(plate, self.cfg, title); res['pid'], res['plate_no'] = studio_pid(path), plate_no
-                log(report_text(res).replace('\n', ' | '))
+                res = evaluate(plate, self.cfg, title); res['pid'], res['plate_no'], res['gcode'], res['at'] = studio_pid(path), plate_no, path, time.time()
                 self.todo.put(lambda: self.deliver(res))
+                log(report_text(res).replace('\n', ' | '))
         finally:                                                                 # the slice is remembered whatever became of the check: guard_ledger counts from it
             if waiting: self.todo.put(lambda: self.checked('slice'))
             if plate['filaments']:
@@ -1185,26 +1844,37 @@ class Guard:
                     log(f'{title}, plate {plate_no}: no per-layer profile ({e.__class__.__name__}: {e}): a print of it is not counted while it runs')
             remember_slice(title, plate_no, plate, profile)
 
+    def poll_seconds(self):
+        """The watcher's pause between two looks: poll_seconds, or the default when that is no positive number ("2" ended
+        the watcher after its first round, null made it wait for ever)."""
+        s = self.cfg.get('poll_seconds')
+        return min(s, threading.TIMEOUT_MAX) if isinstance(s, (int, float)) and not isinstance(s, bool) and s > 0 else DEFAULTS['poll_seconds']
+
     def watch_slices(self):
-        """The watcher's own thread: every newly sliced plate is read, checked and handed to the Tk thread."""
-        watcher, stop_flag, told = Watcher(), os.path.join(STATE_DIR, 'stop'), set()
+        """The watcher's own thread: every newly sliced plate is read, checked and handed to the Tk thread. Nothing that
+        happens in a round ends it, its pause included: without this thread no slice is checked and the stop flag is
+        never seen, while the icon stays. It notes itself as `watcher`, and pump starts another should it end all the same."""
+        self.watcher = threading.current_thread()
+        watcher, stop_flag, told = None, os.path.join(STATE_DIR, 'stop'), set()
         while not self.stopping.is_set():
-            if os.path.exists(stop_flag): self.stopping.set(); break
             try:
-                for path, plate in watcher.new_plates():
-                    try: self.take_slice(path, plate)
-                    except Exception as e: log(f'error: {e.__class__.__name__}: {e}')   # one plate that fails does not cost the others of this round their check
-                for path, why in watcher.problems:
-                    version = studio_version(); log(f'cannot read the slice {path} of Bambu Studio {version}: {why}')
-                    if version not in told:                                      # said once for each Bambu Studio version, logged every time
-                        told.add(version)
-                        lines = [(False, f'Bambu Studio {version} wrote a slice the guard cannot read: {why}.'),
-                                 (None, 'Its prints are not checked until the guard is updated. The log has the file.')]
-                        self.todo.put(lambda lines=lines, pid=studio_pid(path): self.card.note('Filament is not being checked', lines, 'danger', pid))
-                watcher.problems.clear()
+                try:
+                    if os.path.exists(stop_flag): self.stopping.set(); break
+                    watcher = watcher or Watcher()
+                    for path, plate in watcher.new_plates():
+                        if os.path.exists(stop_flag): self.stopping.set(); break  # between plates too: "slice all" is a check of seconds for each, and a stop waits 10 s
+                        try: self.take_slice(path, plate)
+                        except Exception as e: log(f'error: {e.__class__.__name__}: {e}')   # one plate that fails does not cost the others of this round their check
+                    for path, why in watcher.problems:
+                        version = studio_version(); log(f'cannot read the slice {path} of Bambu Studio {version}: {why}')
+                        lines = None if version in told else [(False, f'Bambu Studio {version} wrote a slice the guard cannot read: {why}.'),
+                                                              (None, 'Its prints are not checked until the guard is updated. The log has the file.')]
+                        told.add(version)                                        # the card once for each Bambu Studio version; the log and the icon every time
+                        self.todo.put(lambda lines=lines, pid=studio_pid(path): self.not_checking(lines, pid))
+                    watcher.problems.clear()
+                finally: self.stopping.wait(self.poll_seconds())                 # after a round that failed too (no loop without a pause); at once when stopping
             except Exception as e:                                               # the watcher outlives any one bad file or network hiccup
                 log(f'error: {e.__class__.__name__}: {e}')
-            self.stopping.wait(self.cfg['poll_seconds'])
 
     def look_around(self):
         """Every 0.4 s on the Tk thread: has "Send print job" opened? Is Bambu Studio running (then the icon shows)?
@@ -1223,39 +1893,81 @@ class Guard:
 
     def pump(self):
         if self.stopping.is_set(): self.root.quit(); return
-        self.ticks += 1
-        while True:
-            try: job = self.todo.get_nowait()
-            except queue.Empty: break
-            try: job()
-            except Exception as e: log(f'error: {e.__class__.__name__}: {e}')    # one failing request does not end the guard
-        for step in (self.card.follow, self.look_around if self.standing else None):
-            try: step and step()
-            except Exception as e:                                               # nor does one failing step stop the other; said once a minute at most
-                if self.ticks % 150 == 1: log(f'error: {e.__class__.__name__}: {e}')
-        self.root.after(400, self.pump)
+        try:
+            self.ticks += 1
+            while True:
+                try: job = self.todo.get_nowait()
+                except queue.Empty: break
+                try: job()
+                except Exception as e: log(f'error: {e.__class__.__name__}: {e}')    # one failing request does not end the guard
+            for step in (self.card.follow, self.show_held, self.look_around if self.standing else None):
+                try: step and step()
+                except Exception as e:                                           # nor does one failing step stop the other; said once a minute at most
+                    if self.ticks % 150 == 1: log(f'error: {e.__class__.__name__}: {e}')
+            if self.watcher and not self.watcher.is_alive() and self.ticks % 25 == 0:   # looked at every 10 s: a watcher that ended is one that is started again
+                log('the watcher had ended: started again'); self.watcher = threading.Thread(target=self.watch_slices, daemon=True); self.watcher.start()
+        finally: self.root.after(400, self.pump)                                 # whatever happened above: without the next round there is no card, no menu and no Quit
 
     def loop(self):
-        self.root.after(400, self.pump); self.root.mainloop()
-        if self.tray: self.tray.stop()
-        for job in self.jobs.values(): job.stopped.set()
+        try: self.root.after(400, self.pump); self.root.mainloop()
+        finally:                                              # whatever ended the loop: the icon's thread is no daemon, and left running it kept a dead guard looking alive
+            if self.tray: self.tray.stop()
+            for job in self.jobs.values(): job.stopped.set()
 
+
+def sole_guard(name=MUTEX):
+    """The named mutex that makes this process the one running guard (or, by another name, the one setup at work): its
+    handle, or None when another process holds it (0 when Windows made none: the guard runs all the same)."""
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True); k32.CreateMutexW.restype = ctypes.c_void_p
+    handle = k32.CreateMutexW(None, False, name)
+    return None if ctypes.get_last_error() == 183 else handle or 0               # ERROR_ALREADY_EXISTS: one guard is enough
+
+def let_go(handle):
+    """Gives back a mutex sole_guard made: the name is free for the next process as soon as no handle to it is open."""
+    if handle: ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
 
 def watch(start_line=True):
-    import ctypes, guard_ui
-    k32 = ctypes.WinDLL('kernel32', use_last_error=True); k32.CreateMutexW.restype = ctypes.c_void_p
-    handle = k32.CreateMutexW(None, False, MUTEX)
-    if ctypes.get_last_error() == 183: return 0                                   # ERROR_ALREADY_EXISTS: one guard is enough
-    os.makedirs(STATE_DIR, exist_ok=True)
-    stop_flag = os.path.join(STATE_DIR, 'stop')
-    if os.path.exists(stop_flag): os.remove(stop_flag)
-    with open(os.path.join(STATE_DIR, 'guard.pid'), 'w') as f: f.write(str(os.getpid()))
-    guard = Guard(load_config(), guard_ui.make_root()); guard.greeted = not start_line
-    log(f'watching for sliced plates (pid {os.getpid()}, guard {VERSION}, Bambu Studio {studio_version() or "not found"})')
-    threading.Thread(target=guard.watch_slices, daemon=True).start()
-    guard.loop()
-    log('stopped'); k32.CloseHandle(ctypes.c_void_p(handle))
-    return 0
+    handle = None
+    try:
+        handle = sole_guard()
+        if handle is None: return 0
+        import guard_ui
+        os.makedirs(STATE_DIR, exist_ok=True)
+        stop_flag = os.path.join(STATE_DIR, 'stop')
+        if os.path.exists(stop_flag): os.remove(stop_flag)
+        with open(os.path.join(STATE_DIR, 'guard.pid'), 'w', encoding='utf-8') as f: f.write(f'{os.getpid()}\n{HERE}\n')   # the folder: for uninstall (guard_folder)
+        guard = Guard(load_config(), guard_ui.make_root()); guard.greeted = not start_line
+        note = settings_note(guard.cfg)
+        if note: guard.todo.put(lambda: guard.card.note(*note))                  # the guard runs on defaults the user did not choose: said at once, not only in the log
+        log(f'watching for sliced plates (pid {os.getpid()}, guard {VERSION}, Bambu Studio {studio_version() or "not found"})')
+        threading.Thread(target=guard.watch_slices, daemon=True).start()
+        guard.loop()
+        log('stopped')
+        return 0
+    except Exception as e:                   # pythonw has no console: without this line, a guard that Tk, the icon or a file ended at its start left no trace
+        at = traceback.extract_tb(e.__traceback__)[-1]
+        log(f'the guard has stopped on an error: {e.__class__.__name__}: {e} ({os.path.basename(at.filename)}, line {at.lineno})')
+        return 1
+    finally: let_go(handle)
+
+def guard_folder():
+    """The folder the running guard was started from, which watch() notes under its process id in guard.pid; '' when
+    that is not known (no such file, or one of a guard up to 1.4.0, which noted its process id alone)."""
+    try:
+        with open(os.path.join(STATE_DIR, 'guard.pid'), encoding='utf-8') as f: return (f.read().splitlines() + ['', ''])[1].strip()
+    except (OSError, ValueError): return ''
+
+def here(folder):
+    """Is `folder` the one this guard's script is in, as Windows tells folders apart?"""
+    return bool(folder) and os.path.normcase(os.path.abspath(folder)) == os.path.normcase(HERE)
+
+def autostart():
+    """Which copy of the guard the Startup shortcut starts: None when there is no shortcut, True when this one, else the
+    folder of the other (an update unzipped beside this one and installed, or this one never installed), '' when
+    where it points cannot be read. That a shortcut exists says nothing of this copy."""
+    if not os.path.exists(STARTUP_LNK): return None
+    points = shortcut_folder()
+    return True if here(points) else points
 
 def is_running():
     import ctypes
@@ -1263,46 +1975,65 @@ def is_running():
     if h: ctypes.windll.kernel32.CloseHandle(h)
     return bool(h)
 
-def stop():
-    if not is_running(): return False
+def stop(wait=10.0):
+    """Asks the running guard to stop and waits for it to go: 'not running', 'stopped', or 'still running' after `wait`
+    seconds. It is asked by the stop flag, which its watcher looks for between plates: a guard in the middle of a check
+    (some 13 s for a printer that is off, and "slice all" brings several) goes when that ends, and the flag stands."""
+    if not is_running(): return 'not running'
     open(os.path.join(STATE_DIR, 'stop'), 'w').close()
-    for _ in range(40):
-        if not is_running(): return True
+    for _ in range(int(wait * 4)):
+        if not is_running(): return 'stopped'
         time.sleep(0.25)
-    return not is_running()
+    return 'still running' if is_running() else 'stopped'
+
+STOP_WORDS = {'not running': 'was not running', 'stopped': 'stopped', 'still running': 'still running: it stops when its current check ends'}
 
 
 # ---------------------------------------------------------------- self-test
 
 def selftest(cfg):
     """[(True = works, False = does not, None = cannot be told now, text)]: can the guard read this Bambu Studio and
-    reach its printers? Run it after a Bambu Studio update."""
+    reach its printers? Run it after a Bambu Studio update. It fails when no known printer answered. Whatever it meets,
+    it ends in lines: from the icon it runs without a console, and an error it let through showed nothing at all."""
+    out = [(False, line) for line in cfg.get('_wrong') or []]
+    try: selftest_lines(cfg, out)
+    except Exception as e:
+        log(f'self-test: {e.__class__.__name__}: {e}'); out.append((False, f'The self-test could not finish ({e.__class__.__name__}: {e})'))
+    return out
+
+def selftest_lines(cfg, out):
     import guard_ui, guard_ledger
     try: conf = bs_conf()
     except (OSError, ValueError) as e:
-        return [(False, f"Bambu Studio's configuration cannot be read ({e.__class__.__name__}): is Bambu Studio installed for this Windows user?")]
+        out.append((False, f"Bambu Studio's configuration cannot be read ({e.__class__.__name__}): is Bambu Studio installed for this Windows user?")); return
     version = str(conf.get('app', {}).get('version', '?'))
-    out = [(True, f'Bambu Studio {version}: its configuration is readable')]
+    out.append((True, f'Bambu Studio {version}: its configuration is readable'))
     verified, newest = load_state().get('verified') or {}, newest_gcode()
     if newest:
         try:
             with open(newest, 'rb') as f: plate = parse_plate(read_head(f))
-            if plate: out.append((True, f"Newest slice ({project_title(newest)}): {len(plate['filaments'])} filament(s), {sum(f['grams'] for f in plate['filaments']):.0f} g"))
+            if plate: out.append((True, f"Newest slice ({project_title(newest)}): {len(plate['filaments'])} filament(s), {sum(f['grams'] or 0 for f in plate['filaments']):.0f} g"))
             else: out.append((None, 'Newest slice: Bambu Studio is still writing it'))
         except (OSError, ValueError) as e: out.append((False, f'Newest slice cannot be read: {e}'))
     elif verified.get('version') == version:
         out.append((True, f"Slices of this version have been read, last on {time.strftime('%d %b %Y', time.localtime(verified['at']))}"))
     else: out.append((None, 'No slice of this Bambu Studio version has been read yet: slice any plate to test it'))
-    printers = known_printers(conf)
+    printers, answered = known_printers(conf), 0
     if not printers: out.append((False, 'Bambu Studio holds no LAN access code for a printer: open the printer once on its Device tab'))
     for p in printers:
+        if p['model'] == UNKNOWN_MODEL:
+            out.append((False, f"The printer …{p['serial'][-4:]}: the guard cannot tell which model it is (Bambu Studio's list of printers does not name its serial number): "
+                               'plates sliced for it are not checked')); continue
         try:
             ip = printer_ip(p['serial'], cfg)
-            if not ip: raise PrinterError('it is not announcing itself on this network (is it on?)')
+            if not ip: raise PrinterError(f'it is {NOT_ANNOUNCED}')
             status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
-            trays, _ = trays_of(status); guard_ledger.apply(trays, p['serial'], 'ams' in status)
-            out.append((True, f"{p['model']}: {len(trays)} spool(s), {sum(t['grams'] is not None for t in trays)} with a known amount"))
-        except PrinterError as e: out.append((False if 'refused' in str(e) else None, f"{p['model']}: {e}"))
+            if not can_judge(status): raise PrinterError('it did not report its spools')
+            trays, _ = trays_of(status); guard_ledger.apply(trays, p['serial'], has_spools(status))
+            out.append((True, f"{p['name']}: {len(trays)} spool(s), {sum(t['grams'] is not None for t in trays)} with a known amount")); answered += 1
+        except PrinterError as e: out.append((False if 'refused the access code' in str(e) else None, f"{p['name']}: {e}"))
+        except Exception as e: out.append((False, f"{p['name']}: {e.__class__.__name__}: {e}"))     # one printer's error does not cost the others their line
+    if printers and not answered: out.append((False, 'No known printer answered: a plate cannot be checked until one does'))
     import guard_learn
     history = guard_learn.load()
     jobs = [j for trays in history.values() for h in trays.values() for j in h.get('jobs', [])]
@@ -1310,8 +2041,9 @@ def selftest(cfg):
                 f"{sum(1 for j in jobs if j.get('sound'))} sound (\"learned\" says more)"))
     out.append((True, 'Bambu Studio is running: the card shows in its window') if guard_ui.studio_windows() else (None, 'Bambu Studio is not running: the card shows when it is'))
     out.append((True, 'The guard is running') if is_running() else (False, 'The guard is not running: "install" starts it'))
-    out.append((True, 'It starts automatically') if os.path.exists(STARTUP_LNK) else (None, 'It does not start automatically'))
-    return out
+    starts = autostart()
+    out.append((None, 'It does not start automatically') if starts is None else (True, 'It starts automatically') if starts is True
+               else (None, f'It starts another copy, in {starts}' if starts else 'A Startup shortcut is there, but where it points cannot be read'))
 
 
 # ---------------------------------------------------------------- installing
@@ -1328,68 +2060,197 @@ def start(start_line=True):
     if is_running(): return
     subprocess.Popen(own_command('watch', *([] if start_line else ['--no-start-line'])), cwd=HERE, close_fds=True, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
+def powershell():
+    """Windows' own PowerShell, by its full path under %SystemRoot%. Started by its bare name, the one that ran was the
+    first Windows found, and it looks in the folder of the running Python and in the current folder before System32:
+    a powershell.exe lying where `install` is run from. The bare name only where that file is not."""
+    own = os.path.join(os.environ.get('SystemRoot') or r'C:\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    return own if os.path.isfile(own) else 'powershell'
+
+def shortcut_folder():
+    """The folder the Startup shortcut starts a guard from (its working directory: where that guard's script is), or ''
+    when there is no shortcut or it cannot be read. Asked of the same WScript.Shell object that makes it; the answer
+    comes as the bytes of its UTF-8 in hex, because the console's code page would garble a folder name outside it."""
+    if not os.path.exists(STARTUP_LNK): return ''
+    try:
+        out = subprocess.run([powershell(), '-NoProfile', '-Command', "$d=(New-Object -ComObject WScript.Shell).CreateShortcut($env:FG_LNK).WorkingDirectory; "
+                              "[BitConverter]::ToString([Text.Encoding]::UTF8.GetBytes($d))"], env=dict(os.environ, FG_LNK=STARTUP_LNK),
+                             capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
+        return bytes.fromhex(out.stdout.strip().replace('-', '')).decode('utf-8')
+    except (OSError, ValueError, subprocess.SubprocessError): return ''
+
 def make_shortcut():
     """The Startup shortcut. The guard starts with Windows and waits; its icon shows while Bambu Studio runs."""
     cmd = own_command('watch')
     env = dict(os.environ, FG_LNK=STARTUP_LNK, FG_EXE=cmd[0], FG_ARGS=subprocess.list2cmdline(cmd[1:]), FG_DIR=HERE)
-    subprocess.run(['powershell', '-NoProfile', '-Command',
+    subprocess.run([powershell(), '-NoProfile', '-Command',
                     "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:FG_LNK); $s.TargetPath=$env:FG_EXE; $s.Arguments=$env:FG_ARGS; "
                     "$s.WorkingDirectory=$env:FG_DIR; $s.Description='Warns when the loaded spools do not hold enough filament for a sliced print'; $s.Save()"],
-                   env=env, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                   env=env, check=True, capture_output=True, text=True, errors='replace', timeout=60, creationflags=subprocess.CREATE_NO_WINDOW)
 
 def install(start_line=True):
     """Makes the guard start automatically, from where it is, and starts it. start_line: the guard says so on a card of
-    its own, once Bambu Studio is open; setup, which says it on its card, turns that off."""
-    make_shortcut()
-    print('starts automatically:', STARTUP_LNK)
+    its own, once Bambu Studio is open; setup, which says it on its card, turns that off. Returns (does the guard it
+    started run?, what there is to say besides, as lines of setup's card: [(mark, text)]). The settings of a copy
+    installed before, up to 1.4.0 beside its script, are brought over when there are none yet: the shortcut still
+    points into that copy's folder, so it is read before it is made to point here. A shortcut that cannot be made
+    (PowerShell not found, blocked by a policy or in Constrained Language Mode) is said and logged, and the guard is
+    started all the same: it then runs until Windows is next started. A guard that already runs (it may be an older
+    version) is asked to stop and waited for, a minute at most: started while that one still ran, the new one would
+    end at once, and the old one go when its check ended, with no guard left. One that does not go is left running,
+    and said to be the one that runs."""
+    said, before, shortcut = [], shortcut_folder(), ''
+    try:
+        if before and bring_settings(os.path.join(before, 'config.json')): said.append((True, f'Your settings are kept: config.json was brought over from {before}.'))
+    except OSError as e: said.append((False, f'Your settings in {before} could not be brought over ({e.__class__.__name__}): the defaults are in use.'))
+    try: make_shortcut(); print('starts automatically:', STARTUP_LNK)
+    except (OSError, subprocess.SubprocessError) as e:
+        shortcut = 'the Startup shortcut could not be made (' + (f'PowerShell ended with code {e.returncode}' if isinstance(e, subprocess.CalledProcessError) else f'{e.__class__.__name__}: {e}') + ')'
+        log(shortcut + (': ' + ' '.join(str(e.stderr).split())[:300] if getattr(e, 'stderr', None) else '')); print(shortcut)
     try:
         conf, cfg = bs_conf(), load_config()
         for p in known_printers(conf):
             ip = printer_ip(p['serial'], cfg, refresh=True)
-            print(f"  {p['model']}: " + (ip or 'not announcing itself on this network now (it is looked for again when a plate is sliced)'))
+            print(f"  {p['name']}: " + (ip or 'not announcing itself on this network now (it is looked for again when a plate is sliced)'))
     except (OSError, ValueError): print("  Bambu Studio's configuration was not found: the guard waits for it")
-    if stop(): time.sleep(0.5)                                                   # a running copy may be an older version
-    start(start_line); time.sleep(1.5)
-    print('watcher running' if is_running() else 'watcher did NOT start: run it with "watch" to see why')
+    except Exception as e: print(f'  the printers could not be listed ({e.__class__.__name__}): the guard looks for them when a plate is sliced')   # the list is for the eye: the guard is started all the same
+    was, ours, logfile = guard_folder(), False, os.path.join(STATE_DIR, 'guard.log')
+    if stop(60) == 'still running':
+        with contextlib.suppress(OSError): os.remove(os.path.join(STATE_DIR, 'stop'))    # it is not replaced, so it is not left to stop later either
+        time.sleep(2)                                                            # unless it has just read the flag: then it goes now, and ours is started
+    if not is_running():
+        time.sleep(0.5); start(start_line)
+        for _ in range(60):
+            if is_running(): break
+            time.sleep(0.25)
+        time.sleep(1.5); ours = is_running()                                     # still there after its start: one that Tk or the icon ended at once does not run
+        print('watcher running' if ours else f'watcher did NOT start: {logfile} may say why, or run it with "watch" to see')
+        if not ours: said.append((False, f'The guard did not start. The log may say why: {logfile}.'))
+    else: said.append((False, f"The guard that was already running{f' (from {was})' if was else ''} has not stopped, and is still the one that runs. Quit it from its icon's menu, then open Install.cmd again."))
+    if shortcut: said.append((False, ('It runs now but will not start with Windows: ' if ours else 'It will not start with Windows: ') + shortcut + '.'))
+    for mark, text in said: print(text)
+    return ours, said
 
 def uninstall():
-    if os.path.exists(STARTUP_LNK): os.remove(STARTUP_LNK)
-    print('stopped' if stop() else 'was not running'); print('shortcut removed')
-    print(f'settings and log stay in {STATE_DIR} and {CONFIG}: delete them, and this folder, to remove every trace')
+    """Removes the Startup shortcut and stops the guard, where they are this folder's own. There is one shortcut and one
+    running guard for the Windows user: after an update unzipped beside the old copy and installed, both are the new
+    copy's, and the uninstall of the old folder took them, so that no guard ran from then on. What is another folder's,
+    or cannot be told, is left alone and named."""
+    points, runs = shortcut_folder(), guard_folder()
+    if not os.path.exists(STARTUP_LNK): print('no Startup shortcut')
+    elif here(points): os.remove(STARTUP_LNK); print('shortcut removed')
+    elif points: print(f'the Startup shortcut starts the guard in {points}, not this copy: left alone')
+    else: print(f'the Startup shortcut could not be read: left alone ({STARTUP_LNK})')
+    if not is_running(): print('was not running')
+    elif here(runs): print(STOP_WORDS[stop()])
+    elif runs: print(f'the running guard was started from {runs}, not from this folder: left alone ("stop" stops it)')
+    else: print('it is not known from which folder the running guard was started: left alone ("stop" stops it)')
+    print(f'settings, entered amounts, what was learned and the log stay in {STATE_DIR}: delete it, and this folder, to remove every trace')
 
 def setup():
-    """Install, and say so on a card: for someone who started the packaged guard with a double click and sees no console."""
-    import guard_ui
+    """Install, and say so on a card: for someone who started the packaged guard with a double click and sees no console.
+    The install can take a minute and more (it waits for a guard that runs to go, and listens eight seconds for each
+    printer that is off): a line says at once that it is under way, the install runs behind it on a thread of its own,
+    and the card takes the line's place. A second double click meanwhile must not install beside the first: setup
+    holds a named mutex of its own while it installs (the guard's own is held by whichever guard runs), and one that
+    finds it held leaves; the line of the first is on the screen."""
     if sys.stdout is None: sys.stdout = sys.stderr = open(os.devnull, 'w')       # pythonw has no console to print to
-    install(start_line=False)                                                    # this card says it, in the same corner as the guard's start line would
-    root = guard_ui.make_root(); card = guard_ui.Card(root, on_close=root.quit)
-    card.note('Bambu Filament Guard is installed' if is_running() else 'Bambu Filament Guard did not start', [
-        (True, "It checks every plate you slice in Bambu Studio and shows the answer in Bambu Studio's window."),
-        (True, 'Its icon, a spool, is in the notification area while Bambu Studio runs: settings, self-test, quit.'),
-        (None, f'It runs from this folder, so the folder has to stay: {os.path.dirname(HERE) if os.path.basename(HERE) == "app" else HERE}'),
-        (None, 'To remove it: Uninstall.cmd in that folder, then delete the folder.')], 'ok' if is_running() else 'danger')
-    def tick(): card.follow(); root.after(400, tick)
+    mutex = sole_guard(MUTEX + '-setup')
+    if mutex is None: return 0
+    def installed(start_line=False):         # no console shows it: whatever kept install from its end is said on the card, and in the log
+        try: return install(start_line)
+        except Exception as e:
+            log(f'install failed: {e.__class__.__name__}: {e}')
+            return False, [(False, f"It could not be installed ({e.__class__.__name__}: {e}). The log is {os.path.join(STATE_DIR, 'guard.log')}.")]
+    try:
+        import guard_ui
+        root = guard_ui.make_root(); card = guard_ui.Card(root)                  # closing the line does not end setup: the install behind it would end with it
+        card.line('Installing Bambu Filament Guard…')
+    except Exception as e:                   # Tk that does not start costs the card, not the install; the guard then says itself that it runs
+        log(f'setup: its card cannot be shown ({e.__class__.__name__}: {e}): the install goes on without it')
+        installed(start_line=True); let_go(mutex)
+        return 0
+    done = queue.Queue()
+    threading.Thread(target=lambda: done.put(installed()), daemon=True).start()
+    def tick():
+        card.follow()
+        if not done.empty():
+            running, said = done.get(); failed = any(mark is False for mark, _ in said)
+            let_go(mutex); card.on_close = root.quit                             # the next double click installs again; closing this card ends setup
+            card.note('Bambu Filament Guard did not start' if not running else 'Bambu Filament Guard runs, but is not fully installed' if failed else 'Bambu Filament Guard is installed', [
+                *([(True, "It checks every plate you slice in Bambu Studio and shows the answer in Bambu Studio's window."),
+                   (True, 'Its icon, a spool, is in the notification area while Bambu Studio runs: settings, self-test, quit.')] if running else []), *said,
+                (None, f'It runs from this folder, so the folder has to stay: {os.path.dirname(HERE) if os.path.basename(HERE) == "app" else HERE}'),
+                (None, 'To remove it: Uninstall.cmd in that folder, then delete the folder.')], 'danger' if not running else 'warn' if failed else 'ok')
+        root.after(400, tick)
     tick(); root.mainloop()
     return 0
 
 
+def number_of_prints(text):
+    """--times: 1 or more. 0 and -1 were taken as given, and read "enough" for a plate one print of which is short."""
+    try: n = int(text)
+    except ValueError: n = 0
+    if n < 1: raise argparse.ArgumentTypeError(f'{text!r} is not a number of prints (1 or more)')
+    return n
+
+def check(a, cfg):
+    """The `check` command: the answer for each plate of a file (and for all its plates together), or for the newest
+    slice, as text or as JSON. Returns the exit code: the worst of the answers, 3 with one line of why (with --json,
+    {"error": ...}) when there is nothing to check."""
+    def not_checked(why): print(json.dumps({'error': why}) if a.json else why); return 3
+    def unread(title, why): return {'title': title, 'model': '', 'time': '', 'times': a.times, 'plate': None, 'printer': None, 'rows': [], 'worst': 'OK', 'error': why}
+    cut = []                                                 # the plates of the file whose G-code is not complete
+    if a.file:
+        try: found = plates_of_file(a.file)
+        except (OSError, ValueError) as e: return not_checked(f'{a.file}: {e}')
+        plates, cut = [(os.path.basename(a.file) + (' ' + label if label else ''), plate) for label, plate in found], [label for label, plate in found if not plate]
+    else:
+        newest = newest_gcode()
+        if not newest: return not_checked('no sliced plate found: slice in Bambu Studio first, or name a .gcode / .gcode.3mf file')
+        try:
+            with open(newest, 'rb') as f: plate = parse_plate(read_head(f))
+        except (OSError, ValueError) as e: return not_checked(f'the newest slice ({project_title(newest)}) cannot be read: {e}')
+        if not plate: return not_checked('Bambu Studio is still writing its newest slice')
+        plates = [(project_title(newest), plate)]
+    seen = {}
+    results = [evaluate(plate, cfg, title, a.times, seen) if plate else unread(title, 'the G-code of this plate is not complete in the file') for title, plate in plates]
+    # "Print all plates" needs the sum: each plate alone can fit a spool that does not hold them all, and exit code 0
+    # for such a file once sent a script on. The same reading of the printer serves every answer (seen). A plate
+    # that could not be read has no part in the sum, so there is none.
+    if len(plates) > 1:
+        together = os.path.basename(a.file) + ' all plates together'
+        results.append(unread(together, f"the G-code of {', '.join(cut)} is not complete in the file: what all plates need together cannot be told") if cut
+                       else evaluate(plates_together([plate for _, plate in plates]), cfg, together, a.times, seen))
+    if not a.file: results[0]['pid'], results[0]['plate_no'] = studio_pid(newest), plate_number(newest)
+    print(json.dumps(results, indent=1) if a.json else '\n'.join(report_text(r) for r in results))
+    if a.popup:
+        import guard_ui
+        guard = Guard(cfg, guard_ui.make_root(), standing=False)
+        guard.deliver(max(results, key=exit_code), full=True); guard.loop()
+    return max(exit_code(r) for r in results)
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0]); sub = ap.add_subparsers(dest='cmd')
-    c = sub.add_parser('check'); c.add_argument('file', nargs='?'); c.add_argument('--times', type=int, default=1)
+    c = sub.add_parser('check'); c.add_argument('file', nargs='?'); c.add_argument('--times', type=number_of_prints, default=1)
     c.add_argument('--popup', action='store_true'); c.add_argument('--json', action='store_true')
     sub.add_parser('watch').add_argument('--no-start-line', action='store_true')
-    learned = sub.add_parser('learned')
-    learned.add_argument('--forget', nargs='?', const='', metavar='TRAY', help='forget what was learned: everything, or one tray (e.g. C3)')
-    learned.add_argument('--printer', help='with --forget TRAY: the printer, by serial or model, when more than one has that tray')
+    learned = sub.add_parser('learned'); forgets = learned.add_mutually_exclusive_group()
+    forgets.add_argument('--forget', nargs='?', const='', metavar='TRAY', help='forget what was learned: everything, or one tray (e.g. C3)')
+    forgets.add_argument('--forget-weigh', metavar='TRAY', help="take back that tray's latest weigh-in (e.g. C3): the rest of what was learned stays")
+    learned.add_argument('--printer', help='with --forget TRAY or --forget-weigh TRAY: the printer, by serial or model, when more than one has that tray')
     for name in ('install', 'uninstall', 'setup', 'status', 'stop', 'trays', 'selftest'): sub.add_parser(name)
-    a = ap.parse_args(argv)
+    try: a = ap.parse_args(argv)
+    except SystemExit as e: raise SystemExit(3 if e.code == 2 else e.code)        # argparse ends a command line it cannot read with 2, which is "not enough" to a script that gates on `check`
     if a.cmd == 'watch': return watch(start_line=not a.no_start_line)
-    if a.cmd == 'install': return install()
+    if a.cmd == 'install': return 0 if install()[0] else 1
     if a.cmd == 'uninstall': return uninstall()
     if a.cmd == 'setup': return setup()
-    if a.cmd == 'stop': print('stopped' if stop() else 'was not running'); return 0
+    if a.cmd == 'stop': print(STOP_WORDS[stop()]); return 0
     if a.cmd == 'status':
-        print('watcher running' if is_running() else 'watcher not running', '| starts automatically:', 'yes' if os.path.exists(STARTUP_LNK) else 'no', '| log:', os.path.join(STATE_DIR, 'guard.log'))
+        starts = autostart()
+        print('watcher running' if is_running() else 'watcher not running', '| starts automatically:',
+              'no' if starts is None else 'yes' if starts is True else f'another copy, in {starts}' if starts else 'a shortcut that cannot be read', '| log:', os.path.join(STATE_DIR, 'guard.log'))
         return 0
     cfg = load_config()
     if a.cmd == 'selftest':
@@ -1400,43 +2261,42 @@ def main(argv=None):
         import guard_learn
         try: names = {p['serial']: p['model'] for p in known_printers(bs_conf())}
         except (OSError, ValueError): names = {}
-        if a.forget is not None:
-            try: print(guard_learn.forget(a.forget or None, a.printer, names), 'is forgotten'); return 0
+        if a.forget is not None or a.forget_weigh:
+            try: print(guard_learn.forget_weigh(a.forget_weigh, a.printer, names) if a.forget_weigh else guard_learn.forget(a.forget or None, a.printer, names), 'is forgotten'); return 0
             except ValueError as e: print(e); return 1
-        print('\n'.join(guard_learn.report(guard_learn.load(), names, cfg.get('learn'), cfg))); return 0
+        try: lines = guard_learn.report(guard_learn.load(), names, cfg.get('learn'), cfg)
+        except Exception as e:               # a history that cannot be shown must still say so, and how to start again
+            log(f'learned: {e.__class__.__name__}: {e}')
+            print(f'What was learned cannot be shown ({e.__class__.__name__}: {e}). "learned --forget" starts again from nothing.'); return 1
+        print('\n'.join(lines)); return 0
     if a.cmd == 'trays':
         import guard_ledger
-        conf = bs_conf()
-        for p in known_printers(conf):
-            ip = printer_ip(p['serial'], cfg)
+        try: conf = bs_conf(); printers = known_printers(conf)
+        except Exception as e: print(f"Bambu Studio's configuration cannot be read ({e.__class__.__name__}): is Bambu Studio installed for this Windows user?"); return 1
+        if not printers: print('Bambu Studio holds no LAN access code for a printer: open the printer once on its Device tab'); return 1
+        for p in printers:
             try:
-                if not ip: raise PrinterError('not announcing itself on this network')
+                ip = printer_ip(p['serial'], cfg)
+                if not ip: raise PrinterError(NOT_ANNOUNCED)
                 status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
-            except PrinterError as e: print(f"{p['model']}: {e}"); continue
-            trays, two = trays_of(status); guard_ledger.apply(trays, p['serial'], 'ams' in status)
-            print(f"{p['model']} ({ip}), {status.get('gcode_state')}")
+                if not can_judge(status): raise PrinterError('did not report its spools')
+                trays, two = trays_of(status); guard_ledger.apply(trays, p['serial'], has_spools(status))
+            except PrinterError as e: print(f"{p['name']}: {e}"); continue
+            except Exception as e: print(f"{p['name']}: {e.__class__.__name__}: {e}"); continue      # one printer's error does not cost the others their answer
+            print(f"{p['name']} ({ip}), {status.get('gcode_state')}")
             for t in trays:
                 amount = 'entered amount out of date' if t.get('stale') else 'amount unknown' if t['grams'] is None else f"{t['grams']:.0f} g" + (' (entered by hand)' if t.get('entered') else '')
                 print(f"  {t['label']:<5} {t['type']:<8} {t['name'][:18]:<18} {t['colour']}  {amount}" + (f"  {t['nozzle']} nozzle" if two and t['nozzle'] else ''))
         return 0
     if a.cmd == 'check':
-        if a.file:
-            try: plates = [(os.path.basename(a.file) + (' ' + label if label else ''), plate) for label, plate in plates_of_file(a.file)]
-            except (OSError, ValueError) as e: print(f'{a.file}: {e}'); return 3
-        else:
-            newest = newest_gcode()
-            if not newest: print('no sliced plate found: slice in Bambu Studio first, or name a .gcode / .gcode.3mf file'); return 3
-            with open(newest, 'rb') as f: plate = parse_plate(read_head(f))
-            if not plate: print('Bambu Studio is still writing its newest slice'); return 3
-            plates = [(project_title(newest), plate)]
-        results = [evaluate(plate, cfg, title, a.times) for title, plate in plates]
-        if not a.file: results[0]['pid'], results[0]['plate_no'] = studio_pid(newest), plate_number(newest)
-        print(json.dumps(results, indent=1) if a.json else '\n'.join(report_text(r) for r in results))
-        if a.popup:
-            import guard_ui
-            guard = Guard(cfg, guard_ui.make_root(), standing=False)
-            guard.deliver(max(results, key=exit_code), full=True); guard.loop()
-        return max(exit_code(r) for r in results)
+        # Whatever happens, a script gets one line and "not checked" (3): a traceback ends Python with 1, which is
+        # "tight". And the line is printed whatever it holds: through a pipe the output is in the ANSI code page, where
+        # a project named outside it once ended the check in UnicodeEncodeError; such characters show as "?".
+        if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(errors='replace')
+        try: return check(a, cfg)
+        except Exception as e:
+            why = ' '.join(f'the check failed ({e.__class__.__name__}: {e})'.split())
+            print(json.dumps({'error': why}) if a.json else why); return 3
     ap.print_help(); return 0
 
 if __name__ == '__main__':

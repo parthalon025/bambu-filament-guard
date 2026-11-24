@@ -20,9 +20,9 @@ The AMS's remaining-filament figure is an estimate. It counts what it has fed, s
 
 ## Key features
 
-- **Every filament, every plate.** Checks each plate as soon as it is sliced, and all the project's sliced plates again when "Send print job" opens.
+- **Every filament, every plate.** Checks each plate as soon as it is sliced, and all the project's sliced plates again when "Send print job" opens (of more than 30, the 30 sliced last; the card says how many were left out).
 - **Batch-printing aware.** A plate sliced while another prints is checked against what the spools will hold when it can start. See [The running print](docs/running-print.md).
-- **Learns each tray's accuracy.** Scores its own forecasts against what each print took. Until they have earned it, learning only makes a check stricter. After that, the reserve is measured instead of fixed, and it is smaller for a tray that proves accurate. See [Learning from previous prints](docs/learning.md).
+- **Learns each tray's accuracy.** Follows the prints and learns, per tray, how far its reading can be trusted: what it reads when a spool runs dry, and how far it falls per gram printed. As it comes, this only makes a check stricter. An experimental setting, off unless you turn it on, measures the reserve from the guard's own forecasts instead of fixing it. See [Learning from previous prints](docs/learning.md).
 - **Spools without RFID.** Enter a weighed amount once, and the guard counts it down as prints use it. See [Spools without a reading](docs/manual-amounts.md).
 - **Scriptable.** `check` gives a plain-text or JSON result for any sliced file, with exit codes a script can act on. See [Commands](#commands).
 - **Read-only and local.** Sends the printer no command that changes it. See [Privacy and security](#privacy-and-security).
@@ -69,10 +69,10 @@ A report from any other model, whether it works or not, is welcome: [Printer rep
 ### Packaged (no Python needed)
 
 1. Download `BambuFilamentGuard-<version>.zip` from the [latest release](https://github.com/parthalon025/bambu-filament-guard/releases/latest).
-2. Unzip it where it can stay: it runs from that folder.
-3. Open `Install.cmd`.
+2. Unzip it into a folder of your own where it can stay, inside your user folder (`C:\Users\<you>\…`): the guard runs from that folder and is started from it each time you log on, so it should be one that no other account of the computer can change.
+3. Open `Install.cmd`. A line says at once that it is installing, which can take a minute; a card then says what was done.
 
-`Uninstall.cmd` removes it. `python build.py` makes the same zip in `dist\`.
+`Uninstall.cmd` removes it. `README.txt` in the folder says what Windows may ask at the first start. `python build.py` makes such a zip in `dist\`, on the Python and from the wheels the script and `requirements-bundle.txt` name.
 
 ### From source
 
@@ -87,6 +87,18 @@ python filament_guard.py install      # start automatically, and now
 
 Either way, the guard starts with Windows and waits. Its icon, a spool, is in the notification area while Bambu Studio runs.
 
+### Updating
+
+1. Stop the old copy first: Quit in its icon's menu. (`Uninstall.cmd` in its folder stops it too.)
+2. Unzip the new version: into a new folder, or over the old one once the old copy has stopped.
+3. Open the new `Install.cmd`.
+
+From source: `python filament_guard.py stop`, update the files, then `python filament_guard.py install`.
+
+Your settings, the amounts you entered and what was learned are kept. From 1.5.0 they are all in `%LOCALAPPDATA%\BambuFilamentGuard\`, not in the guard's folder. Up to 1.4.0 the settings were in the guard's own folder (`app\config.json`; from source, beside the script). `Install.cmd` brings that file over, and says so on its card, when it can tell where the old copy is: you quit it rather than uninstalled it, so its Startup shortcut still points there, or you unzipped over its folder. Otherwise copy `config.json` from the old folder to `%LOCALAPPDATA%\BambuFilamentGuard\` before you delete the old folder.
+
+Do not run the `Uninstall.cmd` of a copy of 1.4.0 or earlier once the new one is installed: it removes the new copy's shortcut and stops the new guard. Delete the old folder instead. From 1.5.0, `Uninstall.cmd` removes the shortcut and stops the guard only where they are its own folder's, and names what it left alone.
+
 ## Usage
 
 There is nothing to do beyond slicing as usual. When a plate is sliced, the guard reads from its G-code the grams each filament needs, asks the printer what is left on every spool, takes off what a running print still needs, and shows the answer as a **Filament check** card inside Bambu Studio's window, bottom right, under the slicing result.
@@ -95,17 +107,17 @@ With enough of everything the card is one line that goes away after 8 seconds:
 
 ![The one-line card: "Enough filament for this print", 5 filaments against the spools on the Bambu Lab H2D, with a Details button.](docs/card-enough.png)
 
-When a filament falls short it is the full table, as in the picture at the top, and it stays until closed or until the next slice. From it you can check again after swapping a spool, ignore a finding for the project, or enter the amount of a spool the printer cannot measure.
+When a filament falls short it is the full table, as in the picture at the top, and it stays until you close it, until that plate is sliced again, or until a check finds something worse. From it you can check again after swapping a spool, ignore a finding for that plate of the project (for a week, and as long as it does not get worse), or enter the amount of a spool the printer cannot measure.
 
 | Result | Meaning |
 |---|---|
 | Enough | One matching spool holds the need plus the reserve. |
 | Tight | One spool holds the need, without the reserve. |
-| Needs two spools | No single spool holds it; the matching spools together do. AMS auto refill must be on. |
-| Not enough | The matching spools together hold less than the need. |
+| Needs two spools | No single spool holds it; spools that AMS auto refill goes on between do together: the same product and colour, both in an AMS. AMS auto refill must be on. |
+| Not enough | The matching spools together hold less than the need, or hold it only with a spool AMS auto refill does not go on to (another product or shade, the external spool): the note names those and their amounts. |
 | Not loaded | No spool of that material is loaded where the print's nozzle can reach it. |
 | Colour not loaded | The material is loaded, this colour of it is not. The nearest spool is named and counts for nothing. |
-| Unknown | The matching spool reports no remaining amount. Shown as one line, like "enough", unless `popup_on` names it. |
+| Unknown | The matching spool reports no remaining amount, or a print the guard could not count is drawing on it, or Bambu Studio gives no weight to the filament, or to one that can print from the same spool (a profile with density 0). Shown as one line, like "enough", unless "Warn when a spool's amount is unknown" is ticked in the icon's settings. |
 
 The card's buttons, the icon's menu and settings, how spools are matched and how the reserve is set are in [Using the guard](docs/using.md).
 
@@ -116,24 +128,25 @@ python filament_guard.py status       # running? where is the log?
 python filament_guard.py check        # the newest slice of the running Bambu Studio, as text
 python filament_guard.py check FILE.gcode.3mf --times 9   # nine prints of a sliced file
 python filament_guard.py trays        # the spools each printer reports
-python filament_guard.py learned      # what was learned from previous prints, per tray; --forget [TRAY] starts again
+python filament_guard.py learned      # what was learned from previous prints, per tray; --forget [TRAY] starts again,
+                                      # --forget-weigh TRAY takes back that tray's latest weigh-in
 python filament_guard.py selftest     # can the guard read this Bambu Studio and reach the printers?
 python filament_guard.py uninstall    # remove the shortcut and stop
 ```
 
-`check` exits with a code a script can gate on: `--json` prints the full answer; `--popup` also shows the card.
+`check` exits with a code a script can gate on: `--json` prints the full answer; `--popup` also shows the card. For a file with several plates it answers for each plate and then for all plates together, which is what "Print all plates" needs; the exit code is the worst of those answers. When there is nothing to answer for (no slice, a file that cannot be read, an error inside the check), it prints one line that says why, as `{"error": "…"}` with `--json`, and exits with 3.
 
 | Exit code | Meaning |
 |---|---|
 | 0 | Enough |
 | 1 | Tight, two spools needed, or amount unknown |
 | 2 | Not enough, or the material or colour is not loaded |
-| 3 | Could not be checked |
+| 3 | Could not be checked: no slice, a file or a printer that cannot be read, or a command line that was not understood (a mistyped option, `--times` below 1) |
 
 > [!TIP]
-> **After a Bambu Studio update**, run `selftest` (or Self-test in the icon's menu). When Bambu Studio writes a slice the guard cannot read, a card says so once for that version, and every such file is in the log.
+> **After a Bambu Studio update**, run `selftest` (or Self-test in the icon's menu). When Bambu Studio writes a slice the guard cannot read, a card says so once for that version, the icon goes grey until a slice reads again, and every such file is in the log.
 
-**Log and state** are in `%LOCALAPPDATA%\BambuFilamentGuard\`, with the grams per layer of the last 30 slices in `profiles\` and what was learned in `learned.json`. Settings are saved to `config.json` beside the script.
+**Log, state and settings** are in `%LOCALAPPDATA%\BambuFilamentGuard\`, with the grams per layer of the last 30 slices in `profiles\`, what was learned in `learned.json` and the settings in `config.json`.
 
 ## Documentation
 
@@ -141,13 +154,13 @@ python filament_guard.py uninstall    # remove the shortcut and stop
 |---|---|
 | [Using the guard](docs/using.md) | How it works step by step, the card and its buttons, the icon and its settings, what the results mean, the reserve |
 | [The running print](docs/running-print.md) | How the print on the printer is counted before a new plate is checked |
-| [Learning from previous prints](docs/learning.md) | What is recorded, the model, what is learned and what it changes, the measured reserve, weigh-ins, the simulation |
+| [Learning from previous prints](docs/learning.md) | What is recorded, the model, what is learned and what it changes, the experimental measured reserve and what it cannot see, weigh-ins, the simulation |
 | [Spools without a reading](docs/manual-amounts.md) | Entering the amount of a spool the printer cannot measure, and how it is counted down |
 | [Limits](docs/limits.md) | What the guard cannot read or does not yet know, and what it does in each case |
 
 ## Privacy and security
 
-The guard makes no internet connection, and it sends the printer no command that changes it: no print, pause, stop, temperature or motion command. The LAN access code is read from Bambu Studio's configuration each time and goes to the printer only. What it reads, sends and keeps, and how to report a vulnerability, is in [SECURITY.md](SECURITY.md).
+The guard makes no internet connection, and it sends the printer no command that changes it: no print, pause, stop, temperature or motion command. The LAN access code is read from Bambu Studio's configuration each time and goes only to the address the guard holds for the printer: the one you name in `config.json`, or a local one the printer's announcement names. Announcements are not authenticated, and a device on your own network can answer in the printer's place. What it reads, sends and keeps, and how to report a vulnerability, is in [SECURITY.md](SECURITY.md).
 
 ## Contributing
 
@@ -159,4 +172,4 @@ What each version changed is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Licence
 
-MIT: see [LICENSE](LICENSE). The packaged zip also holds Python, Tcl/Tk, paho-mqtt, pystray and Pillow, each under its own licence. Those are in the zip: `LICENSE.txt` (Python), `tcl\tk8.6\license.terms` (Tcl/Tk) and the `dist-info` folders in `Lib\site-packages`.
+MIT: see [LICENSE](LICENSE). The packaged zip also holds Python, Tcl/Tk, paho-mqtt, pystray (LGPL-3.0), Pillow and six, each under its own licence. Those are in the zip: `LICENSE.txt` (Python), `tcl\tk8.6\license.terms` (Tcl/Tk) and the `dist-info` folders in `Lib\site-packages`.

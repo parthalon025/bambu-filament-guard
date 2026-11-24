@@ -1,0 +1,81 @@
+name: release
+
+# On every pull request: the tests, the zip, and the guard started from that zip, unpacked, on Windows.
+# Run by hand on main (Actions > release > Run workflow): the same, and then the GitHub release v<VERSION of
+# filament_guard.py> is published with that zip. The workflow makes the tag; do not push one by hand.
+on:
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1          # v7.0.1
+        with:
+          persist-credentials: false       # nothing below needs the token: pip and the tests run code from elsewhere
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0      # v7.1.0
+        with:
+          python-version: '3.13.17'        # the zip takes its Python from here: build.py refuses one it has no SHA-256 for
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+      - name: The amount window, as it looks on Windows
+        run: python .github/scripts/amount_window.py dist/windows
+      - run: python build.py
+      - id: version
+        run: echo "version=$(python -c 'import filament_guard; print(filament_guard.VERSION)')" >> "$GITHUB_OUTPUT"
+      - name: The zip, unpacked into a folder with a space in its name, opens the guard's own card
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          7z x -o"$RUNNER_TEMP/un zip" "dist/BambuFilamentGuard-$VERSION.zip" > /dev/null
+          "$RUNNER_TEMP/un zip/BambuFilamentGuard/python.exe" "$RUNNER_TEMP/un zip/BambuFilamentGuard/app/filament_guard.py" --help > /dev/null
+          "$RUNNER_TEMP/un zip/BambuFilamentGuard/python.exe" .github/scripts/packaged_card.py dist/windows
+      - name: The unzipped guard installs, runs, tests itself and is removed again
+        run: python .github/scripts/packaged_run.py "$RUNNER_TEMP/un zip/BambuFilamentGuard"
+      - run: python .github/scripts/release_notes.py "dist/BambuFilamentGuard-${{ steps.version.outputs.version }}.zip" > dist/notes.md && cat dist/notes.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9   # v7.0.2
+        with:
+          name: BambuFilamentGuard-${{ steps.version.outputs.version }}-${{ github.sha }}
+          path: |
+            dist/BambuFilamentGuard-${{ steps.version.outputs.version }}.zip
+            dist/notes.md
+            dist/windows/
+
+  publish:
+    # Apart from the build: this job holds the token that can make a release and its tag, and runs nothing but gh on
+    # the files the build job tested. It checks out no code and installs nothing.
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: BambuFilamentGuard-${{ needs.build.outputs.version }}-${{ github.sha }}
+      - name: Publish the release
+        run: |
+          zip="BambuFilamentGuard-$VERSION.zip"
+          grep -q "$(sha256sum "$zip" | cut -d' ' -f1)" notes.md || { echo "$zip is not the file the notes were written for"; exit 1; }
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then echo "v$VERSION is released already"; exit 1; fi
+          # A tag that is there already is kept by GitHub, whatever --target says: the zip would not be built from its tag.
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" > /dev/null 2>&1; then echo "the tag v$VERSION exists already: this workflow makes it, from the commit it built"; exit 1; fi
+          gh release create "v$VERSION" "$zip" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Bambu Filament Guard $VERSION" --notes-file notes.md
