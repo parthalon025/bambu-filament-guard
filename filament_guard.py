@@ -327,8 +327,13 @@ def write_json(path, data, **how):
 def forget_copy(path):
     """Removes the last good copy of a state file (<path>.bak), for whatever has just written out of that file something
     the user asked to forget (an entered amount, a tray's history, a weigh-in): the copy still held it, and gave it
-    back when the file was next damaged. The file's next write keeps a copy again."""
-    with state_lock(), contextlib.suppress(OSError): os.remove(path + '.bak')
+    back when the file was next damaged. The file's next write keeps a copy again. A copy that cannot be removed now
+    (the folder held elsewhere) is said in the log, not raised: what was to be forgotten is out of the file itself."""
+    name = os.path.basename(path)
+    try:
+        with state_lock(): os.remove(path + '.bak')
+    except FileNotFoundError: pass
+    except OSError as e: log(f'{name}.bak could not be removed ({e.__class__.__name__}): what was forgotten stays in it until {name} is next written')
 
 def load_state():
     """The state file ({} when there is none; see read_json)."""
@@ -682,12 +687,13 @@ def discover(want, seconds=8.0):
     return found
 
 def printer_ip(serial, cfg, refresh=False):
-    """The printer's IP: config.json, else the last one seen, else its LAN announcement (asked for at most every 10 minutes,
-    by a time of this printer's own, 'listened': one time for all kept a second printer from being looked for within
-    ten minutes of the first). Of what discover heard, the address of this serial alone is kept. What an earlier version kept is not used and
-    goes from the state file at this look, listened or not: an address that is no local one (it took whatever an
-    announcement named), and whatever is kept under a key that is no serial Bambu Studio knows (it kept every USN it
-    heard, for good: a burst of junk made the state file, read whole every 3 seconds, hundreds of MB)."""
+    """The printer's IP: config.json, else the last one seen, else its LAN announcement (asked for at most every 10
+    minutes, by a time of this printer's own, 'listened': one time for all kept a second printer from being looked for
+    within ten minutes of the first). Of what discover heard, the address of this serial alone is kept. What an
+    earlier version kept is not used and goes from the state file at this look, listened or not: an address that is no
+    local one (it took whatever an announcement named), and whatever is kept under a key that is no serial Bambu
+    Studio knows (it kept every USN it heard, for good: a burst of junk made the state file, read whole every 3
+    seconds, hundreds of MB)."""
     fixed = cfg.get('printers', {}).get(serial, {}).get('ip')
     if fixed: return fixed
     try: known = set(bs_conf().get('access_code', {})) | {serial}

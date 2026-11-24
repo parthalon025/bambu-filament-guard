@@ -250,3 +250,23 @@ def test_what_is_forgotten_is_not_kept_in_the_last_good_copy(state):
     assert not (state / 'state.json.bak').exists()
     (state / 'state.json').write_bytes(b'\0' * 64)                                         # and the file lost to a power cut right after
     assert fg.load_state().get('spools', {}).get('SERIAL', {}) == {}                       # does not bring the amount back
+
+def test_a_copy_that_cannot_be_removed_does_not_undo_what_was_forgotten(state, monkeypatch):
+    """The amount is out of the state file when its last good copy is to go. The state folder held elsewhere just then
+    made "Forget this amount" end in an error, although the amount was forgotten: it is said in the log, and what
+    stays in the copy goes with the file's next write."""
+    import contextlib, guard_ledger as gl
+    tray = {'label': 'Ext', 'type': 'PLA', 'colour': '#0A2989'}
+    gl.enter('SERIAL', tray, 400); fg.update_state(lambda st: st.__setitem__('looked', {'SERIAL': 1.0}))
+    lock, calls = fg.state_lock, []
+    @contextlib.contextmanager
+    def held_at_the_third(*a, **k):                                                        # free for the write that forgets, held when the copy is to go
+        calls.append(1)
+        if (state / 'state.json.bak').exists() and 'Ext' not in fg.json.load(open(state / 'state.json')).get('spools', {}).get('SERIAL', {}):
+            raise fg.StateBusy('the state folder was held elsewhere for more than 10 s')
+        with lock(*a, **k): yield
+    monkeypatch.setattr(fg, 'state_lock', held_at_the_third)
+    gl.enter('SERIAL', tray, None)                                                         # does not raise
+    monkeypatch.setattr(fg, 'state_lock', lock)
+    assert fg.load_state()['spools']['SERIAL'] == {} and (state / 'state.json.bak').exists()
+    assert 'state.json.bak could not be removed (StateBusy): what was forgotten stays in it until state.json is next written' in (state / 'guard.log').read_text()
