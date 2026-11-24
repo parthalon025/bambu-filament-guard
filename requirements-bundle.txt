@@ -1,0 +1,10 @@
+# What the packaged guard holds, exactly: build.py installs these wheels and no others (pip --require-hashes), so the
+# zip is made of versions that were built and started on Windows before, not of whatever PyPI serves that minute.
+# requirements.txt stays the floor for running from source.
+# To move a version: change it here with the SHA-256 of its wheel for 64-bit Windows and this Python
+#   pip download --only-binary=:all: --no-deps --platform win_amd64 --python-version 3.13 <name>==<version>, then pip hash <file>
+# and let the release workflow build the zip and start the guard from it. six is what pystray needs.
+paho-mqtt==2.2.0 --hash=sha256:3243630f7c2b05f71d1de8c6f59865eb04d3a59ae8c866e92377faed6753db4d
+pystray==0.19.5 --hash=sha256:a0c2229d02cf87207297c22d86ffc57c86c227517b038c0d3c59df79295ac617
+pillow==13.0.0 --hash=sha256:9dda0788a9932776a75d8bcc020076edc308ce2508b51f6739a45e3158b3fc42
+six==1.17.0 --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274

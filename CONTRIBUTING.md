@@ -49,7 +49,8 @@ A new test goes in the file of what it tests. A helper used by one file stays in
 | `guard_ledger.py` | the prints that draw on the spools: entered amounts counted down, what the running print still needs; the link that follows a printer |
 | `guard_learn.py` | learning from previous prints, per tray: the record, the model and its scores, what they change, weigh-ins, `learned` |
 | `guard_stats.py` | the estimators learning uses: shrinkage, the conformal bound, Kaplan-Meier, change points, Fieller's interval; plain arithmetic |
-| `build.py` | makes the packaged folder and its zip |
+| `build.py`, `requirements-bundle.txt` | makes the packaged folder and its zip, from the Python and the wheels they name by SHA-256 |
+| `.github/` | `tests.yml` runs the tests on Windows; `release.yml` builds the zip on every pull request, starts the guard from it, and publishes the release when run by hand on `main` (it makes the tag) |
 | `tests/` | the tests: see [Run the tests](#run-the-tests) |
 | `pytest.ini` | where the tests are, and their markers |
 | `docs/` | the documentation beyond the README, and its pictures |

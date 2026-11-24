@@ -23,8 +23,11 @@ for name, mode, tray, weigh, typed, tare in SHOTS:
         entries = [w for w in d.winfo_children() if w.winfo_class() == 'Entry']
         for entry, text in zip(entries, typed):
             if text is not None: entry.delete(0, 'end'); entry.insert(0, text)
-        if name.endswith('refused-light'): entries[0].event_generate('<Return>')
     for _ in range(5): root.update()
+    if name.endswith('refused-light'):                                  # Save, by the button's own command: a key event sent to a window without the focus goes nowhere
+        save = next(b for f in d.winfo_children() if f.winfo_class() == 'Frame' for b in f.winfo_children() if b.winfo_class() == 'Button' and b.cget('text') == 'Save')
+        save.invoke(); root.update()
+        assert any('no more than the empty spool' in str(c.cget('text')) for c in d.winfo_children() if c.winfo_class() == 'Label'), 'the window did not say why it refused'
     x, y, w, h = d.winfo_rootx(), d.winfo_rooty(), d.winfo_width(), d.winfo_height()
     path = os.path.join(folder, name + '.png')
     ImageGrab.grab((x - 12, y - 40, x + w + 12, y + h + 12)).save(path, optimize=True)

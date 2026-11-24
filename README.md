@@ -72,7 +72,7 @@ A report from any other model, whether it works or not, is welcome: [Printer rep
 2. Unzip it where it can stay: it runs from that folder.
 3. Open `Install.cmd`.
 
-`Uninstall.cmd` removes it. `python build.py` makes the same zip in `dist\`.
+`Uninstall.cmd` removes it. `README.txt` in the folder says what Windows may ask at the first start. `python build.py` makes such a zip in `dist\`, on the Python and from the wheels the script and `requirements-bundle.txt` name.
 
 ### From source
 
@@ -160,4 +160,4 @@ What each version changed is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Licence
 
-MIT: see [LICENSE](LICENSE). The packaged zip also holds Python, Tcl/Tk, paho-mqtt, pystray and Pillow, each under its own licence. Those are in the zip: `LICENSE.txt` (Python), `tcl\tk8.6\license.terms` (Tcl/Tk) and the `dist-info` folders in `Lib\site-packages`.
+MIT: see [LICENSE](LICENSE). The packaged zip also holds Python, Tcl/Tk, paho-mqtt, pystray (LGPL-3.0), Pillow and six, each under its own licence. Those are in the zip: `LICENSE.txt` (Python), `tcl\tk8.6\license.terms` (Tcl/Tk) and the `dist-info` folders in `Lib\site-packages`.
