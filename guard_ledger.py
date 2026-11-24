@@ -2,7 +2,8 @@
 that draw on them.
 
 An entry belongs to one tray of one printer and to the material and colour that tray held when it was entered. It
-ends when the printer reports another filament there, or starts to measure the tray itself.
+ends (ended) when the printer reports another filament there, starts to measure the tray itself, or reports the tray
+empty after it was seen holding that filament: at a check (apply), and at the follower's look once two in a row agree.
 
 Counting down errs to the low side, because a figure that is too low warns early and one that is too high loses a
 print:
@@ -67,19 +68,40 @@ def followed(cfg, state=None):
         out |= {s for s, at in state.get('printing', {}).items() if time.time() - (at or 0) < PRINTING}
     return sorted(out)
 
+def ended(e, t, empty):
+    """Why an entry has ended, or '' while it stands. t: its tray among the loaded ones, else None; empty: the status
+    says that tray is without a spool. An empty tray ends an entry only once the tray was seen holding the entry's
+    filament since the entry was made ('loaded'): the weight is typed while the spool is still on the scale, and the
+    check that follows once took the entry away again."""
+    if t is None: return 'the tray is empty' if empty and e.get('loaded') else ''
+    if t['grams'] is not None: return 'the printer measures the tray now'
+    return '' if identity(t) == [e['type'], e['colour']] else f"the tray holds {t['type'].upper()} {t['colour']} now"
+
+def settle(book, trays, empty, only=None, since=None):
+    """One status against a printer's entries (book): an entry whose tray holds its filament is marked 'loaded', and one
+    that has ended (ended) is dropped, with a line in the log. empty: the trays without a spool; only: {label: why},
+    the endings that may be carried out (all, when not given); since: when the status was reported: an entry made after
+    that is left as it is."""
+    by = {t['label']: t for t in trays}
+    for label, e in list(book.items()):
+        if since is not None and e['at'] > since: continue
+        why = ended(e, by.get(label), label in empty)
+        if why and (only is None or only.get(label) == why): del book[label]; fg.log(f'{label}: amount ended: {why}')
+        elif not why and label in by: e['loaded'] = True
+
 def apply(trays, serial, complete=True):
     """Gives the trays the printer cannot measure the amount entered for them (grams, and 'entered': when), or marks
-    them 'stale' when that amount is out of date. Drops the entries that have ended: another filament in the tray, a
-    tray the printer now measures, or (only when the status is complete, i.e. has its spools) a tray that is empty."""
+    them 'stale' when that amount is out of date. Drops the entries that have ended (ended): another filament in the
+    tray, a tray the printer now measures, or a tray that is empty. Empty is a tray that is not among the loaded ones
+    when the status is complete, i.e. has its spools, and shows a spool in an AMS: a report still in pieces, with an
+    "ams" part and no tray in it yet, once ended every entry."""
     def change(state):
         book = state.get('spools', {}).get(serial, {})
-        for label in list(book):
-            t, e = next((t for t in trays if t['label'] == label), None), book[label]
-            if t is None:
-                if complete: del book[label]
-            elif t['grams'] is not None or identity(t) != [e['type'], e['colour']]: del book[label]
-            elif e.get('stale'): t['stale'] = e['at']
-            else:
+        settle(book, trays, set(book) if complete and any(not t['label'].startswith('Ext') for t in trays) else ())
+        for t in trays:
+            e = book.get(t['label'])
+            if e and e.get('stale'): t['stale'] = e['at']
+            elif e:
                 t['grams'], t['weight'], t['entered'], t['accounted'], t['missed'] = e['grams'], e['first'], e['at'], e.get('job'), e.get('missed')
                 t['over'], t['gave'] = e.get('over'), e.get('gave')
     fg.update_state(change)
@@ -327,6 +349,7 @@ class JobWatch(threading.Thread):
         self.followed = state.get('followed', {}).get(serial)                # when the printer last reported, at the last look (kept in the state file, to the minute)
         self.saved = 0.0
         self.seen = (None, None)                                             # (state, key) at the last look that was dealt with
+        self.going = {}                                                      # {tray: why} the entries the last look found ended
         self.lost = False                                                    # the last link got no report: look for the printer's address again
 
     def look(self, status, gap=False, state=None):
@@ -364,12 +387,26 @@ class JobWatch(threading.Thread):
         try:
             if entered and not self.entered: self.restart(state)
             self.entered = entered
-            if entered: self.look(status, gap=bool(self.followed) and at - self.followed > GAP, state=state)
+            if entered: self.look(status, gap=bool(self.followed) and at - self.followed > GAP, state=state); self.end(status, state, at)
             self.mark_followed(at); self.mark_printing(status.get('gcode_state') in fg.BUSY); note_job(self.serial, status, state)
         except fg.StateBusy as e: self.say(f'following the printer: {e}; tried again at the next look')
         if self.cfg.get('learn'):
             try: self.recorder.look(status)
             except Exception as e: self.say(f'learning: {e.__class__.__name__}: {e}')   # learning never stops the entered amounts' count
+
+    def end(self, status, state, at):
+        """Ends the entries whose spool is gone, as a check does (apply), on a status that has its spools: an entry
+        outlived the change to another spool of its material and colour when no plate was sliced while the tray was
+        empty. Only what two looks in a row agree on is ended, as one report may carry a piece of the AMS; and a tray is
+        empty when the status says so (the external holder never does)."""
+        import guard_learn
+        if 'ams' not in status: return
+        book, trays, empty = state.get('spools', {}).get(self.serial, {}), fg.trays_of(status)[0], guard_learn.emptied(status)
+        by = {t['label']: t for t in trays}
+        gone = {l: why for l, e in book.items() if e['at'] <= at for why in [ended(e, by.get(l), l in empty)] if why}
+        agreed, self.going = {l: why for l, why in gone.items() if self.going.get(l) == why}, gone
+        if agreed or any(l in by and l not in gone and not e.get('loaded') and e['at'] <= at for l, e in book.items()):
+            fg.update_state(lambda st: settle(st.get('spools', {}).get(self.serial, {}), trays, empty, agreed, at))
 
     def restart(self, state):
         """The printer has its first entered amount while followed for learning: as a follower started now would, the

@@ -296,3 +296,45 @@ def test_a_new_follower_knows_the_job_it_counted_was_over(state):
     assert gl.JobWatch('SERIAL', CFG).look(job('RUNNING', 30)) and a3()['grams'] == 160 and not a3().get('stale')
     gl.JobWatch('SERIAL', CFG).look(job('FINISH', 100))
     assert gl.JobWatch('SERIAL', CFG).look(job('PREPARE'), gap=True) and a3()['stale']        # the computer was off overnight
+
+RED = dict(colour='C12E1F', fid='GFA00')                                                  # a red spool with a tag, beside the one without
+
+def applied(status, label='A1'):
+    """The tray as a check sees it, the entered amounts applied; None when it is not loaded."""
+    return next((t for t in gl.apply(fg.trays_of(status)[0], 'SERIAL', 'ams' in status) if t['label'] == label), None)
+
+def test_an_amount_typed_while_the_spool_is_on_the_scale_stands_until_the_spool_is_back(state):
+    """The spool is taken out of A1 and weighed, and its weight typed while it is still on the scale: the check that
+    follows sees A1 empty. The entry stands, applies when the spool is back in A1, and ends when A1 is empty again."""
+    loaded, out = printing('IDLE', [spool(0), spool(1, 500, **RED)]), printing('IDLE', [{'id': '0'}, spool(1, 500, **RED)])
+    gl.enter('SERIAL', {'label': 'A1', 'type': 'PLA', 'colour': '#101010'}, 640)
+    assert applied(out) is None and gl.serials() == ['SERIAL']
+    assert applied(loaded)['grams'] == 640 and applied(loaded)['entered']
+    assert applied(out) is None and gl.serials() == [] and 'A1: amount ended: the tray is empty' in (state / 'guard.log').read_text()
+
+def test_a_status_that_shows_no_ams_tray_ends_no_entry(state):
+    """A report still in pieces (an "ams" part with no trays in it yet) reads as no spool loaded at all: it ends no
+    entry, though the entry's tray was seen loaded before. Nor does a status that shows the external spool alone."""
+    loaded = printing('IDLE', [spool(0), spool(1, 500, **RED)])
+    gl.enter('SERIAL', {'label': 'A1', 'type': 'PLA', 'colour': '#101010'}, 640); assert applied(loaded)['grams'] == 640
+    piece = {'gcode_state': 'IDLE', 'ams': {'tray_now': '255', 'version': 4}}
+    assert applied(piece) is None and gl.apply([], 'SERIAL', True) == [] and gl.serials() == ['SERIAL']
+    assert applied(dict(piece, vt_tray={'id': '254', 'tray_type': 'PLA', 'tray_color': '101010FF'})) is None and gl.serials() == ['SERIAL']
+
+def test_the_follower_ends_an_amount_whose_spool_is_gone_once_two_looks_agree(state, monkeypatch):
+    """900 g are entered for A1. The spool is taken out, and a 150 g remnant of the same material and colour put in; no
+    plate is sliced in between, so no check sees the empty tray. The follower does: one look at it ends nothing (a
+    report may carry a piece of the AMS), the second ends the entry, and the remnant's amount is unknown. Another
+    colour in the tray, or a spool the printer measures, end an entry the same way."""
+    loaded, out = printing('IDLE', [spool(0), spool(1, 500, **RED)]), printing('IDLE', [{'id': '0'}, spool(1, 500, **RED)])
+    def followed(*statuses):
+        gl.enter('SERIAL', {'label': 'A1', 'type': 'PLA', 'colour': '#101010'}, 900); watch = gl.JobWatch('SERIAL', dict(CFG, learn=False)); watch.see(loaded)
+        for status in statuses: watch.see(status)
+        return gl.serials()
+    assert followed(out, loaded, out) == ['SERIAL'] and fg.load_state()['spools']['SERIAL']['A1']['loaded']
+    assert followed(out, out) == [] and (state / 'guard.log').read_text().count('A1: amount ended: the tray is empty') == 1
+    running(monkeypatch, loaded); assert fg.evaluate(needing(300), CFG, 'Next')['rows'][0]['status'] == 'UNKNOWN'
+    white = printing('IDLE', [spool(0, colour='FFFFFF'), spool(1, 500, **RED)]); assert followed(white) == ['SERIAL'] and followed(white, white) == []
+    tagged = printing('IDLE', [spool(0, 700), spool(1, 500, **RED)]); assert followed(tagged) == ['SERIAL'] and followed(tagged, tagged) == []
+    log = (state / 'guard.log').read_text()
+    assert 'A1: amount ended: the tray holds PLA #FFFFFF now' in log and 'A1: amount ended: the printer measures the tray now' in log
