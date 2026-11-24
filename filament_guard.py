@@ -111,17 +111,24 @@ def fixed_addresses(held, wrong):
         else: wrong.append(f'printers in config.json: the address for the printer …{serial[-4:]} is {shown(entry)}, not "<address>" or {{"ip": "<address>"}}: it is left out')
     return out
 
+def config_held():
+    """(the JSON object config.json holds, None), or ({}, why) when it cannot be read as one; ({}, None) without a file.
+    A byte order mark before the JSON is fine: Windows PowerShell 5.1 and older Notepad write one."""
+    try:
+        with open(CONFIG, encoding='utf-8-sig') as f: held = json.load(f)
+    except FileNotFoundError: return {}, None
+    except ValueError as e: return {}, str(e)
+    return (held, None) if type(held) is dict else ({}, 'it does not hold a JSON object')
+
 def load_config():
     """The settings: DEFAULTS, with what config.json holds in their place. Every value is checked (SETTINGS,
     fixed_addresses): one that is not what its setting takes leaves that setting alone at its default. cfg['_wrong'] has
     a line for each, and for a file that cannot be read (and is not there when nothing is wrong): the guard shows them
     on a card when it starts, the self-test as failures. They are logged here and never saved."""
-    cfg, wrong, held = dict(DEFAULTS), [], {}
-    try:
-        with open(CONFIG, encoding='utf-8') as f: held = json.load(f)
-        if type(held) is not dict: held = {}; wrong.append('config.json cannot be read (it does not hold a JSON object): the defaults are in use')
-    except FileNotFoundError: pass
-    except (OSError, ValueError) as e: wrong.append(f'config.json cannot be read ({e}): the defaults are in use')
+    cfg, wrong = dict(DEFAULTS), []
+    try: held, why = config_held()
+    except OSError as e: held, why = {}, f'{e.__class__.__name__}: {e}'
+    if why: wrong.append(f'config.json cannot be read ({why}): the defaults are in use')
     for key, (fits, what) in SETTINGS.items():
         if key in held and fits(held[key]): cfg[key] = held[key]
         elif key in held: wrong.append(f'{key} in config.json is {shown(held[key])}, not {what}: the default is in use')
@@ -162,8 +169,13 @@ def weigh_doubt(grams, reading):
     return f'{grams:.0f} g weighed, {reading:.0f} g read by the printer: {apart:.0f} g apart. Save again if the weight is right.'
 
 def save_config(cfg):
-    """Only what differs from DEFAULTS goes into config.json: a full copy would pin today's defaults for good."""
+    """Only what differs from DEFAULTS goes into config.json: a full copy would pin today's defaults for good. A file
+    there that cannot be read (written by hand, with a comma too many) is copied to config.json.unreadable first: what
+    was written in it can then be put right, where the saved setting alone would have taken its place."""
     os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+    if config_held()[1]:
+        with open(CONFIG, 'rb') as f, open(CONFIG + '.unreadable', 'wb') as copy: copy.write(f.read())
+        log('config.json could not be read: copied to config.json.unreadable before a setting was saved')
     json.dump({k: v for k, v in cfg.items() if DEFAULTS.get(k) != v and k != '_wrong'}, open(CONFIG, 'w', encoding='utf-8'), indent=1)
 
 def log(msg):

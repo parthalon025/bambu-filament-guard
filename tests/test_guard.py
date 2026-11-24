@@ -402,3 +402,11 @@ def test_the_self_test_fails_on_a_setting_that_is_not_in_use(state, monkeypatch)
     assert fg.selftest(fg.load_config())[0] == wrong
     monkeypatch.setattr(fg, 'bs_conf', no_studio)
     assert fg.selftest(fg.load_config())[0] == wrong                                      # also where Bambu Studio's configuration is not found
+
+@pytest.mark.windows
+def test_the_guard_says_at_its_start_that_its_settings_cannot_be_read(state, monkeypatch):
+    """A comma too many in config.json: the defaults are in use, and the first card says so, where one line in the log did."""
+    (state / 'config.json').write_text('{"margin_pct": 25,}')
+    result, [(headline, [(mark, line), where], tone)] = started(monkeypatch)
+    assert (result, headline, mark, tone) == (0, 'Settings in config.json are not in use', False, 'danger')
+    assert line.startswith('config.json cannot be read (') and 'line 1 column 1' in line and line.endswith('): the defaults are in use.')

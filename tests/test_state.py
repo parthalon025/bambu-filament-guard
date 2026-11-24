@@ -19,6 +19,11 @@ while time.time() < float(sys.argv[3]): pass
 for i in range(int(sys.argv[4])): fg.update_state(lambda st: st.__setitem__(sys.argv[5], st.get(sys.argv[5], 0) + 1))
 '''
 
+def why_not_json(text):
+    """What Python's JSON reader says of a text it cannot read: its words differ from one Python to the next."""
+    with pytest.raises(ValueError) as e: json.loads(text)
+    return str(e.value)
+
 def test_settings_file_holds_only_what_was_changed(state):
     cfg = fg.load_config(); cfg['ok_seconds'] = 0; fg.save_config(cfg)
     assert json.load(open(fg.CONFIG)) == {'ok_seconds': 0} and fg.load_config()['popup_on'] == fg.DEFAULTS['popup_on']
@@ -32,7 +37,7 @@ def test_state_file_is_never_replaced_by_an_empty_one(state):
 def test_damaged_settings_fall_back_to_the_defaults(state):
     (state / 'config.json').write_text('{"ok_seconds": ')
     cfg = fg.load_config(); wrong = cfg.pop('_wrong')
-    assert cfg == fg.DEFAULTS and wrong == ['config.json cannot be read (Expecting value: line 1 column 16 (char 15)): the defaults are in use']
+    assert cfg == fg.DEFAULTS and wrong == [f"config.json cannot be read ({why_not_json('{\"ok_seconds\": ')}): the defaults are in use"] and 'line 1 column 16' in wrong[0]
 
 @pytest.mark.windows
 def test_two_processes_writing_the_state_file_lose_nothing(state):
@@ -75,3 +80,24 @@ def test_settings_that_are_no_json_object_leave_the_defaults_in_use_and_say_so(s
     assert fg.load_config()['popup_on'] == fg.DEFAULTS['popup_on'] and fg.load_config()['_wrong']
     (state / 'config.json').write_text('{"popup_on": ["SHORT"], "at_send": false}')
     assert (fg.load_config()['popup_on'], fg.load_config()['at_send'], fg.load_config().get('_wrong')) == (['SHORT'], False, None)
+
+def test_settings_written_with_a_byte_order_mark_are_read(state):
+    """Windows PowerShell 5.1 (Set-Content -Encoding UTF8) and older Notepad put a byte order mark before the JSON. Such
+    a file was ignored, with one line in the log: the guard ran on the defaults the user had changed."""
+    (state / 'config.json').write_bytes(b'\xef\xbb\xbf{"margin_pct": 25, "popup_on": ["SHORT", "UNKNOWN"]}')
+    cfg = fg.load_config()
+    assert (cfg['margin_pct'], cfg['popup_on']) == (25, ['SHORT', 'UNKNOWN']) and '_wrong' not in cfg
+
+def test_settings_the_guard_cannot_read_are_kept_when_a_setting_is_saved(state):
+    """A trailing comma left by hand, or a file in UTF-16 (PowerShell's ">"): the guard says that the defaults are in
+    use, and the next setting saved (a menu click, another empty spool in the amount window) does not cost what was
+    written: the file is copied to config.json.unreadable first. It was replaced by the one key saved, with no copy."""
+    for written in (b'{"margin_pct": 25, "printers": {"SERIAL": {"ip": "192.0.2.50"}},}', '{"margin_pct": 25}'.encode('utf-16')):
+        (state / 'config.json').write_bytes(written)
+        cfg = fg.load_config()
+        assert cfg['margin_pct'] == 10 and len(cfg['_wrong']) == 1 and cfg['_wrong'][0].startswith('config.json cannot be read (') and cfg['_wrong'][0].endswith('): the defaults are in use')
+        cfg['empty_spool_g'] = 212.0; fg.save_config(cfg)
+        assert (state / 'config.json.unreadable').read_bytes() == written and json.load(open(fg.CONFIG)) == {'empty_spool_g': 212.0}
+    text = '{"margin_pct": 25, "ok_seconds": 0,}'; (state / 'config.json').write_text(text)
+    assert fg.load_config()['_wrong'] == [f'config.json cannot be read ({why_not_json(text)}): the defaults are in use'] and ': line ' in why_not_json(text)   # the place is named
+    assert 'config.json could not be read: copied to config.json.unreadable before a setting was saved' in (state / 'guard.log').read_text()
