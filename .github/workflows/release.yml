@@ -28,7 +28,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install -r requirements-dev.txt
-      - run: python -m pytest test_filament_guard.py -q
+      - run: python -m pytest -q
       - name: The amount window, as it looks on Windows
         run: python .github/scripts/amount_window.py dist/windows
       - run: python build.py
