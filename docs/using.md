@@ -13,7 +13,7 @@ What the guard does from the moment a plate is sliced, what its card and icon sh
 
 Bambu Studio has no plugin interface (v02.09.01.70: the `plugins` folder holds its network libraries only), so the guard runs beside it:
 
-1. Bambu Studio writes the G-code of each plate it slices to `%TEMP%\bamboo_model\<day>\<time>#<pid>#<id>\Metadata\.<pid>.<n>.gcode`. The guard watches that folder.
+1. Bambu Studio writes the G-code of each plate it slices to `bamboo_model\<day>\<time>#<pid>#<id>\Metadata\.<pid>.<n>.gcode` in its temp folder: the one Windows gives it, `%TMP%`, else `%TEMP%`. The guard watches that folder. It looks under the folder Windows names, under `%TMP%` and under `%TEMP%`, which are not always the same folder, and in Bambu Studio's own data folder, where Bambu Studio writes when the temp drive is nearly full.
 2. From the G-code it reads the grams each filament needs (purge and prime tower included), and its material, colour, product and nozzle.
 3. It asks the printer the plate was sliced for what is left on every spool (read-only status over the LAN). When the printer is running a print, it first takes off each spool what that print still needs from it: the answer is for the moment the new print could start. See [The running print](running-print.md).
 4. The answer appears as a "Filament check" card inside Bambu Studio's window, bottom right, under the slicing result. With enough of everything it is one line that goes away after 8 seconds; when a filament falls short it is the full table, and it stays until closed or until the next slice.
@@ -63,14 +63,14 @@ Settings are saved to `config.json` beside the script, which holds only what was
 |---|---|
 | Enough | One matching spool holds the need plus the reserve. |
 | Tight | One spool holds the need, without the reserve. |
-| Needs two spools | No single spool holds it; the matching spools together do. AMS auto refill must be on. |
-| Not enough | The matching spools together hold less than the need. |
+| Needs two spools | No single spool holds it; spools that AMS auto refill goes on between do together: the same product and colour, both in an AMS. AMS auto refill must be on. |
+| Not enough | The matching spools together hold less than the need, or hold it only with a spool AMS auto refill does not go on to (another product or shade, the external spool): the note names those and their amounts. |
 | Not loaded | No spool of that material is loaded where the print's nozzle can reach it. |
 | Colour not loaded | The material is loaded, this colour of it is not. The nearest spool is named and counts for nothing. |
-| Unknown | The matching spool reports no remaining amount. Shown as one line, like "enough", unless `popup_on` names it. |
+| Unknown | The matching spool reports no remaining amount, or Bambu Studio gives the filament no weight (its profile has density 0). Shown as one line, like "enough", unless `popup_on` names it. |
 
-A spool matches a filament when it is the same material, on the nozzle that prints it, in the project's colour; spools of the same product come first. A spool of similar colour but another product is named in the note and not counted.
+A spool matches a filament when it is the same material, on the nozzle that prints it, in the project's colour. While a spool of the project's own product is loaded, only that product counts: a spool of similar colour but another product is named in the note and not counted. When none is loaded, a spool of another product counts, because you can pick it at "Send print job", and the note names it whatever the result, "enough" included: "B3 is PLA Silk+, another product than the project's Bambu PLA Basic".
 
 ### The reserve
 
-The AMS's figure is an estimate: it counts what it has fed, so its error grows as the spool empties. On 2026-11-19 a 1 kg spool reported at 105 g ran dry after 84-85 g, one gram before the end of a print that needed 85.3 g. So "enough" asks for the need plus the larger of 10 % of the need (`margin_pct`) and 3 % of a spool's full weight (`spool_reserve_pct`: 30 g on a 1 kg spool). The spool is the largest of those the filament could be printed from, whichever of them is the fullest: with a 250 g and a 1 kg spool of one filament loaded, the 3 % is 30 g. Below that the result is "tight", and the full card shows. An experimental setting, off unless you turn it on, measures the reserve from the guard's own past forecasts instead (see [Learning, the measured reserve](learning.md#the-measured-reserve)).
+The AMS's figure is an estimate: it counts what it has fed, so its error grows as the spool empties. On 2026-11-19 a 1 kg spool reported at 105 g ran dry after 84-85 g, one gram before the end of a print that needed 85.3 g. So "enough" asks for the need plus the larger of 10 % of the need (`margin_pct`) and 3 % of a spool's full weight (`spool_reserve_pct`: 30 g on a 1 kg spool). The spool is the largest of those the filament could be printed from, whichever of them is the fullest: with a 250 g and a 1 kg spool of one filament loaded, the 3 % is 30 g. A spool whose full weight the printer does not report counts as a 1 kg spool here, and so does a spool whose amount you entered by hand: that amount rests on a kitchen scale and a typed empty-spool weight. Below the reserve the result is "tight", and the full card shows. An experimental setting, off unless you turn it on, measures the reserve from the guard's own past forecasts instead (see [Learning, the measured reserve](learning.md#the-measured-reserve)).

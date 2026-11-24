@@ -11,7 +11,9 @@ short. The card comes back beside the "Send print job" dialog while a warning st
   filament_guard.py status | stop      is the guard running / stop it
   filament_guard.py check [FILE]       check one file now: .gcode or .gcode.3mf; no FILE = the newest slice of the
                                        running Bambu Studio. Options: --times N (N prints of it), --popup, --json.
-                                       Exit code 0 enough, 1 tight / unknown, 2 short, 3 not checked.
+                                       A file with several plates: each plate, then all its plates together.
+                                       Exit code 0 enough, 1 tight / unknown, 2 short, 3 not checked (also a file
+                                       or a command line that cannot be read: one line says why).
   filament_guard.py trays              the spools every known printer reports
   filament_guard.py learned [--forget [TRAY]] what was learned from previous prints, per tray (--forget: start again,
                                        for one tray only when named; --forget-weigh TRAY: take back that tray's latest
@@ -233,19 +235,21 @@ def split_list(value):
     return [p.strip().strip('"') for p in parts]
 
 def parse_plate(text):
-    """{'printer_model', 'time', 'layers', 'filaments': [{slot, type, fid, colour, name, grams, nozzle}]} from the head of a
-    Bambu Studio G-code. None while the file is not complete (Bambu Studio writes the totals last)."""
+    """{'printer_model', 'time', 'layers', 'filaments': [{slot, type, fid, colour, name, grams, nozzle, density}]} from the
+    head of a Bambu Studio G-code. None while the file is not complete (Bambu Studio writes the totals last). grams is
+    None for a filament in use that Bambu Studio gives no weight: how much it needs cannot be told."""
     if '; HEADER_BLOCK_END' not in text or '; CONFIG_BLOCK_END' not in text: return None
     head, _, body = text.partition('; HEADER_BLOCK_END')
     def header(key):
-        m = re.search(r'^; ' + re.escape(key) + r'\s*:\s*(.*)$', head, re.M)
+        m = re.search(r'^; ' + re.escape(key) + r'[ \t]*:[ \t]*(.*)$', head, re.M)       # not \s: across a line end, a line without a value takes the next line for it
         return m.group(1).strip() if m else None
     def setting(key):
         m = re.search(r'^; ' + re.escape(key) + r' = (.*)$', body, re.M)
         return split_list(m.group(1)) if m and m.group(1).strip() else []
     weights = header('total filament weight [g]')
     if weights is None: return None
-    weights = [float(w) for w in weights.split(',') if w.strip()]
+    totals, weights = weights, [float(w) for w in weights.split(',') if w.strip()]
+    if not all(math.isfinite(w) for w in weights): raise ValueError(f'a filament total that is not an amount: "{totals}"')    # float() takes "nan" and "inf"
     types, colours, fids, names = setting('filament_type'), setting('filament_colour'), setting('filament_ids'), setting('filament_settings_id')
     used = header('filament')                      # the slots the totals belong to, e.g. "1,3,4"
     if used: slots = [int(s) for s in used.split(',') if s.strip()]
@@ -256,31 +260,58 @@ def parse_plate(text):
     # be used by the nozzle its AMS is plumbed to, so the nozzle is part of what "enough" means.
     nozzle_of = setting('filament_map') if len(setting('nozzle_diameter')) > 1 else []
     def at(lst, slot, default=''): return lst[slot - 1] if 0 < slot <= len(lst) else default
+    def numbers(key):
+        try: return [float(v) for v in (header(key) or '').split(',') if v.strip()]
+        except ValueError: return []
+    lengths, densities = numbers('total filament length [mm]'), numbers('filament_density')    # for each filament in use, like the totals; for each slot
+    if len(lengths) != len(weights): lengths = []
     filaments = []
-    for slot, grams in zip(slots, weights):
-        if grams <= 0: continue
+    for n, (slot, grams) in enumerate(zip(slots, weights), start=1):
+        if grams <= 0:
+            # 0.00 g is also what Bambu Studio writes for a filament that is printed, when its profile has density 0 (a
+            # profile made by hand, until one is entered). Dropped as not in use, a two-colour plate once read "enough" on
+            # the other colour alone. In use: named by "; filament:", and with a length, or a density of 0.
+            if not used or not (at(lengths, n, 0.0) > 0 or at(densities, slot, None) == 0): continue
+            grams = None
         filaments.append({'slot': slot, 'type': at(types, slot, '?'), 'fid': at(fids, slot), 'colour': at(colours, slot, '#808080')[:7].upper(),
                           'name': re.sub(r'\s*@.*$', '', at(names, slot)), 'grams': grams,
-                          'nozzle': {'1': 'left', '2': 'right'}.get(at(nozzle_of, slot))})
+                          'nozzle': {'1': 'left', '2': 'right'}.get(at(nozzle_of, slot)), 'density': at(densities, slot, None)})
     time_line = re.search(r'total estimated time: ([^;\n]+)', head)
     layers = header('total layer number')
     return {'printer_model': (setting('printer_model') or [''])[0], 'time': time_line.group(1).strip() if time_line else '',
             'layers': int(layers) if layers and layers.isdigit() else None, 'filaments': filaments}
 
 def plates_of_file(path):
-    """[(label, plate)] of a .gcode file or of every sliced plate in a .gcode.3mf."""
+    """[(label, plate)] of a .gcode file or of every sliced plate in a .gcode.3mf; the plate is None for a plate of a 3MF
+    whose G-code is not complete, which the caller has to say: left out, the rest would pass for the whole file.
+    ValueError, with the reason, for a file that is not one or cannot be read: a 3MF that is damaged, cut short or
+    encrypted included."""
     if zipfile.is_zipfile(path):
+        import zlib
         out = []
-        with zipfile.ZipFile(path) as z:
-            names = sorted((n for n in z.namelist() if re.fullmatch(r'Metadata/plate_\d+\.gcode', n)), key=lambda n: int(re.findall(r'\d+', n)[0]))
-            for n in names:
-                with z.open(n) as f: plate = parse_plate(read_head(f))
-                if plate: out.append(('plate ' + re.findall(r'\d+', n)[0], plate))
+        try:
+            with zipfile.ZipFile(path) as z:
+                names = sorted((n for n in z.namelist() if re.fullmatch(r'Metadata/plate_\d+\.gcode', n)), key=lambda n: int(re.findall(r'\d+', n)[0]))
+                for n in names:
+                    with z.open(n) as f: out.append(('plate ' + re.findall(r'\d+', n)[0], parse_plate(read_head(f))))
+        except (zipfile.BadZipFile, zlib.error, RuntimeError, EOFError) as e: raise ValueError(f'this 3MF cannot be read ({e})')
         if not out: raise ValueError('no sliced plate in this 3MF: slice it first (a project file holds no G-code)')
         return out
     with open(path, 'rb') as f: plate = parse_plate(read_head(f))
     if not plate: raise ValueError('not a complete Bambu Studio G-code file')
     return [('', plate)]
+
+def plates_together(plates):
+    """One plate that needs what the plates of a file need together, for "Print all plates": the grams of each filament
+    added up over the plates. A filament is one material, colour, product and nozzle, whichever slot it is in; without
+    a weight on one plate (parse_plate) it has none in all."""
+    sums = {}
+    for plate in plates:
+        for f in plate['filaments']:
+            key = (f['type'].upper(), f['colour'], f['fid'], f['nozzle'])
+            if key in sums: sums[key]['grams'] = None if None in (sums[key]['grams'], f['grams']) else sums[key]['grams'] + f['grams']
+            else: sums[key] = dict(f)
+    return {'printer_model': plates[0]['printer_model'], 'time': '', 'layers': None, 'filaments': list(sums.values())}
 
 def lines_of(stream, size=1 << 20):
     """The lines of a binary stream, read in large pieces: a 3MF member's own readline is too slow for 4 million lines."""
@@ -318,7 +349,7 @@ def layer_profile(stream, plate, why=None):
     command. A filament whose sum is further from the header's total than PROFILE_TOLERANCE is not understood; within it,
     its lists are scaled to the total, so they add up to it exactly. None also for a file that is not the one the plate
     was read from (its totals differ), that ends before its first or its last layer, whose layers are out of order, or
-    that lacks a filament's density or diameter."""
+    that lacks a filament's density or diameter, or the weight of a filament in use (parse_plate)."""
     def refuse(reason):
         if why is not None: why.append(reason)
     head, lines = {}, lines_of(stream)
@@ -335,6 +366,7 @@ def layer_profile(stream, plate, why=None):
     def numbers(key):
         try: return [float(v) for v in head.get(key, b'').split(b',') if v.strip()]
         except ValueError: return []
+    if any(f['grams'] is None for f in plate['filaments']): return refuse('a filament of it has no weight in the header')
     if [w for w in numbers(b'total filament weight [g]') if w > 0] != [f['grams'] for f in plate['filaments']]: return refuse('its totals are not the plate\'s: the file has changed')
     density, diameter, holds = numbers(b'filament_density'), numbers(b'filament_diameter'), numbers(b'nozzle_volume')
     nozzle_of = [int(z) - 1 for z in numbers(b'filament_map')] if len(numbers(b'nozzle_diameter')) > 1 else []
@@ -410,13 +442,29 @@ def layer_profile(stream, plate, why=None):
         return None
     return out
 
+def temp_roots():
+    """The folders Bambu Studio may write its temporary G-code under, each once. Its temp folder is the one Windows
+    gives a program (GetTempPath: %TMP%, else %TEMP%), not always the one Python goes by (%TEMP% before %TMP%, and
+    TMPDIR before both): with only one of the two moved, the guard would watch a folder Bambu Studio never writes to.
+    So that one, both variables', Python's, and Bambu Studio's own data folder."""
+    roots, k32 = [], _kernel32()
+    if k32:
+        buf = ctypes.create_unicode_buffer(1024)
+        if 0 < k32.GetTempPathW(len(buf), buf) < len(buf): roots.append(buf.value)
+    roots += [os.environ.get('TMP'), os.environ.get('TEMP'), tempfile.gettempdir(), os.path.join(BS_DATA, 'tmp')]
+    distinct = {}
+    for root in roots:
+        if root: distinct.setdefault(os.path.normcase(os.path.realpath(root)), os.path.abspath(root))    # one folder under two spellings would show each slice twice
+    return list(distinct.values())
+
 def temp_gcodes():
     """The G-code of every plate the running Bambu Studio copies have sliced: <temp>/bamboo_model/<day>/<time>#<pid>#<id>/
     Metadata/.<pid>.<n>.gcode (PartPlate::get_tmp_gcode_path, v02.09.01.70). With under 2 GB free in the temp folder
-    Bambu Studio uses its own data folder instead."""
+    Bambu Studio uses its own data folder instead. The folder's own path is taken as it is spelt (glob.escape): a
+    "[" in it would otherwise be read as part of the pattern, and nothing found."""
     out = []
-    for root in (tempfile.gettempdir(), os.path.join(BS_DATA, 'tmp')):
-        out += glob.glob(os.path.join(root, 'bamboo_model', '*', '*', 'Metadata', '.*.gcode'))
+    for root in temp_roots():
+        out += glob.glob(os.path.join(glob.escape(root), 'bamboo_model', '*', '*', 'Metadata', '.*.gcode'))
     return out
 
 def project_title(gcode_path):
@@ -601,13 +649,17 @@ def assess(fil, trays, cfg, times=1):
     """One filament of the print against the loaded spools.
     OK       one spool holds the need plus the reserve (see DEFAULTS)
     TIGHT    one spool holds the need, without the reserve
-    SPLIT    no single spool holds it, the matching spools together do (the AMS must refill from one to the next)
-    SHORT    the matching spools together hold less than the need
+    SPLIT    no single spool holds it; matching spools that AMS auto refill goes on between do together (same_filament,
+             both in an AMS)
+    SHORT    the matching spools together hold less than the need, or hold it only with a spool the AMS does not go
+             on to by itself (another product or shade, the external spool): those are named, with their amounts
     MISSING  no spool of this material is loaded where the print's nozzle can reach it
     COLOUR   the material is loaded, this colour of it is not: the nearest spool is named, and counts for nothing
-    UNKNOWN  the matching spool reports no remaining amount
-    Matching: same material type, on the nozzle that prints it, of the project's colour (the same product first)."""
-    need = fil['grams'] * times
+    UNKNOWN  the matching spool reports no remaining amount, or Bambu Studio gives the filament no weight (parse_plate)
+    Matching: same material type, on the nozzle that prints it, of the project's colour. Of the project's own product
+    while a spool of it is loaded; otherwise of any product, since that spool can be picked at "Send print job", and
+    the note then names it, whatever the answer."""
+    need = fil['grams'] * times if fil['grams'] is not None else None
     row = {'slot': fil['slot'], 'type': fil['type'], 'name': fil['name'], 'colour': fil['colour'], 'nozzle': fil['nozzle'], 'need': need,
            'trays': [], 'best': None, 'total': None, 'note': ''}
     same = [t for t in trays if t['type'].upper() == fil['type'].upper()]
@@ -623,6 +675,10 @@ def assess(fil, trays, cfg, times=1):
         row['note'] = (f"no {fil['type']} of this colour is loaded; the nearest is {t['label']} {t['name'] or t['type']} ({t['colour']})"
                        + (f", {t['grams']:.0f} g" if t['grams'] is not None else ''))
         return row
+    if need is None:                                         # nothing to hold against the spools: not "enough", whatever they hold
+        row['status'] = 'UNKNOWN'
+        row['note'] = 'Bambu Studio gives no weight for this filament' + (" (its profile's density is 0)" if fil.get('density') == 0 else '')
+        return row
     group = [t for t in near if fil['fid'] and t['fid'] == fil['fid']] or near
     group.sort(key=lambda t: -(t['grams'] or 0))
     row['sliced'] = need                                     # what the slicer says; the need below never falls under it
@@ -636,18 +692,24 @@ def assess(fil, trays, cfg, times=1):
                      'spool': t.get('spool'), 'fid': t.get('fid'), 'weight': t.get('weight')} for t in group]
     known = [t['grams'] for t in group if t['grams'] is not None]
     unknown = [t['label'] for t in group if t['grams'] is None]
+    other = [t for t in group if fil['fid'] and t['fid'] != fil['fid']]     # no spool of the project's product is loaded: these count in its place
+    stands_in = (' and '.join(f"{t['label']} is {t['name'] or t['type']}" for t in other) + f", another product than the project's {fil['name'] or fil['type']}") if other else ''
     if not known:
         stale = [t['label'] for t in group if t.get('stale')]
         row['status'] = 'UNKNOWN'
         row['note'] = (f"the amount entered for {', '.join(stale)} is out of date: a print the guard could not count has drawn on it" if stale
-                       else f"{', '.join(unknown)} reports no remaining amount")
+                       else f"{', '.join(unknown)} reports no remaining amount") + (f'; {stands_in}' if stands_in else '')
         return row
     row['best'], row['total'] = max(known), sum(known)
     # The reserve is a share of the largest full weight among the spools the filament could be printed from, not of the
     # fullest spool's: which spool is the fullest changes with what was learned of the trays, and the reserve must never
     # be smaller for that. (A 1 kg spool counted lower by another tray's run-dry once left a 250 g spool the fullest,
     # with 7.5 g for a reserve where 1.3.0 asked 30 g.) The spools are the same whatever was learned, so their largest is.
-    reserve = max(need * cfg['margin_pct'] / 100.0, max(t.get('weight') or 0 for t in group) * cfg['spool_reserve_pct'] / 100.0)
+    # A spool whose full weight the printer does not report counts as a 1 kg spool, and so does one whose amount was
+    # entered by hand: that figure rests on a kitchen scale and a typed empty-spool weight, and its "full weight" is
+    # only the amount first entered. Either had nothing of the spool for a reserve, or 3 % of what was typed.
+    full = max(1000.0 if t.get('entered') or not t.get('weight') else t['weight'] for t in group)
+    reserve = max(need * cfg['margin_pct'] / 100.0, full * cfg['spool_reserve_pct'] / 100.0)
     # Measured from the guard's own past forecasts (guard_learn), within its floor. In use ('margin': the setting on, and
     # earned) it replaces the fixed reserve and may be smaller. Otherwise ('floor') it can only raise the fixed one:
     # where past prints fell further short than the fixed reserve covers, the answer must not be the looser of the two.
@@ -658,10 +720,22 @@ def assess(fil, trays, cfg, times=1):
         measure = lambda q: max(floor_g, floor_share * need, q * (row['sliced'] + guard_learn.MARGIN_K))
         reserve = measure(group[0]['margin']) if group[0].get('margin') is not None else max(fixed, measure(max(floors)))
     row['reserve'], row['measured'], row['raised'] = reserve, group[0].get('margin') is not None, group[0].get('margin') is None and reserve > fixed
+    # Two spools hold it together only where the AMS goes on from one to the other by itself: the spools of one filament
+    # (same_filament), both in an AMS. The sum of any others once read "AMS auto refill must be on" across an AMS tray
+    # and the external spool, and across two products 31 apart in colour.
+    in_ams = lambda t: t['grams'] is not None and not t['label'].startswith('Ext')
+    chain = max(([t] + [o for o in group if in_ams(t) and in_ams(o) and same_filament(t, o)] for t in group if t['grams'] is not None), key=lambda c: sum(t['grams'] for t in c))
+    reach, apart = sum(t['grams'] for t in chain), [t for t in group if t['grams'] and t not in chain]
     if row['best'] >= need + reserve: row['status'] = 'OK'
     elif row['best'] >= need: row['status'] = 'TIGHT'; row['note'] = (f"{row['best'] - need:.0f} g to spare, and " + (
         f"past prints put the figure up to {reserve:.0f} g out" if row['measured'] or row['raised'] else f"the AMS's figure can be {reserve:.0f} g out"))
-    elif row['total'] >= need: row['status'] = 'SPLIT'; row['note'] = 'only across these spools: AMS auto refill must be on'
+    elif reach >= need:
+        row['status'] = 'SPLIT'
+        row['note'] = f"only across {'these spools' if len(chain) == len(group) else ' + '.join(t['label'] for t in chain)}: AMS auto refill must be on"
+    elif row['total'] >= need:
+        row['status'] = 'SHORT'
+        row['note'] = (f"short by {need - reach:.0f} g; AMS auto refill does not go on from {' + '.join(t['label'] for t in chain)} to "
+                       + ', '.join(f"{t['label']} ({t['grams']:.0f} g)" for t in apart))
     else: row['status'] = 'SHORT'; row['note'] = f"short by {need - row['total']:.0f} g"
     if unknown and row['status'] in ('SHORT', 'SPLIT', 'TIGHT'): row['note'] += f"; {', '.join(unknown)} holds an unknown amount more"
     said = [x for x in (tray_note(t) for t in group) if x]
@@ -674,6 +748,7 @@ def assess(fil, trays, cfg, times=1):
     alike = [t for t in near if t not in group]              # the same colour to the eye, another product: the user's call, so named, not counted
     if alike and row['status'] in ('SHORT', 'SPLIT', 'TIGHT'):
         row['note'] += '; similar colour: ' + ', '.join(f"{t['label']} {t['name'] or t['type']}" + (f" {t['grams']:.0f} g" if t['grams'] is not None else '') for t in alike)
+    if stands_in: row['note'] += ('; ' if row['note'] else '') + stands_in
     return row
 
 def tray_note(t):
@@ -749,19 +824,21 @@ def pick_printer(model, printers):
     return next((p for p in printers if p['model'] == model), None)
 
 def share_spools(rows, filaments, trays, cfg, times):
-    """Filaments that draw on the same spools (two slots of one colour) are judged on what they need together: each
-    alone can fit a spool that does not hold both."""
-    groups = {}
-    for row, fil in zip(rows, filaments):
-        if row['trays']: groups.setdefault(tuple(t['label'] for t in row['trays']), []).append((row, fil))
-    for labels, members in groups.items():
-        if len(members) < 2: continue
-        total = sum(fil['grams'] for _, fil in members)
-        joint = assess(dict(members[0][1], grams=total), trays, cfg, times)
-        for row, _ in members:
-            if SEVERITY[joint['status']] > SEVERITY[row['status']]: row['status'] = joint['status']
-            row['note'] = (f"filaments {', '.join(str(r['slot']) for r, _ in members)} share {' + '.join(labels)} and need {total * times:.0f} g together"
-                           + (f": {joint['note']}" if joint['note'] else ''))
+    """Filaments that can draw on a spool in common are judged on what they need together: each alone can fit a spool
+    that does not hold both. Two slots of one colour share all their spools; one spool is enough to share (a spool that
+    stands in for another product, the external spool for both nozzles, two shades within the tolerance of one spool).
+    Which of them the print takes from the shared spool cannot be read, so each filament is judged against its own
+    spools with the need of every filament it shares one with added."""
+    labels = [{t['label'] for t in row['trays']} for row in rows]
+    for i, (row, fil) in enumerate(zip(rows, filaments)):
+        with_it = [n for n in range(len(rows)) if n == i or labels[n] & labels[i]]
+        if len(with_it) < 2: continue
+        total = sum(filaments[n]['grams'] for n in with_it)
+        joint = assess(dict(fil, grams=total), trays, cfg, times)
+        shared = [t['label'] for t in row['trays'] if any(t['label'] in labels[n] for n in with_it if n != i)]
+        if SEVERITY[joint['status']] > SEVERITY[row['status']]: row['status'] = joint['status']
+        row['note'] = (f"filaments {', '.join(str(rows[n]['slot']) for n in with_it)} share {' + '.join(shared)} and need {total * times:.0f} g together"
+                       + (f": {joint['note']}" if joint['note'] else ''))
 
 def mark_looked(serial):
     """Notes in the state file that a check looked at the printer (learning follows it, guard_ledger.followed); not again
@@ -774,6 +851,9 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
     """{'title', 'model', 'time', 'times', 'plate', 'printer', 'rows', 'worst', 'error'}: the whole answer for one sliced plate.
     seen: a dict that carries the printers' status from one call to the next, for several plates checked in one go."""
     res = {'title': title, 'model': plate['printer_model'], 'time': plate['time'], 'times': times, 'plate': plate, 'printer': None, 'rows': [], 'worst': 'OK', 'error': None}
+    if all(f['grams'] is None for f in plate['filaments']):  # no row to judge: the worst of none once read "Enough filament", exit code 0
+        res['error'] = 'this plate uses no filament the guard can weigh'
+        return res
     try:
         conf = bs_conf()
         printer = pick_printer(plate['printer_model'], known_printers(conf))
@@ -839,6 +919,9 @@ STATUS_WORD = {'OK': 'enough', 'TIGHT': 'tight', 'SPLIT': 'two spools', 'SHORT':
 def tray_text(row):
     return ' + '.join(t['label'] for t in row['trays']) or '-'
 
+def need_text(row):
+    return f"{row['need']:.1f} g" if row['need'] is not None else '?'
+
 def has_text(row):
     if row['best'] is None: return '?' if row['trays'] else '-'
     return f"{row['best']:.0f} g" + (f" ({row['total']:.0f} g in all)" if row['total'] > row['best'] else '')
@@ -866,7 +949,7 @@ def report_text(res):
         busy += beyond_text(p)
     lines.append(f"  {p['model']}, {p['state']}" + busy + ''.join(f'; {p[key]}' for key in ('reserve', 'unlearned') if p.get(key)))
     for r in res['rows']:
-        lines.append(f"  {r['slot']:>2} {r['type']:<8} {r['colour']} {r['name'][:22]:<22} needs {r['need']:7.1f} g   {tray_text(r):<10} has {has_text(r):<22} {STATUS_WORD[r['status']]}"
+        lines.append(f"  {r['slot']:>2} {r['type']:<8} {r['colour']} {r['name'][:22]:<22} needs {need_text(r):>9}   {tray_text(r):<10} has {has_text(r):<22} {STATUS_WORD[r['status']]}"
                      + (f"  ({r['note']})" if r['note'] else ''))
     return '\n'.join(lines)
 
@@ -1307,7 +1390,7 @@ def selftest(cfg):
     if newest:
         try:
             with open(newest, 'rb') as f: plate = parse_plate(read_head(f))
-            if plate: out.append((True, f"Newest slice ({project_title(newest)}): {len(plate['filaments'])} filament(s), {sum(f['grams'] for f in plate['filaments']):.0f} g"))
+            if plate: out.append((True, f"Newest slice ({project_title(newest)}): {len(plate['filaments'])} filament(s), {sum(f['grams'] or 0 for f in plate['filaments']):.0f} g"))
             else: out.append((None, 'Newest slice: Bambu Studio is still writing it'))
         except (OSError, ValueError) as e: out.append((False, f'Newest slice cannot be read: {e}'))
     elif verified.get('version') == version:
@@ -1393,9 +1476,52 @@ def setup():
     return 0
 
 
+def number_of_prints(text):
+    """--times: 1 or more. 0 and -1 were taken as given, and read "enough" for a plate one print of which is short."""
+    try: n = int(text)
+    except ValueError: n = 0
+    if n < 1: raise argparse.ArgumentTypeError(f'{text!r} is not a number of prints (1 or more)')
+    return n
+
+def check(a, cfg):
+    """The `check` command: the answer for each plate of a file (and for all its plates together), or for the newest
+    slice, as text or as JSON. Returns the exit code: the worst of the answers, 3 with one line of why (with --json,
+    {"error": ...}) when there is nothing to check."""
+    def not_checked(why): print(json.dumps({'error': why}) if a.json else why); return 3
+    def unread(title, why): return {'title': title, 'model': '', 'time': '', 'times': a.times, 'plate': None, 'printer': None, 'rows': [], 'worst': 'OK', 'error': why}
+    cut = []                                                 # the plates of the file whose G-code is not complete
+    if a.file:
+        try: found = plates_of_file(a.file)
+        except (OSError, ValueError) as e: return not_checked(f'{a.file}: {e}')
+        plates, cut = [(os.path.basename(a.file) + (' ' + label if label else ''), plate) for label, plate in found], [label for label, plate in found if not plate]
+    else:
+        newest = newest_gcode()
+        if not newest: return not_checked('no sliced plate found: slice in Bambu Studio first, or name a .gcode / .gcode.3mf file')
+        try:
+            with open(newest, 'rb') as f: plate = parse_plate(read_head(f))
+        except (OSError, ValueError) as e: return not_checked(f'the newest slice ({project_title(newest)}) cannot be read: {e}')
+        if not plate: return not_checked('Bambu Studio is still writing its newest slice')
+        plates = [(project_title(newest), plate)]
+    seen = {}
+    results = [evaluate(plate, cfg, title, a.times, seen) if plate else unread(title, 'the G-code of this plate is not complete in the file') for title, plate in plates]
+    # "Print all plates" needs the sum: each plate alone can fit a spool that does not hold them all, and exit code 0
+    # for such a file once sent a script on. The same reading of the printer serves every answer (seen). A plate
+    # that could not be read has no part in the sum, so there is none.
+    if len(plates) > 1:
+        together = os.path.basename(a.file) + ' all plates together'
+        results.append(unread(together, f"the G-code of {', '.join(cut)} is not complete in the file: what all plates need together cannot be told") if cut
+                       else evaluate(plates_together([plate for _, plate in plates]), cfg, together, a.times, seen))
+    if not a.file: results[0]['pid'], results[0]['plate_no'] = studio_pid(newest), plate_number(newest)
+    print(json.dumps(results, indent=1) if a.json else '\n'.join(report_text(r) for r in results))
+    if a.popup:
+        import guard_ui
+        guard = Guard(cfg, guard_ui.make_root(), standing=False)
+        guard.deliver(max(results, key=exit_code), full=True); guard.loop()
+    return max(exit_code(r) for r in results)
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0]); sub = ap.add_subparsers(dest='cmd')
-    c = sub.add_parser('check'); c.add_argument('file', nargs='?'); c.add_argument('--times', type=int, default=1)
+    c = sub.add_parser('check'); c.add_argument('file', nargs='?'); c.add_argument('--times', type=number_of_prints, default=1)
     c.add_argument('--popup', action='store_true'); c.add_argument('--json', action='store_true')
     sub.add_parser('watch').add_argument('--no-start-line', action='store_true')
     learned = sub.add_parser('learned'); forgets = learned.add_mutually_exclusive_group()
@@ -1403,7 +1529,8 @@ def main(argv=None):
     forgets.add_argument('--forget-weigh', metavar='TRAY', help="take back that tray's latest weigh-in (e.g. C3): the rest of what was learned stays")
     learned.add_argument('--printer', help='with --forget TRAY or --forget-weigh TRAY: the printer, by serial or model, when more than one has that tray')
     for name in ('install', 'uninstall', 'setup', 'status', 'stop', 'trays', 'selftest'): sub.add_parser(name)
-    a = ap.parse_args(argv)
+    try: a = ap.parse_args(argv)
+    except SystemExit as e: raise SystemExit(3 if e.code == 2 else e.code)        # argparse ends a command line it cannot read with 2, which is "not enough" to a script that gates on `check`
     if a.cmd == 'watch': return watch(start_line=not a.no_start_line)
     if a.cmd == 'install': return install()
     if a.cmd == 'uninstall': return uninstall()
@@ -1445,23 +1572,14 @@ def main(argv=None):
                 print(f"  {t['label']:<5} {t['type']:<8} {t['name'][:18]:<18} {t['colour']}  {amount}" + (f"  {t['nozzle']} nozzle" if two and t['nozzle'] else ''))
         return 0
     if a.cmd == 'check':
-        if a.file:
-            try: plates = [(os.path.basename(a.file) + (' ' + label if label else ''), plate) for label, plate in plates_of_file(a.file)]
-            except (OSError, ValueError) as e: print(f'{a.file}: {e}'); return 3
-        else:
-            newest = newest_gcode()
-            if not newest: print('no sliced plate found: slice in Bambu Studio first, or name a .gcode / .gcode.3mf file'); return 3
-            with open(newest, 'rb') as f: plate = parse_plate(read_head(f))
-            if not plate: print('Bambu Studio is still writing its newest slice'); return 3
-            plates = [(project_title(newest), plate)]
-        results = [evaluate(plate, cfg, title, a.times) for title, plate in plates]
-        if not a.file: results[0]['pid'], results[0]['plate_no'] = studio_pid(newest), plate_number(newest)
-        print(json.dumps(results, indent=1) if a.json else '\n'.join(report_text(r) for r in results))
-        if a.popup:
-            import guard_ui
-            guard = Guard(cfg, guard_ui.make_root(), standing=False)
-            guard.deliver(max(results, key=exit_code), full=True); guard.loop()
-        return max(exit_code(r) for r in results)
+        # Whatever happens, a script gets one line and "not checked" (3): a traceback ends Python with 1, which is
+        # "tight". And the line is printed whatever it holds: through a pipe the output is in the ANSI code page, where
+        # a project named outside it once ended the check in UnicodeEncodeError; such characters show as "?".
+        if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(errors='replace')
+        try: return check(a, cfg)
+        except Exception as e:
+            why = ' '.join(f'the check failed ({e.__class__.__name__}: {e})'.split())
+            print(json.dumps({'error': why}) if a.json else why); return 3
     ap.print_help(); return 0
 
 if __name__ == '__main__':

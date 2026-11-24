@@ -101,11 +101,11 @@ When a filament falls short it is the full table, as in the picture at the top, 
 |---|---|
 | Enough | One matching spool holds the need plus the reserve. |
 | Tight | One spool holds the need, without the reserve. |
-| Needs two spools | No single spool holds it; the matching spools together do. AMS auto refill must be on. |
-| Not enough | The matching spools together hold less than the need. |
+| Needs two spools | No single spool holds it; spools that AMS auto refill goes on between do together: the same product and colour, both in an AMS. AMS auto refill must be on. |
+| Not enough | The matching spools together hold less than the need, or hold it only with a spool AMS auto refill does not go on to (another product or shade, the external spool): the note names those and their amounts. |
 | Not loaded | No spool of that material is loaded where the print's nozzle can reach it. |
 | Colour not loaded | The material is loaded, this colour of it is not. The nearest spool is named and counts for nothing. |
-| Unknown | The matching spool reports no remaining amount. Shown as one line, like "enough", unless `popup_on` names it. |
+| Unknown | The matching spool reports no remaining amount, or Bambu Studio gives the filament no weight (its profile has density 0). Shown as one line, like "enough", unless `popup_on` names it. |
 
 The card's buttons, the icon's menu and settings, how spools are matched and how the reserve is set are in [Using the guard](docs/using.md).
 
@@ -122,14 +122,14 @@ python filament_guard.py selftest     # can the guard read this Bambu Studio and
 python filament_guard.py uninstall    # remove the shortcut and stop
 ```
 
-`check` exits with a code a script can gate on: `--json` prints the full answer; `--popup` also shows the card.
+`check` exits with a code a script can gate on: `--json` prints the full answer; `--popup` also shows the card. For a file with several plates it answers for each plate and then for all plates together, which is what "Print all plates" needs; the exit code is the worst of those answers. When there is nothing to answer for (no slice, a file that cannot be read, an error inside the check), it prints one line that says why, as `{"error": "…"}` with `--json`, and exits with 3.
 
 | Exit code | Meaning |
 |---|---|
 | 0 | Enough |
 | 1 | Tight, two spools needed, or amount unknown |
 | 2 | Not enough, or the material or colour is not loaded |
-| 3 | Could not be checked |
+| 3 | Could not be checked: no slice, a file or a printer that cannot be read, or a command line that was not understood (a mistyped option, `--times` below 1) |
 
 > [!TIP]
 > **After a Bambu Studio update**, run `selftest` (or Self-test in the icon's menu). When Bambu Studio writes a slice the guard cannot read, a card says so once for that version, and every such file is in the log.

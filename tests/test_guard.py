@@ -351,3 +351,17 @@ def test_the_card_is_on_the_screen_before_its_weigh_in_offer_is_noted(state, mon
     assert 'C3: that a weigh-in was offered could not be noted (StateBusy: the state folder was held elsewhere for more than 10 s): it may be offered again' in log and 'could not be noted (PermissionError' in log
     assert 'weigh_asked' not in fg.load_state() and fg.evaluate(BLUE, CFG, 'Benchy')['weigh']['label'] == 'C3'   # not noted: offered again
 
+
+@pytest.mark.windows
+def test_a_filament_without_a_weight_does_not_cost_the_card_or_the_self_test(state, tmp_path, monkeypatch):
+    """Bambu Studio gives a filament whose profile has density 0 no weight (parse_plate keeps it, with no grams): the
+    card shows "?" for what it needs and says why, and the self-test still reads the slice."""
+    import guard_ui
+    text = gcode(weights='0.00,10.87', colours='#0A2989;#FFFFFF;#0A2989').replace('; filament_density: 1.26,', '; filament_density: 0,')
+    running(monkeypatch, blue_reads(500)); res = fg.evaluate(fg.parse_plate(text), CFG, 'Benchy')
+    labels, buttons, _ = card_shown(monkeypatch, res)
+    assert res['worst'] == 'UNKNOWN' and labels[labels.index('1  Bambu PLA Basic') + 1] == '?' and labels[labels.index('3  Bambu PLA Basic') + 1] == '10.9 g'
+    assert "Bambu Studio gives no weight for this filament (its profile's density is 0)" in labels
+    f = slice_file(tmp_path, text); monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: str(f)); monkeypatch.setattr(fg, 'bs_conf', lambda: {'app': {'version': '02.09.01.70'}})
+    monkeypatch.setattr(guard_ui, 'studio_windows', lambda: {}); monkeypatch.setattr(fg, 'is_running', lambda: True)
+    assert [text[-21:] for mark, text in fg.selftest(CFG) if mark and text.startswith('Newest slice')] == [': 2 filament(s), 11 g']
