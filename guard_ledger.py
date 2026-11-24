@@ -8,9 +8,10 @@ empty after it was seen holding that filament: at a check (apply), and at the fo
 Counting down errs to the low side, because a figure that is too low warns early and one that is too high loses a
 print:
   - a print is counted in full when it starts to run, also when it is later cancelled;
-  - what a print needs beyond the amount of its tray comes off the other entered spools of the same filament that are
-    loaded, the fullest first (take_off): with AMS auto refill the print goes on from one of them. When the tray's own
-    amount is not known, how much that is cannot be told, and those entries are out of date;
+  - what a print needs beyond the amount of its tray comes off the other loaded spools of the same filament, the
+    fullest first (take_off): with AMS auto refill the print goes on from one of them. An entered spool's part comes
+    off its entry. When the tray's own amount is not known, how much that is cannot be told, and the entries of that
+    filament are out of date;
   - an amount entered while a print runs (or after it was counted) has what that print still needs of it taken off at
     the next look at the printer (catch_up): the amount weighed is what the spool held then, and the print goes on.
     Of a print whose slice has no per-layer profile all it needs comes off; a print the guard cannot count at all makes
@@ -262,33 +263,36 @@ def owed(status, slices):
 
 def take_off(book, trays, need, now, fils=None):
     """Takes what a job needs of each tray (need: {label: grams}) off the entries counted in this step (now: their
-    labels), and what it needs beyond a tray's amount off the other entered spools of the same filament that are loaded
+    labels), and what it needs beyond a tray's amount off the other loaded spools of the same filament
     (fg.same_filament), the fullest first: with AMS auto refill the print goes on from one of them, and fg.credit takes
-    it off them the same way while the job prepares. A tray's amount is its entry's grams, or the reading of a tray the
+    it off them the same way while the job prepares. An entered spool's part comes off its entry; that of a spool the
+    printer measures is left to its reading. A tray's amount is its entry's grams, or the reading of a tray the
     printer measures (trays: fg.trays_of). Where it is not known (no tag and no entry, or an entry out of date), what
-    goes beyond it cannot be told, and those entries become out of date. So they do for a tray that is no longer
-    loaded: the print has gone on from another spool; of its filament as the slice names it (fils: filaments_of), or,
-    when the slice does not, any spool.
+    goes beyond it cannot be told, and the entered spools of its filament become out of date. So they do for a tray
+    that is no longer loaded: the print has gone on from another spool; of its filament as the slice names it (fils:
+    filaments_of), or, when the slice does not, any spool.
     Kept with the entries while the job runs, for fg.credit: 'over', what the job needs beyond an entry that no entered
-    spool could give (credit takes it off the spools the printer measures until their readings have fallen by it);
-    'gave', {tray: grams} an entry gave for a tray the printer measures (credit does not take that off again).
+    spool gave (credit takes it off the spools the printer measures until their readings have fallen by it); 'gave',
+    {tray: grams} an entry gave for a tray the printer measures (credit does not take that off again).
     Returns ([(label, grams taken off its entry, the tray they were needed beyond or None)], [(label made out of date,
     the tray whose amount is not known)])."""
     by, took, doubt = {t['label']: t for t in trays}, [], []
     for label, n in need.items():
         t, e = by.get(label), book.get(label)
         own, who = e if e and not e.get('stale') else None, t or (fils or {}).get(label)
-        mates = sorted((l for l in now if l != label and l in by and not book[l].get('stale') and (fg.same_filament(who, by[l]) if who else not own)), key=lambda l: -book[l]['grams'])
+        mates = [o['label'] for o in trays if o['label'] in now and o['label'] != label and not book[o['label']].get('stale') and (fg.same_filament(who, o) if who else not own)]
         if own and label in now: excess = over = max(0.0, n - e['grams']); took.append((label, n - excess, None)); e['grams'] = max(0.0, e['grams'] - n)
         elif own: over = e.get('over') or 0.0; excess = min(over, n)         # counted before: what was then left to the spools the printer measures
         elif t and t['grams'] is not None: excess = max(0.0, n - t['grams'] - sum((x.get('gave') or {}).get(label, 0.0) for x in book.values()))
         else:
             for l in mates: book[l]['stale'] = True; doubt.append((l, label))
             continue
-        for l in mates:
-            g = min(book[l]['grams'], excess)
-            if g <= 0: continue
-            book[l]['grams'] -= g; excess -= g; took.append((l, g, label))
+        have = {o['label']: book[o['label']]['grams'] if o['label'] in mates else o['grams'] for o in trays       # in the trays' order, as credit takes equals
+                if o['label'] in mates or (who and o['grams'] is not None and o['label'] not in book and fg.same_filament(who, o))}
+        for l in sorted(have, key=lambda l: -have[l]):
+            g = min(have[l], excess); excess -= g
+            if g <= 0 or l not in mates: continue                           # a measured spool's part shows in its reading: nothing to keep
+            book[l]['grams'] -= g; took.append((l, g, label))
             if own: over -= g
             else: gave = book[l].setdefault('gave', {}); gave[label] = gave.get(label, 0.0) + g
         if own and over > 1e-6: e['over'] = over

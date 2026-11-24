@@ -364,3 +364,16 @@ def test_a_job_sent_again_that_ends_before_it_is_seen_running_is_counted_like_an
     for status in (job('PREPARE'), job('RUNNING', 1), job('FINISH', 100)): watch.look(status)
     assert a3() == 280 and not watch.look(job('PREPARE')) and watch.look(job('FAILED', 1)) and a3() == 160
     assert not watch.look(job('PREPARE')) and gl.JobWatch('SERIAL', CFG).look(job('FINISH', 100)) and a3() == 40
+
+def test_what_a_job_needs_beyond_its_spool_goes_to_the_fullest_spool_of_it_measured_or_entered(state, monkeypatch):
+    """A1 and A2 are entered at 30 g each, A3 is the same filament with a tag and reads 900 g. A 50 g job goes to A1:
+    the check takes the 20 g beyond A1 off A3, the fullest, while the job prepares. Counting the job leaves A2's entry
+    alone and the check goes on taking them off A3: no spool is counted with more than before the job started."""
+    part(50.0); spools = lambda a3=900: [spool(0, fid='GFA00'), spool(1, fid='GFA00'), spool(2, a3, fid='GFA00')]
+    for label in ('A1', 'A2'): gl.enter('SERIAL', {'label': label, 'type': 'PLA', 'colour': '#101010'}, 30)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools(), task='1'))
+    before = amounts_at(monkeypatch, watch, printing('PREPARE', spools()), needing(100))
+    assert before == ('OK', {'A3': 880, 'A2': 30, 'A1': 0})
+    assert amounts_at(monkeypatch, watch, printing('RUNNING', spools(), layer=1), needing(100)) == before
+    assert amounts_at(monkeypatch, watch, printing('FINISH', spools(880), layer=100), needing(100)) == before
+    assert {label: entry['grams'] for label, entry in fg.load_state()['spools']['SERIAL'].items()} == {'A1': 0, 'A2': 30}
