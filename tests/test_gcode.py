@@ -303,3 +303,9 @@ def test_a_header_line_without_a_value_does_not_take_the_next_line_for_it():
     assert slots(gcode(weights='1.00,2.00,3.00', used=None).replace('; filament_density', '; filament:\n; filament_density')) == [(1, 1.0), (2, 2.0), (3, 3.0)]
     with pytest.raises(ValueError, match='0 filament totals for the 2 filaments in use'): fg.parse_plate(gcode(weights=''))   # and what is wrong is what is said
     assert slots(gcode().replace('\n', '\r\n')) == [(1, 9.99), (3, 10.87)] and slots(gcode().replace('[g] : ', '[g]\t:\t')) == [(1, 9.99), (3, 10.87)]
+
+def test_totals_that_are_not_amounts_are_refused():
+    """Python reads "nan" and "inf" as numbers. Such a total passed as a need, and the filament's answer was "short by
+    nan g"; a slice with one is a slice the guard cannot read."""
+    for total in ('nan', 'inf', '-inf', 'NaN'):
+        with pytest.raises(ValueError, match=f'a filament total that is not an amount: "{total},10.87"'): fg.parse_plate(gcode(weights=f'{total},10.87'))

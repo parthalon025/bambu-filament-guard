@@ -248,7 +248,8 @@ def parse_plate(text):
         return split_list(m.group(1)) if m and m.group(1).strip() else []
     weights = header('total filament weight [g]')
     if weights is None: return None
-    weights = [float(w) for w in weights.split(',') if w.strip()]
+    totals, weights = weights, [float(w) for w in weights.split(',') if w.strip()]
+    if not all(math.isfinite(w) for w in weights): raise ValueError(f'a filament total that is not an amount: "{totals}"')    # float() takes "nan" and "inf"
     types, colours, fids, names = setting('filament_type'), setting('filament_colour'), setting('filament_ids'), setting('filament_settings_id')
     used = header('filament')                      # the slots the totals belong to, e.g. "1,3,4"
     if used: slots = [int(s) for s in used.split(',') if s.strip()]
