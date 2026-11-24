@@ -247,7 +247,7 @@ class Card:
                     + fg.beyond_text(p)) if p['state'] in fg.BUSY else ''
             text = 'Ignored for this project' if res.get('ignored') else f"{len(res['rows'])} filament{'s' if len(res['rows']) != 1 else ''} against the spools on the {p['model']}" + busy
             if p.get('unlearned'): text += '; what was learned could not be used'
-            self._label(line, text, 'muted', 9, row=0, column=0)
+            self._label(line, text, 'muted', 9, wrap=520, row=0, column=0)   # with a print running it is some 190 characters: unwrapped, wider than a small window
             self._button(line, 'Details', lambda: self.act('details', res), row=0, column=1, padx=(3 * SPACE, 0))
             self.closes_after = brief
             return self._place()

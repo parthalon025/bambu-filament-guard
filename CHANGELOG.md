@@ -54,6 +54,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - With Bambu Studio on a screen left of the primary one, or above it, the window for a spool's amount opened at the edge of the primary screen, a screen away from the card that was clicked. It opens above the card, within the screen the card is on.
 - While a warning stood beside "Send print job", the guard kept about 6 kB more memory at every look at that dialog, 2.5 times a second: some 57 MB an hour. It no longer does.
 - A filament whose colour in the G-code is not six hexadecimal digits (a project made by hand) could keep its plate's warning from showing at all. Its square on the card is now a neutral one.
+- The one-line card could be wider than a small Bambu Studio window when it told of the print running on the printer, with its left part off the screen. Its text now wraps.
 
 ## [1.4.0] - 2026-11-20
 

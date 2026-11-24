@@ -1173,3 +1173,12 @@ def test_a_colour_tk_cannot_take_gives_a_neutral_swatch(state, monkeypatch):
     for colours, squares in (('#0A2989;#FFFFFF;#C12E1F', ['#0A2989', '#C12E1F']), ('#12345;#FFFFFF;sunset', [guard_ui.THEMES['light']['raised']] * 2), (';;#C12E1FFF', [guard_ui.THEMES['light']['raised'], '#C12E1F'])):
         res = fg.evaluate(fg.parse_plate(gcode(colours=colours)), CFG, 'Benchy')
         assert [w.k['bg'] for w in card_widgets(monkeypatch, res, theme='light') if type(w).__name__ == 'Frame' and w.k.get('width') == 18] == squares, colours
+
+@pytest.mark.windows
+def test_the_one_line_cards_text_wraps_like_the_others(state, monkeypatch):
+    """With a print running the line under "Enough filament for this print" is some 190 characters, about 1100 pixels at
+    100 %: wider than a small Bambu Studio window, so its left part was off the screen."""
+    running(monkeypatch, dict(spools((BLUE_PLA, 500), (RED_PLA, 500)), gcode_state='RUNNING', subtask_name='Benchy'))
+    res = fg.evaluate(fg.parse_plate(gcode()), CFG, 'Benchy')
+    text = next(w for w in card_widgets(monkeypatch, res, brief=8) if type(w).__name__ == 'Label' and 'against the spools' in w.k['text'])
+    assert text.k['text'].endswith('which is printing a job the guard could not count') and text.k['wraplength'] == 520
