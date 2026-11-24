@@ -1230,3 +1230,10 @@ def test_one_amount_window_at_a_time_and_it_goes_with_its_card(state, monkeypatc
     card.note('Self-test: the guard works', []); assert w.closed()                           # another card in its place: the same
     w = amount_asked(monkeypatch, EXT, card=card); w.scale.set('640'); w.save()              # saved and closed by itself: the next click opens one
     again = amount_asked(monkeypatch, EXT, card=card); assert w.closed() and not again.closed() and again.made[0] is not w.made[0]
+
+@pytest.mark.windows
+def test_an_ampersand_in_a_projects_title_shows_as_one_in_the_icons_menu(state, monkeypatch):
+    """A Windows menu takes "&" as "underline the next letter": "Black & White" showed as "Black _White"."""
+    guard = guard_with(); menu = icon_menu(monkeypatch, guard); guard.deliver(answer(1, 'OK', 'Black & White'))
+    line = next(i for i in menu.items if callable(i.text))
+    assert line.text(line) == 'Enough filament for this print · Black && White, plate 1' and guard.last_text() == 'Enough filament for this print · Black & White, plate 1'

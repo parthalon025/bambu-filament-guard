@@ -444,7 +444,7 @@ class Tray:
         def warns(text, status): return Item(text, do(lambda: g.toggle_warning(status)), checked=lambda item: status in g.popup_on())
         menu = Menu(
             Item(f'Bambu Filament Guard {fg.VERSION}', None, enabled=False),
-            Item(lambda item: g.last_text(), None, enabled=False),
+            Item(lambda item: g.last_text().replace('&', '&&'), None, enabled=False),      # a menu reads one "&" as "underline the next letter"
             Menu.SEPARATOR,
             Item('Check last plate again', do(g.check_last), default=True),
             Item('Check newest slice now', do(g.check_newest)),
