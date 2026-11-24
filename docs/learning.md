@@ -37,7 +37,7 @@ The reserve is the fixed one (see [What the results mean](using.md#the-reserve))
 
 This is experimental, and off unless you turn it on: "Measure the reserve from past prints (experimental)" in the icon's settings (`measured_reserve`). 1.4.0 had it on.
 
-With it on, the reserve stays the fixed one until the printer has 9 scored prints and readings at empty of different spools that repeat within a tray (3 spools in one tray, or 2 in each of two: their spread from spool to spool is then known), and the tray judged has one of its own. Then it is the margin x (N + 20 g), never below 5 g or 2 % of the need, and the tray is counted by the model alone, without 1.3.0's rules. It can be smaller than the fixed one: a tray that proves accurate is no longer called "tight" on 3 % of its spool. The card then names the reserve its rows used: the measured one and what it rests on, or the fixed one and what the measured one still lacks. With the setting off the card has no line about the reserve.
+With it on, the reserve stays the fixed one until the printer has 9 scored prints and readings at empty of different spools that repeat within a tray (3 spools in one tray, or 2 in each of two: their spread from spool to spool is then known), and the tray judged has one of its own. Then it is the margin x (N + 20 g), never below 5 g or 2 % of the need, and the tray is counted by the model alone, without 1.3.0's rules. It can be smaller than the fixed one: a tray that proves accurate is no longer called "tight" on 3 % of its spool. It can also be larger, where the printer's forecasts fell far short; with the setting off the fixed one is used then too. The card then names the reserve its rows used: the measured one and what it rests on, or the fixed one and what the measured one still lacks. With the setting off the card has no line about the reserve.
 
 ### What the measured reserve cannot see
 
@@ -46,7 +46,7 @@ It is off by default because it can say "enough" for a print that then runs dry,
 - **Spools begin to read more at empty.** A new batch or product whose spools hold less than their tag says, or a change in the AMS's firmware, moves what a tray reads with its spool empty. The guard looks for a change in a tray in its forecast errors, and this one never shows there: the reading still falls as far per gram as before. What a tray reads at empty is learned only from run-dries and weigh-ins near empty, and old ones count as much as new ones. In the review's runs (12 seeds of 300 prints, the reading at empty going from about 0 g to 25 g at print 150), 5 of the 31 answers loosened in the 60 prints after the change ran dry (16 %); before it, none of 66. After a change of 15 g it was 3 of 43 (7 %), and after one of 40 g (5 seeds) 3 of 9. 1.3.0's rules had no failure in the runs with 15 g and 25 g. A tray that has seen 19 run-dries near 0 g counts 9 g for an empty spool after one run-dry at 25 g, 13 g after two and 24 g after three, and each of those run-dries is a print that ran out.
 - **One tray unlike the others.** How far spools differ at empty is measured over all trays of the printer together. With three trays whose spools agree to 2 g and a fourth whose spools are anything from 0 to 50 g short of their tag (mixed products), the spread comes mostly from the three, and is too small for the fourth. In the review's runs (8 seeds of 300 prints), 2 of the 18 answers loosened on that tray ran dry (11 %).
 
-With the setting off neither can loosen an answer: the reserve is the fixed one, and 1.3.0's rules stand.
+With the setting off neither can loosen an answer: the reserve is the fixed one, and 1.3.0's rules stand. The guard's own simulation runs both cases too, with the setting off and on: see [On a simulated printer](#on-a-simulated-printer).
 
 ## Checked against itself
 
@@ -60,19 +60,49 @@ A wrong weight does harm: for a spool near empty it is kept as what the tray rea
 
 ## On a simulated printer
 
-A simulation checks this arithmetic against gauges invented for it, not against a real printer: four trays whose spools hold their tag's weight less an offset, with a gauge that falls a set amount per gram fed, prints of 5 to 250 g or printing a spool down, 5 seeds of 300 prints each, through the guard's own recorder and check. "Enough, then ran dry" is the share of "enough" answers after which the print would have run out; "fitted, but warned" the share of prints that would have fitted that were called tight or not enough.
+A simulation checks this arithmetic against gauges invented for it, not against a real printer: four trays whose spools hold their tag's weight less an offset, with a gauge that falls a set amount per gram fed, and prints of 5 to 250 g or printing a spool down, through the guard's own recorder and check. Before each print a spool that reads less than the print needs is swapped, and a spool is weighed when the card asks. Each filament of each print is then answered twice on the same history: by 1.3.0's rules alone, and by the guard.
 
-| Scenario | Enough, then ran dry: 1.3.0 | 1.4.0 | Fitted, but warned: 1.3.0 | 1.4.0 | 1.4.0, measured reserve in use | Measured reserve from print |
-|---|---|---|---|---|---|---|
-| a true gauge | 0 of 1720 | 0 of 1776 | 10.1 % | 7.2 % | 6.0 % | 104 |
-| reads 20 g at empty | 0 of 1620 | 0 of 1647 | 8.8 % | 7.3 % | 7.4 % | 49 |
-| counts 0.97 g per gram fed | 0 of 1612 | 0 of 1673 | 9.0 % | 5.5 % | 5.5 % | 45 |
-| spools that differ (8 g) and prints that vary (3 %) | 0 of 1718 | 0 of 1734 | 9.9 % | 9.0 % | 8.8 % | 104 |
-| the gauge changes halfway (to 0.95) | 0 of 1681 | 0 of 1698 | 9.0 % | 8.1 % | 6.8 % | 104 |
-| one false run-dry | 0 of 1715 | 0 of 1733 | 11.5 % | 10.5 % | 9.9 % | 84 |
-| four trays: true, 20 g at empty, 0.97, spools that differ | 0 of 1690 | 0 of 1727 | 9.6 % | 7.6 % | 7.6 % | 56 |
+`python tests/test_simulation.py` runs it and prints the two tables below: nine scenarios, 5 seeds (1889 to 1893) of 300 prints each, once with the settings as they come and once with the measured reserve turned on. "Enough, then ran dry" counts the "enough" answers after which the print would have run out. "Fitted, but warned" is the share of the prints that would have fitted that were called tight or not enough.
 
-rho and pre are in use from the second print, the margin from the eighth (9 scored prints), what a tray reads at empty from the 16th to the 41st (median over the 5 seeds). Two things the simulation found are fixed in what is described above: with only the largest of a few readings at empty, spools that differ ran dry after "enough" (3 of 755 answers with the measured reserve in use, where 1.3.0 had none); and once a reading at empty was known, a gauge that changed to count short was no longer counted lower for it (3 of 597).
+With the settings as they come:
+
+| Scenario | "Enough", then ran dry: 1.3.0's rules | the guard | Looser than 1.3.0's rules | Fitted, but warned: 1.3.0's rules | the guard |
+|---|---|---|---|---|---|
+| a true gauge | 0 of 1720 | 0 of 1690 | 0 of 1934 | 10.1 % | 11.7 % |
+| reads 20 g at empty | 0 of 1620 | 0 of 1568 | 0 of 1903 | 8.8 % | 11.7 % |
+| counts 0.97 g per gram fed | 0 of 1612 | 0 of 1588 | 0 of 1928 | 9.0 % | 10.3 % |
+| spools that differ (8 g) and prints that vary (3 %) | 0 of 1718 | 0 of 1657 | 0 of 1937 | 9.9 % | 13.1 % |
+| the gauge changes halfway (to 0.95) | 0 of 1681 | 0 of 1646 | 0 of 1942 | 9.0 % | 10.9 % |
+| one false run-dry | 0 of 1715 | 0 of 1640 | 0 of 1950 | 11.5 % | 15.3 % |
+| four trays: true, 20 g at empty, 0.97, spools that differ | 0 of 1690 | 0 of 1641 | 0 of 1959 | 9.6 % | 12.2 % |
+| spools read 25 g more at empty from halfway | 0 of 1714 | 0 of 1682 | 0 of 1962 | 8.5 % | 10.2 % |
+| one tray whose spools are 0 to 50 g short | 1 of 1741 | 1 of 1681 | 0 of 1967 | 9.4 % | 12.5 % |
+
+No answer is looser than 1.3.0's rules give, in any scenario. The price is more warnings on prints that would have fitted: a tray is counted with the stricter of the guard's own estimate and 1.3.0's rules. The one "enough" that ran dry is 1.3.0's own answer too: the fourth tray read 69 g with 28 g left, on a spool 41 g short of its tag, and the fixed reserve of 30 g does not cover that before a run-dry has been seen in the tray.
+
+With the measured reserve on:
+
+| Scenario | Loosened to "enough" | of which ran dry | "Enough", then ran dry: 1.3.0's rules | the guard | Fitted, but warned: 1.3.0's rules | the guard | Measured reserve from print |
+|---|---|---|---|---|---|---|---|
+| a true gauge | 64 | 0 | 0 of 1720 | 0 of 1776 | 10.1 % | 7.2 % | 104 |
+| reads 20 g at empty | 35 | 0 | 0 of 1620 | 0 of 1640 | 8.8 % | 7.7 % | 54 |
+| counts 0.97 g per gram fed | 55 | 0 | 0 of 1612 | 0 of 1662 | 9.0 % | 6.2 % | 49 |
+| spools that differ (8 g) and prints that vary (3 %) | 28 | 0 | 0 of 1718 | 0 of 1731 | 9.9 % | 9.2 % | 104 |
+| the gauge changes halfway (to 0.95) | 29 | 0 | 0 of 1681 | 0 of 1694 | 9.0 % | 8.3 % | 104 |
+| one false run-dry | 38 | 0 | 0 of 1715 | 0 of 1731 | 11.5 % | 10.6 % | 84 |
+| four trays: true, 20 g at empty, 0.97, spools that differ | 42 | 0 | 0 of 1690 | 0 of 1717 | 9.6 % | 8.2 % | 72 |
+| spools read 25 g more at empty from halfway | 40 | 2 | 0 of 1714 | 2 of 1746 | 8.5 % | 6.9 % | 104 |
+| one tray whose spools are 0 to 50 g short | 40 | 1 | 1 of 1741 | 2 of 1761 | 9.4 % | 8.4 % | 82 |
+
+"Loosened to enough" counts the answers the measured reserve changed: "enough" where 1.3.0's rules said tight or worse. A reserve that is too small shows there; most "enough" answers are far from empty and say nothing of it. In the first seven scenarios 291 answers were loosened and none ran dry, and fewer prints that would have fitted were warned about than by 1.3.0's rules.
+
+The last two scenarios are the two cases described under [What the measured reserve cannot see](#what-the-measured-reserve-cannot-see), and the measured reserve fails in both here as well. Where spools read 25 g more at empty from print 151 on, 2 of the 30 answers loosened from then on ran dry; 1.3.0's rules, and the guard with the setting off, had none. In one of the two a tray read 50 g with 24 g left: it was counted as 47 g, the reserve was 5 g, and the print took 36 g. Where the fourth tray's spools are anything from 0 to 50 g short of their tag, 1 of the 11 answers loosened on that tray ran dry.
+
+rho and pre were in use from the second or third print. What a tray reads at empty was known from the 2nd to the 63rd print (the 24th in the median run), from the first run-dry or weigh-in near empty. The bound the margin rests on existed from the 8th to the 11th print (9 scored prints); the measured reserve itself, with the setting on, from the print in the last column (the median of the 5 seeds).
+
+The tests run a shorter form of the same: 70 prints of every scenario with the settings as they come, where no answer may be looser than 1.3.0's rules give; and 150 prints of the first seven with the measured reserve on, where at most one in ten of the loosened answers may run dry.
+
+Two things the simulation found while 1.4.0 was written are fixed in what is described above. With only the largest of a few readings at empty, spools that differ ran dry after "enough" (3 of 755 answers with the measured reserve in use, where 1.3.0 had none). And once a reading at empty was known, a gauge that changed to count short was no longer counted lower for it (3 of 597). Those runs were made then, and are not repeated here.
 
 ## What `learned` shows
 

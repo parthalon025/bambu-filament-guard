@@ -33,7 +33,7 @@ Tests marked `windows` drive the card, the icon or the state file's named mutex,
 | `tests/test_entered_amounts.py` | amounts entered by hand, counted down, and the link that follows a printer |
 | `tests/test_learning.py` | learning from previous prints: the record, the model, what it changes, weigh-ins |
 | `tests/test_stats.py` | the estimators learning uses, against known values |
-| `tests/test_simulation.py` | the simulated printer behind the table in [docs/learning.md](docs/learning.md) (marked `simulation`) |
+| `tests/test_simulation.py` | the simulated printer behind the tables in [docs/learning.md](docs/learning.md) (marked `simulation`); `python tests/test_simulation.py` prints those tables, in some minutes |
 | `tests/test_guard.py` | the watcher, the card and the commands, as the running guard drives them |
 | `tests/test_state.py` | settings and the state file, with two processes writing it at once |
 | `tests/helpers.py`, `tests/conftest.py` | what several files share: G-code, trays and printer statuses, and the `state` fixture |
