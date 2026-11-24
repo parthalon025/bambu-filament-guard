@@ -17,7 +17,8 @@ print:
     Of a print whose slice has no per-layer profile all it needs comes off; a print the guard cannot count at all makes
     such an entry out of date, like any other entry of the trays it may draw on;
   - a print the guard cannot count (not sliced on this computer, or its tray cannot be told) makes the entries of
-    the trays it used "out of date": unknown again, until the amount is entered again.
+    the trays it used "out of date": unknown again, until the amount is entered again; and with them the entered spools
+    of the same filament, which it may have gone on from.
     So does a filament of a print that its slice has no weight for (fg.parse_plate), for the entry of its own tray.
   - when the printer was not followed for ten minutes or more (this computer asleep, the link down) and shows
     another job than the last one counted, every entry of that printer is out of date: more than one print may
@@ -27,8 +28,10 @@ print:
 A printer in LAN-only mode gives every job the id 0, so a job sent again has the key of the run before it. Kept with
 the key of the job last counted is therefore whether that job was last seen over ('ended', in the state file): found
 on the printer again after that, it is another run, counted like a new job, or after ten minutes unfollowed making the
-entries out of date. Not seen: a print started and finished while the printer was not followed, when the printer
-names it exactly like the print before it; nor a run that replaced, unfollowed, one last seen running.
+entries out of date. And a key whose id is 0, or that has none, does not tell one run from the next at all: after ten
+minutes or more unfollowed, every entry is out of date whatever such a printer shows (the same job, finished, may be
+a second run of it). Not seen is what is left of that: a print that starts and ends, or takes the place of one last
+seen running, within less than ten minutes unfollowed, when the printer names it exactly like the print before it.
 
 For the check of the next print, owed() tells what the job the printer runs still needs from each tray: the per-layer
 profile of the slice it was made from, from the printer's layer to the end. filament_guard takes that off the trays the
@@ -47,6 +50,8 @@ GAP = 600                                                  # seconds without a r
 SILENT = 60                                                # seconds without a report after which the status held is no longer the printer's:
                                                            # the link is ended and made anew (up to 1.4.0 a link gone silent was read on as
                                                            # if live, and the prints of those hours were never taken off)
+AWAY = 1800                                                # seconds an entry made with its tray empty waits for its spool: the spool on the
+                                                           # scale is put back at once; one first seen later may be another of its kind
 LOOKED = 1800                                              # seconds a printer a check looked at is followed for learning: a print sent
                                                            # after the check is seen from its start
 PRINTING = 2 * 3600                                        # seconds a printer last seen printing is still followed for learning: while it
@@ -72,6 +77,13 @@ def followed(cfg, state=None):
         out |= {s for s, at in state.get('printing', {}).items() if time.time() - (at or 0) < PRINTING}
     return sorted(out)
 
+def lapse(e, why):
+    """Makes an entry out of date and keeps why, for the note of the filament that rests on it (fg.assess): up to 1.5.0
+    every such note blamed "a print the guard could not count". The first reason stands. Returns True when it made
+    the entry out of date."""
+    if e.get('stale'): return False
+    e['stale'], e['why'] = True, why; return True
+
 def ended(e, t, empty):
     """Why an entry has ended, or '' while it stands. t: its tray among the loaded ones, else None; empty: the status
     says that tray is without a spool. An empty tray ends an entry only once the tray was seen holding the entry's
@@ -83,15 +95,20 @@ def ended(e, t, empty):
 
 def settle(book, trays, empty, only=None, since=None):
     """One status against a printer's entries (book): an entry whose tray holds its filament is marked 'loaded', and one
-    that has ended (ended) is dropped, with a line in the log. empty: the trays without a spool; only: {label: why},
-    the endings that may be carried out (all, when not given); since: when the status was reported: an entry made after
-    that is left as it is."""
-    by = {t['label']: t for t in trays}
+    that has ended (ended) is dropped, with a line in the log. An entry whose tray is first seen holding its filament
+    more than AWAY after it was made is out of date: typed with the spool on the scale, it would else wait without limit
+    for any spool of its material and colour. empty: the trays without a spool; only: {label: why}, the endings that
+    may be carried out (all, when not given); since: when the status was reported (now, when not given): an entry made
+    after that is left as it is."""
+    by, now = {t['label']: t for t in trays}, time.time() if since is None else since
     for label, e in list(book.items()):
-        if since is not None and e['at'] > since: continue
+        if e['at'] > now: continue
         why = ended(e, by.get(label), label in empty)
         if why and (only is None or only.get(label) == why): del book[label]; fg.log(f'{label}: amount ended: {why}')
-        elif not why and label in by: e['loaded'] = True
+        elif not why and label in by and not e.get('loaded'):
+            e['loaded'] = True
+            if now - e['at'] > AWAY and lapse(e, f'its spool was not seen back in its tray within {AWAY // 60} minutes'):
+                fg.log(f'{label}: amount out of date: its spool was first seen in the tray more than {AWAY // 60} minutes after it was entered')
 
 def apply(trays, serial, complete=True):
     """Gives the trays the printer cannot measure the amount entered for them (grams, and 'entered': when), or marks
@@ -104,7 +121,7 @@ def apply(trays, serial, complete=True):
         settle(book, trays, set(book) if complete and any(not t['label'].startswith('Ext') for t in trays) else ())
         for t in trays:
             e = book.get(t['label'])
-            if e and e.get('stale'): t['stale'] = e['at']
+            if e and e.get('stale'): t['stale'], t['why'] = e['at'], e.get('why')
             elif e:
                 t['grams'], t['weight'], t['entered'], t['accounted'], t['missed'] = e['grams'], e['first'], e['at'], e.get('job'), e.get('missed')
                 t['over'], t['gave'] = e.get('over'), e.get('gave')
@@ -278,21 +295,26 @@ def take_off(book, trays, need, now, fils=None):
     goes beyond it cannot be told, and the entered spools of its filament become out of date. So they do for a tray
     that is no longer loaded: the print has gone on from another spool; of its filament as the slice names it (fils:
     filaments_of), or, when the slice does not, any spool.
+    The same where what the job draws on a tray cannot be told (need None: a job the guard cannot count, a filament
+    without a weight): the entered spools of that tray's filament may be what it goes on from.
     Kept with the entries while the job runs, for fg.credit: 'over', what the job needs beyond an entry that no entered
     spool gave (credit takes it off the spools the printer measures until their readings have fallen by it); 'gave',
     {tray: grams} an entry gave for a tray the printer measures (credit does not take that off again).
     Returns ([(label, grams taken off its entry, the tray they were needed beyond or None)], [(label made out of date,
-    the tray whose amount is not known)])."""
+    why, in the log's words)])."""
     by, took, doubt = {t['label']: t for t in trays}, [], []
     for label, n in need.items():
         t, e = by.get(label), book.get(label)
         own, who = e if e and not e.get('stale') else None, t or (fils or {}).get(label)
         mates = [o['label'] for o in trays if o['label'] in now and o['label'] != label and not book[o['label']].get('stale') and (fg.same_filament(who, o) if who else not own)]
+        if n is None:
+            for l in mates: lapse(book[l], f'a print the guard could not count drew on {label} and may have gone on from it'); doubt.append((l, f'what it draws on {label} cannot be told'))
+            continue
         if own and label in now: excess = over = max(0.0, n - e['grams']); took.append((label, n - excess, None)); e['grams'] = max(0.0, e['grams'] - n)
         elif own: over = e.get('over') or 0.0; excess = min(over, n)         # counted before: what was then left to the spools the printer measures
         elif t and t['grams'] is not None: excess = max(0.0, n - t['grams'] - sum((x.get('gave') or {}).get(label, 0.0) for x in book.values()))
         else:
-            for l in mates: book[l]['stale'] = True; doubt.append((l, label))
+            for l in mates: lapse(book[l], f'a print on {label}, whose amount is not known, may have gone on from it'); doubt.append((l, f"{label}'s amount is not known"))
             continue
         have = {o['label']: book[o['label']]['grams'] if o['label'] in mates else o['grams'] for o in trays       # in the trays' order, as credit takes equals
                 if o['label'] in mates or (who and o['grams'] is not None and o['label'] not in book and fg.same_filament(who, o))}
@@ -319,11 +341,11 @@ def count(serial, status):
         state.setdefault('jobs', {})[serial] = key; state.setdefault('ended', {})[serial] = status.get('gcode_state') not in RUN
         for label, e in book.items():
             e['job'] = key; e.pop('over', None); e.pop('gave', None)          # what the job before left to other spools is history
-            if label in unknown: e['stale'] = True
-        took, doubt = take_off(book, trays, drawn, set(book), filaments_of(status, state.get('slices', [])))
+            if label in unknown: lapse(e, 'a print the guard could not count has drawn on it')
+        took, doubt = take_off(book, trays, dict(drawn, **dict.fromkeys(unknown)), set(book), filaments_of(status, state.get('slices', [])))
         fg.log(f"job \"{status.get('subtask_name')}\" counted: " + (', '.join(f'{l} -{g:.0f} g' + (f' that it needs beyond {b}' if b else '') for l, g, b in took) or 'no entered spool drawn on')
                + (f"; out of date: {', '.join(sorted(l for l in unknown if l in book))}" if unknown & set(book) else '')
-               + ''.join(f"; out of date: {l}, which the print may go on from: {b}'s amount is not known" for l, b in doubt))
+               + ''.join(f"; out of date: {l}, which the print may go on from: {b}" for l, b in doubt))
     fg.update_state(change)
 
 def catch_up(serial, status, state=None):
@@ -339,17 +361,17 @@ def catch_up(serial, status, state=None):
     def change(st):
         book = st.get('spools', {}).get(serial, {})
         late, (trays, _) = {l: e for l, e in book.items() if e.get('job') != key}, fg.trays_of(status)
-        need, counted = owed(status, st.get('slices', []))
+        (need, counted), unknown = owed(status, st.get('slices', [])), set()
         if counted is False:
             need, unknown = draws(status, st.get('slices', []), [t['label'] for t in trays]) if trays else ({}, set(late))
             for l, e in late.items():
-                if l in unknown: e['stale'] = True; fg.log(f'{l}: entered during "{name}", a print the guard cannot count: out of date')
+                if l in unknown: lapse(e, 'a print the guard could not count has drawn on it'); fg.log(f'{l}: entered during "{name}", a print the guard cannot count: out of date')
                 elif l not in need: e['missed'] = key
-        took, doubt = take_off(book, trays, need, set(late), filaments_of(status, st.get('slices', [])))
+        took, doubt = take_off(book, trays, dict(need, **dict.fromkeys(unknown)), set(late), filaments_of(status, st.get('slices', [])))
         for l, g, b in took:
             fg.log(f'{l}: entered during "{name}": ' + (f'what that print still needs beyond {b}, {g:.0f} g' if b else f'what that print still needs of it, {need[l]:.0f} g' if counted else
                                                            f'all that print needs of it, {need[l]:.0f} g (how far it is cannot be told)') + f", taken off: {book[l]['grams']:.0f} g")
-        for l, b in doubt: fg.log(f"{l}: entered during \"{name}\": out of date, as the print may go on from it: {b}'s amount is not known")
+        for l, b in doubt: fg.log(f"{l}: entered during \"{name}\": out of date, as the print may go on from it: {b}")
         for e in late.values(): e['job'] = key
         return bool(late)
     return fg.update_state(change)
@@ -361,14 +383,14 @@ def unfollowed(serial, before, followed):
     the first look counts nothing of what has run."""
     def change(state):
         old = [l for l, e in state.get('spools', {}).get(serial, {}).items() if e['at'] < before and not (followed and followed >= e['at']) and not e.get('stale')]
-        for l in old: state['spools'][serial][l]['stale'] = True
+        for l in old: lapse(state['spools'][serial][l], 'it was entered long before the printer was first followed, which may have printed since')
         return old
     old = fg.update_state(change)
     if old: fg.log(f"entered amounts out of date: {', '.join(old)}: entered more than ten minutes before the printer was first followed, and it may have printed since")
 
 def all_out_of_date(serial, why):
     def change(state):
-        for e in state.get('spools', {}).get(serial, {}).values(): e['stale'] = True
+        for e in state.get('spools', {}).get(serial, {}).values(): lapse(e, why)
     fg.update_state(change); fg.log(f'entered amounts out of date: {why}')
 
 
@@ -404,8 +426,11 @@ class JobWatch(threading.Thread):
             again = key == self.counted and gstate in fg.BUSY and (self.ended or not running)   # the job counted is on the printer anew: another run of it
             if self.counted is None:                                         # baseline: what runs or has run is not counted, what is being prepared will be
                 self.remember(key if gstate in STARTED else NO_JOB, not running); unfollowed(self.serial, (time.time() if at is None else at) - GAP, self.followed)
-            elif gap and (key != self.counted or again):                     # prints may have come and gone unseen: this one, and how many before it?
-                all_out_of_date(self.serial, 'the printer was not followed for a while and has printed since'); self.remember(key if gstate in STARTED else NO_JOB, not running); done = True
+            elif gap and (key != self.counted or again or key[0] in ('0', '')):   # prints may have come and gone unseen: this one, and how many before it?
+                away = f'{((time.time() if at is None else at) - self.followed) / 60:.0f} minutes' if self.followed else 'a while'
+                all_out_of_date(self.serial, f'the printer was not followed for {away} and ' + ('has printed since' if key != self.counted or again else
+                                                                                                 'may have printed since: it names every job alike'))
+                self.remember(key if gstate in STARTED else NO_JOB, not running); done = True
             elif gstate in STARTED and (key != self.counted or (again and running)):   # a new job, or the same one started anew
                 try: count(self.serial, status)
                 except fg.StateBusy: raise                                   # not counted: the next look tries again
@@ -499,9 +524,11 @@ class JobWatch(threading.Thread):
                     link = fg.printer_link(ip, self.serial, conf['access_code'][self.serial], f'bambu-filament-guard-jobs-{fg.os.getpid()}', on_report, on_refused)
                     passed = opened                                                  # when this loop last came round
                     while not self.stopped.wait(3):
-                        state = fg.load_state()                                      # read once a look: who is followed, and what is entered
-                        if not self.wanted(state): self.stopped.set(); break        # no entered amount, and nothing for learning to watch
                         now, before = time.time(), passed; passed = now
+                        try: state = fg.load_state()                                 # read once a look: who is followed, and what is entered
+                        except fg.StateBusy as e:                                    # held elsewhere: that costs this look, not the link, whose
+                            self.say(f'following the printer: {e}; tried again at the next look'); continue   # ending leaves a minute and more unseen
+                        if not self.wanted(state): self.stopped.set(); break        # no entered amount, and nothing for learning to watch
                         with lock: first, latest = (heard[0], heard[-1]) if heard else (None, None)
                         if first is None:
                             if now - opened > 40: self.lost = True; break            # no report: the address or the access code has changed

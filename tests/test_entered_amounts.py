@@ -104,12 +104,14 @@ def test_a_weight_far_from_the_printers_reading_is_doubted_either_way():
     assert fg.weigh_doubt(59.9, 110.0).startswith('60 g weighed, 110 g read by the printer: 50 g apart') and '51 g apart' in fg.weigh_doubt(161.0, 110.0)
 
 
-def follow(monkeypatch, script, passes, leap=(0, 0)):
+def follow(monkeypatch, script, passes, leap=(0, 0), busy=()):
     """JobWatch.run for SERIAL against a scripted link and clock. script: {pass: report}, what the printer sends at that
-    pass of the follower's 3-second wait; leap: (pass, seconds) the wall clock jumps there (the computer slept). Returns
-    the follower, [(pass, job id)] of the statuses it looked at, and for each link it made whether the address was
-    looked up afresh."""
+    pass of the follower's 3-second wait; leap: (pass, seconds) the wall clock jumps there (the computer slept); busy:
+    the passes at which the state file is held elsewhere when the follower reads it. Returns the follower, [(pass, job
+    id)] of the statuses it looked at, and for each link it made whether the address was looked up afresh."""
     clock, n, looks, links, tell = [time.time()], [0], [], [], {}
+    load, held = fg.load_state, set(busy)
+    monkeypatch.setattr(fg, 'load_state', lambda: load() if n[0] not in held else (held.discard(n[0]), (_ for _ in ()).throw(fg.StateBusy('the state folder was held elsewhere for more than 10 s')))[1])
     monkeypatch.setattr(gl, 'time', types.SimpleNamespace(time=lambda: clock[0]))
     monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {'SERIAL': 'code'}})
     monkeypatch.setattr(fg, 'printer_ip', lambda serial, cfg, refresh=False: links.append(refresh) or 'printer')
@@ -377,3 +379,101 @@ def test_what_a_job_needs_beyond_its_spool_goes_to_the_fullest_spool_of_it_measu
     assert amounts_at(monkeypatch, watch, printing('RUNNING', spools(), layer=1), needing(100)) == before
     assert amounts_at(monkeypatch, watch, printing('FINISH', spools(880), layer=100), needing(100)) == before
     assert {label: entry['grams'] for label, entry in fg.load_state()['spools']['SERIAL'].items()} == {'A1': 0, 'A2': 30}
+
+def test_after_a_gap_a_printer_that_names_every_job_alike_makes_the_amounts_out_of_date(state):
+    """A LAN-only printer gives every job the number 0. "Part" is printed, counted and seen to end; the computer sleeps,
+    and "Part" is printed again from the printer's screen, start to finish. On waking the printer shows what it showed
+    before: the same name and number, finished. Nothing tells the two runs apart, so after ten minutes or more without
+    following the amount is out of date. A printer that numbers its jobs shows the very job that was counted, and the
+    amount stands."""
+    def after_the_gap(task):
+        part(120.0); spools = [spool(2)]; job = lambda state, layer=0: printing(state, spools, task=task, mapping=(2,), layer=layer)
+        gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 400)
+        watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools, name='', task=task))
+        for status in (job('PREPARE'), job('RUNNING', 1), job('FINISH', 100)): watch.look(status)
+        gl.JobWatch('SERIAL', CFG).look(job('FINISH', 100), gap=True)
+        return fg.load_state()['spools']['SERIAL']['A3']
+    numbered = after_the_gap('7'); assert numbered['grams'] == 280 and not numbered.get('stale')
+    assert after_the_gap('0')['stale'] and 'it names every job alike' in (state / 'guard.log').read_text()
+
+def test_an_amount_whose_spool_is_first_seen_in_its_tray_half_an_hour_later_is_out_of_date(state):
+    """The weight is typed while the spool is on the scale, and the tray is seen empty. A spool of that material and
+    colour seen in the tray within 30 minutes is the one that was weighed: the amount applies. One first seen there
+    later may be another spool, the weighed one having gone elsewhere: the amount is out of date, at a check and at the
+    follower's look alike, and ends like any other when the tray is empty again."""
+    loaded, out = printing('IDLE', [spool(0), spool(1, 500, **RED)]), printing('IDLE', [{'id': '0'}, spool(1, 500, **RED)])
+    def typed(minutes_ago):
+        gl.enter('SERIAL', {'label': 'A1', 'type': 'PLA', 'colour': '#101010'}, 640); assert applied(out) is None
+        fg.update_state(lambda st: st['spools']['SERIAL']['A1'].__setitem__('at', time.time() - minutes_ago * 60))
+    typed(29); assert applied(loaded)['grams'] == 640
+    typed(31); late = applied(loaded); assert late['grams'] is None and late['stale'] and fg.load_state()['spools']['SERIAL']['A1']['stale']
+    assert 'A1: amount out of date: its spool was first seen in the tray more than 30 minutes after it was entered' in (state / 'guard.log').read_text()
+    assert applied(out) is None and gl.serials() == []                                   # taken out: the entry ends
+    typed(0); watch = gl.JobWatch('SERIAL', dict(CFG, learn=False)); watch.see(out)       # the printer is followed, the tray still empty
+    typed(31); watch.see(loaded); assert fg.load_state()['spools']['SERIAL']['A1']['stale']
+
+def test_an_amount_out_of_date_says_why(state, monkeypatch):
+    """The note of a filament whose entered amount is out of date names what made it so, each in its own words: the
+    printer not followed (and for how long), an amount entered long before the printer was first followed, a spool not
+    seen back in its tray, a print on a tray without an amount, a print the guard could not count. An entry made out of
+    date by an earlier version, which kept no reason, is blamed on nothing."""
+    part(120.0); spools = [spool(0), spool(2)]; idle = printing('IDLE', spools, task='1')
+    def note(label='A3'):
+        running(monkeypatch, idle); res = fg.evaluate(needing(100), CFG, 'Next')
+        return next(r['note'] for r in res['rows'] if any(t['label'] == label for t in r['trays']))
+    enter = lambda label='A3': gl.enter('SERIAL', {'label': label, 'type': 'PLA', 'colour': '#101010'}, 400)
+    enter(); watch = gl.JobWatch('SERIAL', dict(CFG, learn=False)); watch.see(idle, at=time.time() - 1200); watch.see(printing('FINISH', spools, task='9', mapping=(2,), layer=100))
+    assert note() == 'the amount entered for A3 is out of date: the printer was not followed for 20 minutes and has printed since'
+    enter(); watch.see(printing('RUNNING', spools, name='Sent from the phone', task='12', mapping=(2,), layer=1))
+    assert note() == 'the amount entered for A3 is out of date: a print the guard could not count has drawn on it'
+    enter(); watch.see(printing('RUNNING', spools, task='13', mapping=(0,), layer=1))                   # A1, the same filament, has no amount
+    assert note() == 'the amount entered for A3 is out of date: a print on A1, whose amount is not known, may have gone on from it'
+    enter(); fg.update_state(lambda st: st['spools']['SERIAL']['A3'].update(at=time.time() - 2400, loaded=False))
+    assert note() == 'the amount entered for A3 is out of date: its spool was not seen back in its tray within 30 minutes'
+    fg.update_state(lambda st: (st['spools']['SERIAL'].clear(), st.pop('followed')))     # as if no guard had run since
+    enter(); fg.update_state(lambda st: st['spools']['SERIAL']['A3'].__setitem__('at', time.time() - 86400)); gl.JobWatch('SERIAL', dict(CFG, learn=False)).see(idle)
+    assert note() == 'the amount entered for A3 is out of date: it was entered long before the printer was first followed, which may have printed since'
+    fg.update_state(lambda st: st['spools']['SERIAL']['A3'].pop('why')); assert note() == 'the amount entered for A3 is out of date'
+
+def test_the_line_on_the_running_print_does_not_call_it_counted_above_an_amount_out_of_date(state, monkeypatch):
+    """The print that runs is one the guard can count, but it draws on A3, whose entered amount is out of date: nothing
+    can be taken off that. The report's line says what is taken off where, not that the running print is counted, and
+    the card's words get the same proviso; with every amount known they are as they were."""
+    part(120.0, type='PLA', colour='#101010', fid='', nozzle=None); spools = [spool(2), spool(1, 500, colour='C12E1F', fid='GFA00')]
+    job = printing('RUNNING', spools, mapping=(2,), layer=30)
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 400)
+    running(monkeypatch, job); res = fg.evaluate(needing(100), CFG, 'Next'); report = fg.report_text(res)
+    assert res['printer']['counted'] is True and res['printer']['dated'] == [] and fg.known_text(res['printer']) == ''
+    assert 'RUNNING (Part, layer 30 of 100): the running print is counted: what it still needs is taken off its spools' in report
+    fg.update_state(lambda st: st['spools']['SERIAL']['A3'].update(stale=True, why='the printer was not followed for 20 minutes and has printed since'))
+    res = fg.evaluate(needing(100), CFG, 'Next'); report = fg.report_text(res)
+    assert res['rows'][0]['status'] == 'UNKNOWN' and res['printer']['counted'] is True and res['printer']['dated'] == ['A3']
+    assert 'is counted' not in report and "RUNNING (Part, layer 30 of 100): what the running print still needs is taken off the spools whose amount is known" in report
+    assert fg.known_text(res['printer']) == " where a spool's amount is known"
+
+def test_a_state_file_held_at_one_look_costs_that_look_and_not_the_link(state, monkeypatch):
+    """Another program holds the state file when the follower reads it, at one look and then for a minute and a half
+    of looks. Each of those looks is lost and no more: the link stays (ended, it is a minute and more before the next
+    look, in which a print can start unseen), the log says so once, and the job that starts right after is counted at
+    the next look."""
+    gl.enter('SERIAL', {'label': 'C3', 'type': 'PETG', 'colour': '#101010'}, 400); fg.remember_slice('Benchy', 1, SLICE)
+    over = dict(H2D_JOB, gcode_state='FINISH', task_id='10')
+    watch, looks, links = follow(monkeypatch, {n: over if n < 41 else H2D_JOB for n in range(1, 60)}, 60, busy=[5] + list(range(10, 41)))
+    assert links == [False] and [n for n, _ in looks][:8] == [2, 3, 4, 6, 7, 8, 9, 41] and c3()['grams'] == 280
+    assert (state / 'guard.log').read_text().count('held elsewhere for more than 10 s; tried again at the next look') == 1
+
+def test_a_print_the_guard_cannot_count_makes_the_entered_spools_it_may_go_on_from_out_of_date(state, monkeypatch):
+    """A print sent from the phone runs on A1, a spool the printer measures; A2 is the same filament without a tag,
+    entered at 1000 g, and A3 another material. How much the print draws cannot be told, nor whether it runs A1 out and
+    goes on from A2: A2's amount is out of date, and says why; A3's stands. Left at 1000 g, A2 read "enough" after a
+    print that had gone on from it."""
+    spools = lambda a1: [spool(0, a1, fid='GFA00'), spool(1, fid='GFA00'), spool(2, typ='PETG')]
+    gl.enter('SERIAL', {'label': 'A2', 'type': 'PLA', 'colour': '#101010'}, 1000); gl.enter('SERIAL', {'label': 'A3', 'type': 'PETG', 'colour': '#101010'}, 400)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools(500), task='1'))
+    watch.look(printing('RUNNING', spools(500), name='Sent from the phone', task='12', layer=1)); over = printing('FINISH', spools(0), name='Sent from the phone', task='12', layer=100)
+    watch.look(over); book = fg.load_state()['spools']['SERIAL']
+    assert book['A2']['stale'] and not book['A3'].get('stale') and book['A3']['grams'] == 400
+    running(monkeypatch, over); row = fg.evaluate(needing(300), CFG, 'Next')['rows'][0]
+    assert row['status'] == 'SHORT' and 'A2 holds an unknown amount more' in row['note']          # A1 reads 0 g, and A2 is not counted
+    assert book['A2']['why'] == 'a print the guard could not count drew on A1 and may have gone on from it'
+    assert 'out of date: A2, which the print may go on from: what it draws on A1 cannot be told' in (state / 'guard.log').read_text()

@@ -271,7 +271,7 @@ class Card:
         if brief:
             line = tk.Frame(w, bg=t['surface']); line.grid(row=2, column=0, sticky='ew'); line.columnconfigure(0, weight=1)
             p = res['printer']
-            busy = ((', less what the print running there still needs' if p.get('counted') else ', which is printing a job the guard could not count')
+            busy = ((', less what the print running there still needs' + fg.known_text(p) if p.get('counted') else ', which is printing a job the guard could not count')
                     + fg.beyond_text(p)) if p['state'] in fg.BUSY else ''
             text = 'Ignored for this project' if res.get('ignored') else f"{len(res['rows'])} filament{'s' if len(res['rows']) != 1 else ''} against the spools on the {p.get('name') or p['model']}" + busy
             if p.get('unlearned'): text += '; what was learned could not be used'
@@ -300,7 +300,7 @@ class Card:
             p, job = res['printer'], fg.job_text(res['printer'])
             told, runs, needs, hold = (f'reported them {then}', 'then', 'needed', 'held') if then else ('reports them', 'now', 'needs', 'hold')
             if p['state'] in fg.BUSY and p.get('counted'):
-                spools = f"Spools as the {p.get('name') or p['model']} {told}, less what the print running there{' then' if then else ''}{job} still {needs}{amounts_text(res)}."
+                spools = f"Spools as the {p.get('name') or p['model']} {told}, less what the print running there{' then' if then else ''}{job} still {needs}{fg.known_text(p)}{amounts_text(res)}."
             else:
                 spools = f"Spools as the {p.get('name') or p['model']} {told}{'' if then else ' now'}{amounts_text(res)}." + (
                     f" It {'was' if then else 'is'} printing {runs}{job}: that job {'was' if then else 'is'} still drawing from these spools, and the guard could not count what it still {needs}."
