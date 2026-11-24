@@ -64,6 +64,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - A print job's or a project's name with a line break in it wrote lines of its own into `guard.log`, with whatever time and text it held. Every message is now one line: line breaks and other control characters are written as spaces.
 - The packaged guard did not start, and showed nothing, on a computer where another program had set `TCL_LIBRARY` or `TK_LIBRARY` for its own Tcl. It now starts its windows with the Tcl/Tk in its own folder whatever those say.
 - The packaged guard told of a missing part with "pip install …", which it has no way to do. There it now says that its folder is incomplete, and to unzip the guard again; a run from source keeps the hint.
+- A plate whose G-code could not be read, or was still being written, when "Send print job" opened was a line in the log: with the other plates fine, nothing showed beside the dialog. It now counts as a plate that could not be checked, and shows as one.
 
 ## [1.4.0] - 2026-11-20
 

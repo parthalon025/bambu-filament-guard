@@ -1297,9 +1297,19 @@ class Guard:
         self.later(lambda: self.again(res), then, lambda: refuse(f'The printer could not be asked what {label} reads now'))
 
     def again(self, res):
-        """The plate of an answer, checked again now: the new answer, with what tells its plate carried over."""
-        new = evaluate(res['plate'], self.cfg, res['title'], res['times'])
+        """The plate of an answer, checked again now: the new answer, with what tells its plate carried over. An answer
+        for a G-code that could not be read (not_read) has no plate: the file is read again, and the answer stands
+        while it still cannot be."""
+        plate = res['plate'] or (plate_at(res['gcode']) if res.get('gcode') else None)
+        new = evaluate(plate, self.cfg, res['title'], res['times']) if plate else dict(res)
         new.update(pid=res.get('pid'), plate_no=res.get('plate_no'), gcode=res.get('gcode'), at=time.time()); return new
+
+    @staticmethod
+    def not_read(path, why):
+        """The answer for a sliced plate whose G-code could not be read: one that could not be checked, which is not a
+        fine one (rank), with nothing of the plate in it but where it is."""
+        return {'title': project_title(path), 'model': '', 'time': '', 'times': 1, 'plate': None, 'printer': None, 'rows': [], 'worst': 'OK', 'error': why,
+                'pid': studio_pid(path), 'plate_no': plate_number(path), 'gcode': path, 'at': time.time()}
 
     def recheck(self, res, beside=None):
         import guard_ui
@@ -1332,8 +1342,13 @@ class Guard:
                 try:
                     with open(path, 'rb') as f: plate = parse_plate(read_head(f))
                 except (OSError, ValueError) as e:                       # one plate that cannot be read does not cost the others their check
-                    log(f'cannot read the slice {path}: {e.__class__.__name__}: {e}'); unread.append(f'it cannot be read ({e})'); continue
-                if plate is None: unread.append('Bambu Studio is still writing it'); continue
+                    log(f'cannot read the slice {path}: {e.__class__.__name__}: {e}'); unread.append(f'it cannot be read ({e})')
+                    if beside: out.append(self.not_read(path, f'the G-code of plate {plate_number(path)} cannot be read ({e})'))   # at the dialog it is a plate that was not checked,
+                    continue                                                                                                      # and shows as one: silence there means every plate is fine
+                if plate is None:
+                    unread.append('Bambu Studio is still writing it')
+                    if beside: out.append(self.not_read(path, f'Bambu Studio is still writing the G-code of plate {plate_number(path)}'))
+                    continue
                 if not plate['filaments']: continue
                 title, model = project_title(path), plate['printer_model']
                 # A check that fails is tried once more: one reading that timed out once dropped the plate being sent. A

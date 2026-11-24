@@ -228,7 +228,8 @@ def test_a_plate_that_cannot_be_read_at_send_print_job_leaves_the_others_checked
     monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True); running(monkeypatch, ENOUGH)
     guard = guard_with(); guard.check_newest(1, beside=4321); guard.todo.get(timeout=5)()
     log = (state / 'guard.log').read_text()
-    assert guard.last['plate_no'] == 1 and log.count('at "Send print job"') == 1 and f'cannot read the slice {bad}: ValueError' in log
+    assert log.count('at "Send print job": Enough filament for this print') == 1 and f'cannot read the slice {bad}: ValueError' in log
+    assert guard.last['plate_no'] == 2 and guard.last['error']                              # and the plate that was not read is what shows: it was not checked
 
 @pytest.mark.windows
 def test_a_plate_that_fails_does_not_cost_the_others_their_check(state, monkeypatch):
@@ -1301,3 +1302,23 @@ def test_a_missing_pystray_is_logged_as_what_can_be_done_about_it(state, monkeyp
                        (PACKAGED, "no icon in the notification area: the guard's folder is incomplete (pystray is missing): unzip the guard again")):
         monkeypatch.setattr(fg, 'HERE', here); assert guard_ui.Tray(guard_with()).icon is None
         assert (state / 'guard.log').read_text().splitlines()[-1].endswith(' ' + said)
+
+@pytest.mark.windows
+def test_at_send_print_job_a_plate_that_cannot_be_read_is_one_that_was_not_checked(state, tmp_path, monkeypatch):
+    """A plate whose G-code could not be read, or was still being written, when "Send print job" opened was a line in the
+    log: with the other plates fine, nothing showed beside the dialog, which there means every sliced plate is fine."""
+    import guard_ui
+    monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True); running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 500)))
+    _, odd, writing = project_of(tmp_path, monkeypatch, [FINE, gcode(used=None), gcode(complete=False)])   # plate 2: totals that cannot be placed; plate 3: not all there yet
+    guard = guard_with(); at_send(guard); res = guard.card.res
+    assert guard.card.shown == [('show', 0)] and guard.card.where == 4321 and guard.rank(res) == (1, 0)
+    assert (res['plate_no'], res['title'], res['error']) == (3, 'Farm', 'Bambu Studio is still writing the G-code of plate 3')   # the newest of the two
+    writing.unlink(); guard = guard_with(); at_send(guard); res = guard.card.res
+    assert (res['plate_no'], res['error']) == (2, 'the G-code of plate 2 cannot be read (2 filament totals for 3 filaments and no "; filament:" line to place them)')
+    log = (state / 'guard.log').read_text()
+    assert log.count('at "Send print job": Enough filament for this print: Farm') == 2 and 'at "Send print job": Filament could not be checked: Farm |   the G-code of plate 2 cannot be read' in log
+    odd.write_text(gcode(weights=TOO_MUCH)); again = []                                      # sliced again, and "Check again" on that card: the file is read anew
+    monkeypatch.setattr(guard, 'deliver', lambda new, **how: again.append(new)); guard.recheck(res); guard.todo.get(timeout=5)()
+    assert (again[0]['plate_no'], again[0]['error'], again[0]['worst']) == (2, None, 'SHORT')
+    project_of(tmp_path, monkeypatch, [gcode(used=None), TOO_MUCH]); guard = guard_with(); at_send(guard)   # a warning on another plate comes before it
+    assert (guard.card.res['plate_no'], guard.card.res['worst'], guard.card.res['error']) == (2, 'SHORT', None)
