@@ -59,7 +59,8 @@ DEFAULTS = {
     'colour_tolerance': 40,      # how far a spool's colour may be from the project's and still count as that colour (0..765;
                                  # Bambu's PLA Basic red and PLA Silk+ red are 31 apart, black and dark grey 190)
     # Which results open the full card, which stays until closed. Add "UNKNOWN" to be told about spools without a
-    # remaining amount; remove "COLOUR" when the colours of your projects are not the colours you print in.
+    # remaining amount; remove "COLOUR" when the colours of your projects are not the colours you print in. SHORT and
+    # MISSING open it whether named here or not (Guard.opening).
     'popup_on': ['SHORT', 'MISSING', 'COLOUR', 'SPLIT', 'TIGHT'],
     'ok_seconds': 8,             # a result that is not in popup_on shows as one line for this long; 0 = shows nothing
     'at_send': True,             # check again when "Send print job" opens, and show a warning beside that dialog
@@ -996,6 +997,7 @@ class Guard:
         self.last, self.paused, self.ticks, self.sending, self.jobs = None, False, 0, set(), {}
         self.warning = None                                   # the warning on the full card: (title, plate, severity, when, the card's window)
         self.busy, self.greeted = {}, False                   # the checks someone waits for, by what started them: (their line, its text)
+        self.told = set()                                     # what was said in the log once, and is not said again in this run
         self.card = guard_ui.Card(root, act=self.act, on_close=None if standing else root.quit)
         self.card.empty_spool = cfg['empty_spool_g']
         self.tray = guard_ui.Tray(self) if standing else None
@@ -1007,6 +1009,24 @@ class Guard:
 
     def ignored(self, res):
         return load_state().get('ignored', {}).get(res['title']) == self.signature(res)
+
+    def popup_on(self):
+        """The results popup_on names, in capitals: as the guard reads the list, and as the menu ticks it. A name that is
+        no result of a check is said in the log, once in a run; so is a value that is no list, read as the default."""
+        on = self.cfg.get('popup_on')
+        names = [str(s).upper() for s in on] if isinstance(on, list) else list(DEFAULTS['popup_on'])
+        odd = [f'names "{s}", which is no result of a check ({", ".join(SEVERITY)})' for s in names if s not in SEVERITY] if isinstance(on, list) else ['is not a list of results: the default is used']
+        for what in odd:
+            if what not in self.told: self.told.add(what); log(f'popup_on in config.json {what}')
+        return names
+
+    def opening(self, res):
+        """The results among an answer's rows that open the full card. SHORT and MISSING do whatever popup_on holds: a list
+        written by hand to add UNKNOWN replaced the whole default, and turned the "not enough" card off. The others do
+        when popup_on names them. Any such row opens the card, not the worst row alone: COLOUR ranks with SHORT, and a
+        COLOUR row that was not to be warned of hid the SHORT row after it."""
+        on = set(self.popup_on()) | {'SHORT', 'MISSING'}
+        return [r['status'] for r in res['rows'] if r['status'] in on]
 
     def last_text(self):
         if self.paused: return 'Checks are paused'
@@ -1027,7 +1047,7 @@ class Guard:
             self.warning = None
             return
         res['ignored'] = self.ignored(res)
-        if full or (res['worst'] in self.cfg['popup_on'] and not res['ignored']):
+        if full or (self.opening(res) and not res['ignored']):
             self.card.show(res, beside=beside, hold=not full)
             self.warning = (res['title'], res.get('plate_no'), severity, time.time(), self.card.win) if severity >= 2 else None
         elif not beside and self.cfg['ok_seconds']:
@@ -1162,7 +1182,7 @@ class Guard:
         if self.tray: self.tray.refresh()
 
     def toggle_warning(self, status):
-        on = self.cfg['popup_on']
+        on = self.popup_on()
         self.set_option('popup_on', [s for s in on if s != status] if status in on else on + [status])
 
     def toggle_autostart(self):

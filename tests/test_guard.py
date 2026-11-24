@@ -351,3 +351,62 @@ def test_the_card_is_on_the_screen_before_its_weigh_in_offer_is_noted(state, mon
     assert 'C3: that a weigh-in was offered could not be noted (StateBusy: the state folder was held elsewhere for more than 10 s): it may be offered again' in log and 'could not be noted (PermissionError' in log
     assert 'weigh_asked' not in fg.load_state() and fg.evaluate(BLUE, CFG, 'Benchy')['weigh']['label'] == 'C3'   # not noted: offered again
 
+
+def spools(*trays):
+    """The H2D idle, with these PLA spools in its first AMS: (colour, grams) each."""
+    return {'gcode_state': 'IDLE', 'ams': {'ams': [{'id': '0', 'tray': [{'id': str(i), 'tray_type': 'PLA', 'tray_color': colour + 'FF', 'remain_g': grams, 'tray_weight': '1000'}
+                                                                         for i, (colour, grams) in enumerate(trays)]}]}}
+
+BLUE_PLA, RED_PLA, GREEN_PLA = '0A2989', 'C12E1F', '00AE42'                                # gcode() needs 9.99 g of the blue and 10.87 g of the red
+
+@pytest.mark.windows
+def test_a_filament_that_falls_short_opens_the_card_whatever_the_other_rows_are(state, monkeypatch):
+    """Any row that opens the card opens it. With "Warn when a colour is not loaded" unticked, a blue whose colour is
+    not loaded hid the red's shortfall: both rank as the worst, the first was taken, and it was not one to warn of. One
+    line for 8 seconds after the slice, nothing beside "Send print job"."""
+    import guard_ui
+    running(monkeypatch, spools((GREEN_PLA, 500), (RED_PLA, 2))); monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True)
+    cfg = dict(CFG, popup_on=[s for s in CFG['popup_on'] if s != 'COLOUR'])
+    res = fg.evaluate(fg.parse_plate(gcode()), cfg, 'Benchy'); res['plate_no'] = 1
+    assert [r['status'] for r in res['rows']] == ['COLOUR', 'SHORT'] and res['worst'] == 'COLOUR'
+    guard = guard_with(cfg); guard.deliver(res)
+    assert guard.card.shown == [('show', 0)]                                               # after the slice: the full card
+    guard = guard_with(cfg); guard.deliver(dict(res), beside=4321)
+    assert guard.card.shown == [('show', 0)]                                               # and beside the dialog
+    running(monkeypatch, spools((GREEN_PLA, 500), (RED_PLA, 500)))                         # the colour alone, unticked: one line, and nothing beside the dialog
+    res = fg.evaluate(fg.parse_plate(gcode()), cfg, 'Benchy'); res['plate_no'] = 1
+    guard = guard_with(cfg); guard.deliver(res); guard.deliver(dict(res), beside=4321)
+    assert [r['status'] for r in res['rows']] == ['COLOUR', 'OK'] and guard.card.shown == [('show', CFG['ok_seconds'])]
+
+@pytest.mark.windows
+def test_not_enough_and_not_loaded_open_the_card_whatever_popup_on_holds(state, monkeypatch):
+    """popup_on decides for colour, two spools, tight and unknown. A list written by hand to add UNKNOWN, as the docs
+    worded it, replaced the whole default and turned the "not enough" card off; so did names in small letters."""
+    running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 2)))
+    short = fg.evaluate(fg.parse_plate(gcode()), CFG, 'Benchy')
+    running(monkeypatch, spools((BLUE_PLA, 500)))
+    missing = fg.evaluate(fg.parse_plate(gcode(types='PLA;PETG;ABS')), CFG, 'Benchy')
+    running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 11)))
+    tight = fg.evaluate(fg.parse_plate(gcode()), CFG, 'Benchy')
+    assert [[r['status'] for r in res['rows']] for res in (short, missing, tight)] == [['OK', 'SHORT'], ['OK', 'MISSING'], ['OK', 'TIGHT']]
+    for popup in (['UNKNOWN'], [], ['unknown', 'tight'], None, 'SHORT,UNKNOWN'):
+        for res in (short, missing):
+            guard = guard_with(dict(CFG, popup_on=popup)); guard.deliver(dict(res))
+            assert guard.card.shown == [('show', 0)], popup
+    for popup, brief in ((['UNKNOWN'], CFG['ok_seconds']), (['unknown', 'tight'], 0), (['Tight'], 0), ([], CFG['ok_seconds'])):
+        guard = guard_with(dict(CFG, popup_on=popup)); guard.deliver(dict(tight))
+        assert guard.card.shown == [('show', brief)], popup                                # tight is popup_on's to decide, in any case of letters
+
+@pytest.mark.windows
+def test_a_name_in_popup_on_the_guard_does_not_know_is_said_once_and_the_menu_still_ticks(state, monkeypatch):
+    """"TIGTH" warns of nothing: the log says so, once in a run of the guard. The menu's items read the list as the guard
+    does, and a click writes it back in capitals."""
+    running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 11)))
+    guard = guard_with(dict(CFG, popup_on=['short', 'TIGTH', 'colour']))
+    for _ in range(3): guard.deliver(fg.evaluate(fg.parse_plate(gcode()), guard.cfg, 'Benchy'))
+    log = (state / 'guard.log').read_text()
+    assert log.count('TIGTH') == 1 and 'popup_on in config.json names "TIGTH", which is no result of a check' in log
+    assert guard.card.shown == [('show', CFG['ok_seconds'])] * 3                           # the tight row is not warned of: one line
+    assert guard.popup_on() == ['SHORT', 'TIGTH', 'COLOUR']
+    guard.toggle_warning('COLOUR'); assert guard.cfg['popup_on'] == ['SHORT', 'TIGTH'] and fg.load_config()['popup_on'] == ['SHORT', 'TIGTH']
+    guard.toggle_warning('UNKNOWN'); assert guard.popup_on() == ['SHORT', 'TIGTH', 'UNKNOWN']

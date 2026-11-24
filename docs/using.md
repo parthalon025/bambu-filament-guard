@@ -48,7 +48,7 @@ When the guard starts, the first time Bambu Studio runs it shows one line, "Bamb
 Its colour and tooltip are the last result. A click shows that result again; before there is one, it checks the newest slice. A click while that check runs shows the "Checking…" line again and starts no second check. The menu: check the newest slice now, pause, self-test, the log, forget what was learned, and the settings:
 
 - One line when there is enough (`ok_seconds`)
-- Warn when a colour is not loaded / when a spool's amount is unknown (`popup_on`)
+- Warn when a colour is not loaded / when a spool's amount is unknown (`popup_on`: the results that open the full card. "Not enough" and "not loaded" open it whatever that list holds, and one such filament is enough, whatever the others are.)
 - Check again at "Send print job" (`at_send`)
 - Reserve: 2, 3 or 5 % of the full spool (`spool_reserve_pct`)
 - Learn from prints, tray by tray (`learn`, on; see [Learning](learning.md))
@@ -67,7 +67,7 @@ Settings are saved to `config.json` beside the script, which holds only what was
 | Not enough | The matching spools together hold less than the need. |
 | Not loaded | No spool of that material is loaded where the print's nozzle can reach it. |
 | Colour not loaded | The material is loaded, this colour of it is not. The nearest spool is named and counts for nothing. |
-| Unknown | The matching spool reports no remaining amount. Shown as one line, like "enough", unless `popup_on` names it. |
+| Unknown | The matching spool reports no remaining amount. Shown as one line, like "enough", unless "Warn when a spool's amount is unknown" is ticked in the icon's settings. |
 
 A spool matches a filament when it is the same material, on the nozzle that prints it, in the project's colour; spools of the same product come first. A spool of similar colour but another product is named in the note and not counted.
 

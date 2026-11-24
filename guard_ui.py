@@ -367,7 +367,7 @@ class Tray:
         Item, Menu, g = pystray.MenuItem, pystray.Menu, guard
         def do(fn): return lambda icon, item: g.todo.put(fn)
         def option(text, key, on, off): return Item(text, do(lambda: g.set_option(key, off if g.cfg[key] == on else on)), checked=lambda item: g.cfg[key] == on)
-        def warns(text, status): return Item(text, do(lambda: g.toggle_warning(status)), checked=lambda item: status in g.cfg['popup_on'])
+        def warns(text, status): return Item(text, do(lambda: g.toggle_warning(status)), checked=lambda item: status in g.popup_on())
         menu = Menu(
             Item(f'Bambu Filament Guard {fg.VERSION}', None, enabled=False),
             Item(lambda item: g.last_text(), None, enabled=False),
