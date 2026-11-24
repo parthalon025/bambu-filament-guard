@@ -6,7 +6,7 @@ A spool without an RFID tag, or on an external holder, reports no amount. Enter 
 
 - A print is taken off in full when it starts to run, also when it is cancelled later.
 - An amount entered while a print runs is what the spool held then: what that print still needs of it comes off at the guard's next look at the printer. When that is not known (the print was not sliced on this computer), the card says it could not count the running print.
-- A print the guard cannot count (not sliced on this computer, or its tray cannot be told) makes the amount "out of date": unknown again, until it is entered again.
+- A print the guard cannot count (not sliced on this computer, or its tray cannot be told) makes the amount "out of date": unknown again, until it is entered again. So does a print of a filament that Bambu Studio gives no weight (a profile with density 0), for the spool that filament prints from.
 - When the printer was not followed for ten minutes or more (the computer asleep) and has printed something else since, every amount entered for it is out of date.
 - The entry ends when the printer reports another material or colour in that tray.
 

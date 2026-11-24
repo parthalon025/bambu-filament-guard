@@ -27,7 +27,7 @@ Tests marked `windows` drive the card, the icon or the state file's named mutex,
 
 | File | Tests |
 |---|---|
-| `tests/test_gcode.py` | reading a sliced plate: the header, and the grams each layer takes with the purge |
+| `tests/test_gcode.py` | reading a sliced plate: the header, and the grams each layer takes with the purge; where slices are looked for; `check` on a file: its plates, what it cannot read, its exit codes |
 | `tests/test_assessment.py` | one filament against the spools that could print it: enough, tight, two spools, colour, nozzle |
 | `tests/test_running_print.py` | what the running print still needs, matched to its slice, taken off its spools |
 | `tests/test_entered_amounts.py` | amounts entered by hand, counted down, and the link that follows a printer |
