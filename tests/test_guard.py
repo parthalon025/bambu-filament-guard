@@ -1598,3 +1598,19 @@ def test_the_menus_start_automatically_leaves_the_shortcut_of_another_copy_alone
     points[0] = fg.HERE; guard = guard_with(); guard.toggle_autostart()
     assert not lnk.exists() and guard.card.shown == [] and made == []                         # this copy's own: removed, as before
     guard.toggle_autostart(); assert made == [1] and guard.card.shown == []                   # and none there: made
+
+def test_one_printer_found_does_not_keep_another_from_being_looked_for(state, monkeypatch):
+    """A printer whose address is kept is listened for again at most every ten minutes, when it does not answer there.
+    That was one timer for all printers: within ten minutes of listening for any of them, a second printer that had
+    a new address was not looked for, and its checks went on failing at the old one. Each printer has its own."""
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {'SERIAL': 'code', 'SERIAL2': 'code'}}); listened, now = [], [1000.0]
+    monkeypatch.setattr(fg, 'discover', lambda want, seconds=8.0: listened.append(want) or {'SERIAL2': '192.0.2.61'}); monkeypatch.setattr(fg.time, 'time', lambda: now[0])
+    fg.update_state(lambda st: st.update(ips={'SERIAL': '192.0.2.50', 'SERIAL2': '192.0.2.51'}, discovered_at=990.0))   # as 1.4.0 kept it: one time for all
+    assert fg.printer_ip('SERIAL', CFG, refresh=True) == '192.0.2.50' and listened == [['SERIAL']]                # not heard: the address kept stands
+    assert fg.printer_ip('SERIAL2', CFG, refresh=True) == '192.0.2.61' and listened == [['SERIAL'], ['SERIAL2']]  # the other is looked for all the same, and found
+    now[0] += 300
+    assert fg.printer_ip('SERIAL', CFG, refresh=True) == '192.0.2.50' and fg.printer_ip('SERIAL2', CFG, refresh=True) == '192.0.2.61' and len(listened) == 2   # each within its own ten minutes
+    now[0] += 400
+    assert fg.printer_ip('SERIAL', CFG, refresh=True) == '192.0.2.50' and listened[2:] == [['SERIAL']]
+    st = fg.load_state()
+    assert st['listened'] == {'SERIAL': 1700.0, 'SERIAL2': 1000.0} and 'discovered_at' not in st

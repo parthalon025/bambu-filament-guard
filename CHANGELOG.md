@@ -87,6 +87,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - The self-test and `status` said "It starts automatically" whenever a Startup shortcut existed, also when that shortcut starts another copy of the guard, in another folder. They say so now only when it points into their own folder, and otherwise "It starts another copy, in …", with the folder.
 - "Start automatically" in the icon's menu removed the Startup shortcut whenever there was one, also the one of another copy of the guard, installed from another folder. It removes only a shortcut that points into its own folder; another is left alone, and a card says which copy it starts.
 - A weigh-in taken back with `learned --forget-weigh`, and an amount removed with "Forget this amount", stayed in the copy the guard keeps of its state files (`learned.json.bak`, `state.json.bak`), and came back from there when the file was next damaged. Whatever is forgotten now takes that copy with it, as forgetting what was learned already did.
+- With two printers, one that had a new address was not looked for within ten minutes of the guard having listened for the other: its checks went on failing at the old address. Each printer is now looked for on a time of its own.
 
 ## [1.4.0] - 2026-11-20
 

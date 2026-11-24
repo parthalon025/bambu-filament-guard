@@ -682,8 +682,9 @@ def discover(want, seconds=8.0):
     return found
 
 def printer_ip(serial, cfg, refresh=False):
-    """The printer's IP: config.json, else the last one seen, else its LAN announcement (asked for at most every 10 minutes).
-    Of what discover heard, the address of this serial alone is kept. What an earlier version kept is not used and
+    """The printer's IP: config.json, else the last one seen, else its LAN announcement (asked for at most every 10 minutes,
+    by a time of this printer's own, 'listened': one time for all kept a second printer from being looked for within
+    ten minutes of the first). Of what discover heard, the address of this serial alone is kept. What an earlier version kept is not used and
     goes from the state file at this look, listened or not: an address that is no local one (it took whatever an
     announcement named), and whatever is kept under a key that is no serial Bambu Studio knows (it kept every USN it
     heard, for good: a burst of junk made the state file, read whole every 3 seconds, hundreds of MB)."""
@@ -692,13 +693,14 @@ def printer_ip(serial, cfg, refresh=False):
     try: known = set(bs_conf().get('access_code', {})) | {serial}
     except Exception: known = {serial}
     tidy = lambda kept: {s: a for s, a in (kept.items() if isinstance(kept, dict) else ()) if s in known and local_address(a)}
+    times = lambda kept: {s: t for s, t in (kept.items() if isinstance(kept, dict) else ()) if s in known and type(t) in (int, float)}
     state = load_state(); ips = tidy(state.get('ips', {}))
-    listen = (refresh or serial not in ips) and time.time() - state.get('discovered_at', 0) > (0 if serial not in ips else 600)
+    listen = (refresh or serial not in ips) and time.time() - times(state.get('listened')).get(serial, 0) > (0 if serial not in ips else 600)
     if not listen and ips == state.get('ips', {}): return ips.get(serial)
     found = local_address(discover([serial]).get(serial)) if listen else None
     def change(st):
-        st['ips'] = tidy(st.get('ips', {}))
-        if listen: st['discovered_at'] = time.time()
+        st['ips'], st['listened'] = tidy(st.get('ips', {})), times(st.get('listened')); st.pop('discovered_at', None)   # 1.4.0's one time for all
+        if listen: st['listened'][serial] = time.time()
         if found: st['ips'][serial] = found
         return st['ips'].get(serial)
     return update_state(change)
