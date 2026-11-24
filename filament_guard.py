@@ -719,7 +719,7 @@ def credit(trays, owed, learned=None, running=None, order=None, taken=True, gone
         theirs); what none of them holds is 'beyond' (assess and the card say so).
       - What the print needs of a tray whose amount is not known (no tag and no entry, or an entry out of date), or of
         one that is no longer loaded (gone: such trays as the slice names their filament, with what they are owed), is
-        all taken as beyond it: once it vanished there, and the spool the AMS had gone on with read "enough". For a
+        all taken as beyond it: left out, it vanishes, and the spool the AMS has gone on with reads "enough". For a
         tray that is gone, what no loaded spool holds is its 'beyond'; of a tray of unknown amount nobody knows that.
     Keeps the amount before any of this ('reads') whenever something was corrected or taken off. The spools a print
     goes on with are taken in the order they would be without learning (`order`), so that no tray is ever counted
@@ -781,8 +781,8 @@ def share_spools(rows, filaments, trays, cfg, times):
 def uncounted(rows, drawn):
     """A print the guard could not count is on the printer, and of the trays it may draw on (drawn) nobody knows what
     will be left: no filament that rests on one of them is "enough". Such a row is UNKNOWN, and one that warns already
-    keeps its warning; both say why. (The incident of 2026-11-19 again: a 450 g job sent from elsewhere ran from a spool
-    reading 500 g, and a 300 g plate read "enough" on it, with exit code 0.)"""
+    keeps its warning; both say why. (Else it is the incident of 2026-11-19 over again: with a 450 g job sent from
+    elsewhere on a spool reading 500 g, a 300 g plate reads "enough" on that spool, exit code 0.)"""
     for row in rows:
         on = [t['label'] for t in row['trays'] if t['label'] in drawn]
         if not on or row['status'] not in ('OK', 'TIGHT', 'SPLIT', 'SHORT'): continue

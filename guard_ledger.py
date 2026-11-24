@@ -43,8 +43,8 @@ RUN = ('RUNNING', 'PAUSE')                                 # states in which a j
 NO_JOB = ['-', '-']
 GAP = 600                                                  # seconds without a report from the printer after which jobs may have been missed
 SILENT = 60                                                # seconds without a report after which the status held is no longer the printer's:
-                                                           # the link is ended and made anew (a link went on being read for two hours after
-                                                           # the Wi-Fi had gone, and the prints of those hours were never taken off)
+                                                           # the link is ended and made anew (up to 1.4.0 a link gone silent was read on as
+                                                           # if live, and the prints of those hours were never taken off)
 LOOKED = 1800                                              # seconds a printer a check looked at is followed for learning: a print sent
                                                            # after the check is seen from its start
 PRINTING = 2 * 3600                                        # seconds a printer last seen printing is still followed for learning: while it
@@ -73,8 +73,8 @@ def followed(cfg, state=None):
 def ended(e, t, empty):
     """Why an entry has ended, or '' while it stands. t: its tray among the loaded ones, else None; empty: the status
     says that tray is without a spool. An empty tray ends an entry only once the tray was seen holding the entry's
-    filament since the entry was made ('loaded'): the weight is typed while the spool is still on the scale, and the
-    check that follows once took the entry away again."""
+    filament since the entry was made ('loaded'): the weight is typed while the spool is still on the scale, and up to
+    1.4.0 the check that follows took the entry away again."""
     if t is None: return 'the tray is empty' if empty and e.get('loaded') else ''
     if t['grams'] is not None: return 'the printer measures the tray now'
     return '' if identity(t) == [e['type'], e['colour']] else f"the tray holds {t['type'].upper()} {t['colour']} now"
@@ -96,7 +96,7 @@ def apply(trays, serial, complete=True):
     them 'stale' when that amount is out of date. Drops the entries that have ended (ended): another filament in the
     tray, a tray the printer now measures, or a tray that is empty. Empty is a tray that is not among the loaded ones
     when the status is complete, i.e. has its spools, and shows a spool in an AMS: a report still in pieces, with an
-    "ams" part and no tray in it yet, once ended every entry."""
+    "ams" part and no tray in it yet, would end every entry."""
     def change(state):
         book = state.get('spools', {}).get(serial, {})
         settle(book, trays, set(book) if complete and any(not t['label'].startswith('Ext') for t in trays) else ())
@@ -174,9 +174,9 @@ def fits(s, name, layers, plate=None):
 def match_slice(name, layers, slices, plate=None):
     """The slice a job was made from: the newest that fits it (fits: the job's layer count; its plate, when that is
     known) among the slices of the project it is named after. That project is the one whose title is the job's name;
-    failing that, the one with the longest title that, followed by "_", starts it. A job "Bracket_v2" was once counted
-    by a newer slice of the project "Bracket", 40 g for 300 g. When no slice of that project fits, the job is not
-    matched to another project's: None, and it is not counted. Two plates of one project with the same layer count are
+    failing that, the one with the longest title that, followed by "_", starts it: by the newest title that starts
+    it, a job "Bracket_v2" would be counted by a newer slice of the project "Bracket". When no slice of that project
+    fits, the job is not matched to another project's: None, and it is not counted. Two plates of one project with the same layer count are
     told apart only by the plate."""
     titles = {s['title'] for s in slices if name == s['title'] or name.startswith(s['title'] + '_')}
     title = name if name in titles else max(titles, key=len, default=None)
@@ -184,9 +184,10 @@ def match_slice(name, layers, slices, plate=None):
 
 def versions(status, slices):
     """The slices the job the printer shows may have been made from: the newest that fits it (match_slice) and the
-    earlier slices of the same plate that fit it too, which fg.remember_slice keeps. A plate sliced again while it
-    prints (fewer copies for the next run) once had the running job counted by the new slice: 91 g where it needed
-    205 g. Which of them the printer runs cannot be read, so owed() and draws() take the largest need among them."""
+    earlier slices of the same plate that fit it too, which fg.remember_slice keeps: with the newest alone, a plate
+    sliced again while it prints (fewer copies for the next run) has the running job counted by the new slice, 91 g
+    where it needs 205 g. Which of them the printer runs cannot be read, so owed() and draws() take the largest need
+    among them."""
     name, layers, plate = status.get('subtask_name') or '', status.get('total_layer_num'), job_plate(status)
     s = match_slice(name, layers, slices, plate)
     return [x for x in slices if (x['title'], x.get('plate')) == (s['title'], s.get('plate')) and fits(x, name, layers, plate)] if s else []
@@ -345,8 +346,8 @@ def catch_up(serial, status, state=None):
 def unfollowed(serial, before, followed):
     """Makes out of date, at a follower's first look, the entries made before `before` that nothing has followed the
     printer since (followed: when it was last followed, None: never). An amount entered with no guard running, on the
-    card of "check --popup", was taken for the spool's amount by a guard started a day and two prints later: the first
-    look counts nothing of what has run."""
+    card of "check --popup", would else be taken for the spool's amount by a guard started a day and two prints later:
+    the first look counts nothing of what has run."""
     def change(state):
         old = [l for l, e in state.get('spools', {}).get(serial, {}).items() if e['at'] < before and not (followed and followed >= e['at']) and not e.get('stale')]
         for l in old: state['spools'][serial][l]['stale'] = True
@@ -425,9 +426,9 @@ class JobWatch(threading.Thread):
             except Exception as e: self.say(f'learning: {e.__class__.__name__}: {e}')   # learning never stops the entered amounts' count
 
     def end(self, status, state, at):
-        """Ends the entries whose spool is gone, as a check does (apply), on a status that has its spools: an entry
-        outlived the change to another spool of its material and colour when no plate was sliced while the tray was
-        empty. Only what two looks in a row agree on is ended, as one report may carry a piece of the AMS; and a tray is
+        """Ends the entries whose spool is gone, as a check does (apply), on a status that has its spools: ended at
+        checks alone, an entry outlives the change to another spool of its material and colour whenever no plate is
+        sliced while the tray is empty. Only what two looks in a row agree on is ended, as one report may carry a piece of the AMS; and a tray is
         empty when the status says so (the external holder never does)."""
         import guard_learn
         if 'ams' not in status: return
