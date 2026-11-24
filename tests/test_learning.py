@@ -400,6 +400,31 @@ def test_the_largest_of_a_few_readings_at_empty_does_not_measure_the_reserve():
     assert gn.measured(gn.estimates(together), t, True) and not gn.measured(gn.estimates(together), t)      # and only when the setting is on
     assert t['a'] == pytest.approx(20 + gs.t_quantile(0.9, 2) * 2 * (4 / 3) ** 0.5) and t['a'] > 22
 
+def test_a_spool_seen_at_empty_more_than_once_is_one_reading_at_empty():
+    """The review's case: the card offers "Weigh A1…" week after week while the same low spool sits in A1, and it is
+    weighed near empty three times, 20, 19 and 18 g above what it holds. That is a scale repeating, not spools that
+    differ, and does not measure the reserve. 1.4.0 took it for a spread of 1 g, counted the next spool, reading 103 g,
+    as 81.8 g with a reserve of 5 g, and said "enough" for a print of 75 g."""
+    same = {'id': 'SAME', 'type': 'PLA', 'colour': '#C12E1F', 'fid': 'GFA00', 'weight': 1000.0}
+    weighs = [{'at': 100.0 + i, 'reading': r, 'weight': g, 'spool': dict(same)} for i, (r, g) in enumerate(((120.0, 100.0), (110.0, 91.0), (100.0, 82.0)))]
+    h = {'A1': {'jobs': [scored(101.0, at=float(i)) for i in range(9)], 'weighs': weighs}}
+    est = gn.estimates(h); t = est['trays']['A1']
+    assert [v for _, v, _ in t['exact']] == [20.0, 19.0, 18.0] and [v for _, v, _ in t['spools']] == [20.0]      # the largest of the spool: the stricter
+    assert est['printer']['df'] == 0 and est['printer']['spread'] is None and not gn.measured(est, t, True)
+    assert t['a'] == pytest.approx(19 + gs.t_quantile(0.9, 2) * (4 / 3) ** 0.5)                 # and counted no higher than with each weigh-in for itself
+    nxt = [dict(tray('A1', 103, weight=1000), spool='THE NEXT ONE')]
+    row = fg.assess(fil(75), fg.credit([dict(x) for x in nxt], {}, gn.corrections('S', nxt, {'S': h}, MEASURED)), MEASURED)
+    assert (row['status'], row['measured'], row['reserve']) == ('TIGHT', False, 30.0) and row['best'] == pytest.approx(103 - t['a'])
+    for i, w in enumerate(weighs): w['spool']['id'] = f'S{i}'                                   # three spools that read 20, 19 and 18 g at empty do
+    est = gn.estimates(h)
+    assert est['printer']['df'] == 2 and gn.measured(est, est['trays']['A1'], True)
+    weighed_then_dry = {'A1': {'jobs': h['A1']['jobs'], 'dry': [empty_at(20.0, 50.0, 'X'), empty_at(22.0, 60.0, 'Y')], 'weighs': [{'at': 40.0, 'reading': 118.0, 'weight': 100.0, 'spool': dict(same, id='X')}]}}
+    est = gn.estimates(weighed_then_dry); t = est['trays']['A1']                                 # X weighed 18 g above what it held, then run dry at 20 g: one spool
+    assert sorted(v for _, v, _ in t['spools']) == [20.0, 22.0] and est['printer']['df'] == 1 and not gn.measured(est, t, True)
+    untold = {'A1': {'jobs': h['A1']['jobs'], 'dry': [dict(empty_at(r, 50.0 + i), spool={'id': None, 'type': 'PLA', 'colour': '#C12E1F', 'fid': 'GFA00', 'weight': 1000.0}) for i, r in enumerate((20.0, 22.0, 18.0))]}}
+    est = gn.estimates(untold)                                                                   # spools without a tag that cannot be told apart: one
+    assert len(est['trays']['A1']['spools']) == 1 and not gn.measured(est, est['trays']['A1'], True)
+
 def test_spools_seen_feeding_lower_outweigh_a_run_dry_once_there_are_enough(state):
     """1.3.0 dropped a run-dry at once when a later spool fed lower; 1.4.0 weighs the two (Kaplan-Meier): a few keep
     the run-dry, enough spools seen feeding lower outweigh it."""

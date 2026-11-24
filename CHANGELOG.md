@@ -15,6 +15,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 ### Fixed
 
 - With learning on, a check could answer "enough" where 1.3.0's rules said "tight", before any reserve was measured. Which spool is the fullest changes with what was learned of the trays: a 1 kg spool counted lower for another tray's run-dry left a 250 g spool the fullest, and the reserve fell from 30 g to 7.5 g. The reserve no longer depends on which spool is the fullest.
+- One spool weighed near empty three times, or weighed and then run dry, counted as three readings at empty. The measured reserve could then be earned on how a scale repeats, with no second spool seen. A spool now counts once, by its largest reading at empty; no tray is counted higher for it.
 
 ## [1.4.0] - 2026-11-20
 

@@ -41,7 +41,10 @@ change, each record weighed DISCOUNT^age:
   a     an upper quantile of the reading at empty, Kaplan-Meier over exact and censored observations; a tray with
         fewer than A_OWN of its own takes the printer's, but never less than its own largest exact one. Once exact
         observations repeat within trays (SPREAD_DF), also the bound for one more spool from their spread: the largest
-        of a few is not a 90 % bound.
+        of a few is not a 90 % bound. A spool observed exactly more than once (weighed near empty twice, weighed and
+        then run dry) is one observation, its largest: its repeats show how a scale and a gauge repeat, not how spools
+        differ. And a is never taken smaller than it comes out with every record counted for itself, as 1.4.0 counted:
+        counting a spool once must not count a tray with more.
   margin the one-sided conformal bound of the scaled forecast errors, the printer's (and the tray's, the larger, once
         it has SCORED_MIN of its own).
 A tray whose learned forecast does clearly worse than the plain one (the sign test, REF_*) has rho and pre set aside.
@@ -94,10 +97,10 @@ ALPHA = 0.10                  # the share of forecasts the measured margin may f
 MARGIN_K = 20.0               # grams added to a print's size to scale its error: a whole-gram reading puts about 1 g of
                               # error on any fall, and a 20 g print is where that equals a 5 % rate error
 SCORED_MIN = 9                # scored prints before a conformal bound exists: ceil((n + 1)(1 - ALPHA)) <= n needs n >= 9
-SPREAD_DF = 2                 # the measured reserve needs the spread of a from spool to spool: exact observations that repeat
-                              # within a tray, two degrees of freedom at least (3 in one tray, or 2 in each of two). The
-                              # largest of a few observations is not a 90 % bound (with n of them it covers n / (n + 1)): the
-                              # simulation's noisy spools ran dry after "enough" when only that was used
+SPREAD_DF = 2                 # the measured reserve needs the spread of a from spool to spool: exact observations of different
+                              # spools that repeat within a tray, two degrees of freedom at least (3 spools in one tray, or 2
+                              # in each of two). The largest of a few observations is not a 90 % bound (with n of them it
+                              # covers n / (n + 1)): the simulation's noisy spools ran dry after "enough" when only that was used
 OWN_EXACT_MIN = 1             # ...and one of the tray judged: what a tray reads at empty is its own (a wheel that counts
                               # short), and another tray's says nothing of it
 RESERVE_FLOOR = (5.0, 0.02)   # grams, share of the need: the measured reserve never goes below either
@@ -246,18 +249,21 @@ def given_all(j):
     return j['sliced']['printed'] + j['sliced']['purge']
 
 def observations(h, start):
-    """The observations of a tray's reading at empty since `start`: ([exact a], [(v, exact)] for Kaplan-Meier, how many
-    of its own speak of the empty end, the weigh-ins near empty)."""
+    """The observations of a tray's reading at empty since `start`: (every exact one, [(kind, a, spool)]; the same with
+    each spool once, by its largest; the lowest reading each other spool was seen still feeding at, [(v, False)] as
+    Kaplan-Meier takes what lies below v; the weigh-ins near empty)."""
     exact = [('dry', d['reading'], d.get('spool')) for d in since(h.get('dry', []), start)]
     near = [w for w in since(h.get('weighs', []), start) if w['weight'] <= A_WEIGH * ((w.get('spool') or {}).get('weight') or 1000.0)]
     exact += [('weighed', w['reading'] - w['weight'], w.get('spool')) for w in near]
-    known = {spool_key(s) for _, _, s in exact}
+    once = {}
+    for o in exact:
+        k = spool_key(o[2])
+        if k not in once or o[1] > once[k][1]: once[k] = o
     low = {}
     for s in since(h.get('seen', []), start) + [dict(reading=fed_of(j), spool=j.get('spool')) for j in since(h.get('jobs', []), start) if 'fed' not in j]:
         k = spool_key(s.get('spool'))
-        if s['reading'] is not None and k not in known: low[k] = min(low.get(k, s['reading']), s['reading'])
-    obs = [(v, True) for _, v, _ in exact] + [(v, False) for v in low.values()]
-    return exact, obs, len(exact) + sum(1 for v in low.values() if v <= DRY_MOST), near
+        if s['reading'] is not None and k not in once: low[k] = min(low.get(k, s['reading']), s['reading'])
+    return exact, list(once.values()), [(v, False) for v in low.values()], near
 
 def reference(scores):
     """Whether a tray's learned forecast is set aside: walked through its scores in order, set aside when, over the last
@@ -275,7 +281,8 @@ def reference(scores):
 def estimates(printer_history):
     """Everything learned of one printer: {'trays': {label: tray}, 'printer': {...}, 'blank': the tray of a label with
     no history}. A tray: 'rho', 'pre' (None: no evidence; set aside: 'aside'), 'a' (None: nothing measured), 'q' (its
-    margin, None until the printer has SCORED_MIN scores), and the evidence each rests on."""
+    margin, None until the printer has SCORED_MIN scores), and the evidence each rests on: 'exact', every exact
+    observation of a, and 'spools', the same with each spool once."""
     trays = {}
     for label, h in printer_history.items():
         start = max([c['at'] for c in h.get('changes', [])] or [0])
@@ -283,9 +290,9 @@ def estimates(printer_history):
         rated = [j for j in jobs if j.get('whole') and j.get('start') is not None and j.get('end') is not None and given_all(j) >= RATE_JOB_GRAMS]
         lost = [j for j in jobs if j.get('before') is not None and j.get('start') is not None]
         scores = [j['score'] for j in since(h.get('jobs', []), start) if j.get('score')]
-        exact, obs, own, near = observations(h, start)
+        exact, spools, low, near = observations(h, start)
         trays[label] = {'start': start, 'change': ([c for c in h.get('changes', []) if c['at'] == start] or [None])[0], 'rated': rated, 'lost': lost,
-                        'scores': scores, 'exact': exact, 'obs': obs, 'own': own, 'near': near, 'weighs': h.get('weighs', [])}
+                        'scores': scores, 'exact': exact, 'spools': spools, 'low': low, 'near': near, 'weighs': h.get('weighs', [])}
     ratios = [(j['start'] - j['end']) / given_all(j) for t in trays.values() for j in t['rated']]
     lo, hi = (st.quantile(ratios, CLIP_QUANTILES[0]), st.quantile(ratios, CLIP_QUANTILES[1])) if len(ratios) >= CLIP_FROM else CLIP_FIXED
     num = den = 0.0
@@ -302,9 +309,27 @@ def estimates(printer_history):
     k_pre = st.shrinkage([t['loss'] for t in trays.values() if t['lost']], SHRINK_LEAST)
     every = [scaled(s, 'applied') for t in trays.values() for s in t['scores']]
     q_p = st.conformal_bound(every, ALPHA) if len(every) >= SCORED_MIN else None
-    pooled = [o for t in trays.values() for o in t['obs']]
-    a_p = st.km_upper(pooled, ALPHA)
-    spread, df = st.pooled_spread([[v for _, v, _ in t['exact']] for t in trays.values()])
+    def at_empty(key):
+        """({label: (a, what it is from)}, the printer's a, the spread of exact observations within trays and its degrees
+        of freedom), with t[key] taken for the trays' exact observations."""
+        seen = {label: [v for _, v, _ in t[key]] for label, t in trays.items()}
+        obs = {label: [(v, True) for v in seen[label]] + t['low'] for label, t in trays.items()}
+        a_p = st.km_upper([o for label in trays for o in obs[label]], ALPHA)
+        spread, df = st.pooled_spread(list(seen.values()))
+        out = {}
+        for label, t in trays.items():
+            mine = max(seen[label], default=None)
+            if len(seen[label]) + sum(1 for v, _ in t['low'] if v <= DRY_MOST) >= A_OWN: a, whose = st.km_upper(obs[label], ALPHA), 'own'
+            else: a, whose = max([x for x in (a_p, mine) if x is not None], default=None), 'printer' if a_p is not None and (mine is None or a_p > mine) else 'own'
+            pred = st.prediction_bound(seen[label], spread, df, 1 - ALPHA) if seen[label] and df >= SPREAD_DF else None
+            if pred is not None and (a is None or pred > a): a, whose = pred, 'spread'
+            out[label] = (a, whose)
+        return out, a_p, spread, df
+    larger = lambda x, y: y if x[0] is None or (y[0] is not None and y[0] > x[0]) else x
+    by_spool, a_p, spread, df = at_empty('spools')                  # each spool once: what the spread, and with it the measured reserve, rests on
+    by_record, a_records = at_empty('exact')[:2]                    # every record for itself, as 1.4.0 counted: a floor under a, no more
+    a_p = larger((a_p,), (a_records,))[0]
+    for label, t in trays.items(): t['a'], t['a_from'] = larger(by_spool[label], by_record[label])
     def shrunk(own, k, whole):
         m, n, _ = own
         if whole is None: return None
@@ -316,19 +341,14 @@ def estimates(printer_history):
         t['aside'], t['worse'], t['pairs'] = reference(t['scores'])
         q_t = st.conformal_bound([scaled(s, 'applied') for s in t['scores']], ALPHA) if len(t['scores']) >= SCORED_MIN else None
         t['q'] = max(q_t, q_p) if q_t is not None and q_p is not None else q_p
-        mine = max([v for _, v, _ in t['exact']], default=None)
-        if t['own'] >= A_OWN: t['a'], t['a_from'] = st.km_upper(t['obs'], ALPHA), 'own'
-        else: t['a'], t['a_from'] = max([x for x in (a_p, mine) if x is not None], default=None), 'printer' if a_p is not None and (mine is None or a_p > mine) else 'own'
-        t['pred'] = st.prediction_bound([v for _, v, _ in t['exact']], spread, df, 1 - ALPHA) if t['exact'] and df >= SPREAD_DF else None
-        if t['pred'] is not None and (t['a'] is None or t['pred'] > t['a']): t['a'], t['a_from'] = t['pred'], 'spread'
         t['interval'] = st.ratio_interval([(g, g * r) for g, r, _ in t['ratio']])
-    blank = {'start': 0, 'change': None, 'rated': [], 'lost': [], 'scores': [], 'exact': [], 'obs': [], 'own': 0, 'near': [], 'weighs': [], 'ratio': [],
+    blank = {'start': 0, 'change': None, 'rated': [], 'lost': [], 'scores': [], 'exact': [], 'spools': [], 'low': [], 'near': [], 'weighs': [], 'ratio': [],
              'rho_own': (None, 0.0, None), 'loss': (None, 0.0, None), 'rho': rho_p, 'pre': pre_p, 'aside': False, 'worse': 0, 'pairs': 0,
-             'q': q_p, 'a': a_p, 'a_from': 'printer', 'interval': None, 'pred': None}
+             'q': q_p, 'a': a_p, 'a_from': 'printer', 'interval': None}
     products = {}
     for t in trays.values():
         for j, (g, r, _) in zip(t['rated'], t['ratio']): products.setdefault((j.get('spool') or {}).get('fid') or '?', []).append((g, g * r))
-    printer = {'scored': len(every), 'exact': sum(len(t['exact']) for t in trays.values()), 'df': df, 'spread': spread, 'q': q_p, 'rho': rho_p, 'pre': pre_p, 'a': a_p,
+    printer = {'scored': len(every), 'spools': sum(len(t['spools']) for t in trays.values()), 'df': df, 'spread': spread, 'q': q_p, 'rho': rho_p, 'pre': pre_p, 'a': a_p,
                'k_rho': k_rho, 'k_pre': k_pre, 'clip': (lo, hi), 'ratios': len(ratios),
                'products': {fid: (sum(y for _, y in p) / sum(x for x, _ in p), len(p), st.ratio_interval(p)) for fid, p in products.items()}}
     return {'trays': trays, 'printer': printer, 'blank': blank}
@@ -343,7 +363,7 @@ def forecast(t, n):
 def measured(est, t, cfg_on=False):
     """Whether a check on this tray may use the measured reserve (see the module's docstring)."""
     p = est['printer']
-    return bool(cfg_on and p['scored'] >= SCORED_MIN and p['df'] >= SPREAD_DF and len(t['exact']) >= OWN_EXACT_MIN and t['q'] is not None)
+    return bool(cfg_on and p['scored'] >= SCORED_MIN and p['df'] >= SPREAD_DF and len(t['spools']) >= OWN_EXACT_MIN and t['q'] is not None)
 
 def bias(t, tray):
     """The latest weigh-in of the spool now in the tray: (reading - weight, when) if the spool read more than it held."""
@@ -397,7 +417,7 @@ def corrections(serial, trays, history=None, cfg=None, plain_rules=False):
 
 def a_words(t):
     kinds = {}
-    for kind, _, _ in t['exact']: kinds[kind] = kinds.get(kind, 0) + 1
+    for kind, _, _ in t['spools']: kinds[kind] = kinds.get(kind, 0) + 1
     seen = ', '.join(f"{n} {'run-dr' + ('ies' if n > 1 else 'y') if k == 'dry' else 'weighed near empty'}" for k, n in sorted(kinds.items()))
     whose = "spools in this printer's trays" if t['a_from'] == 'printer' else 'spools in it'
     return f"{whose} read up to {t['a']:.0f} g when empty" + (f' ({seen})' if seen else '')
@@ -406,7 +426,7 @@ def reserve_words(serial, history=None, cfg=None):
     """The reserve a check on this printer uses, in one short clause."""
     p = estimates((load() if history is None else history).get(serial, {}))['printer']
     if not (cfg or {}).get('measured_reserve', False): return 'the reserve is the fixed one (measuring it is off)'
-    if p['scored'] >= SCORED_MIN and p['df'] >= SPREAD_DF: return f"the reserve is measured from {p['scored']} scored prints and {p['exact']} readings at empty"
+    if p['scored'] >= SCORED_MIN and p['df'] >= SPREAD_DF: return f"the reserve is measured from {p['scored']} scored prints and {p['spools']} readings at empty"
     need = [x for x in (f"{SCORED_MIN - p['scored']} more scored prints" if p['scored'] < SCORED_MIN else '',
                         f"{SPREAD_DF - p['df']} more readings at empty in a tray that has one" if p['df'] < SPREAD_DF else '') if x]
     return 'the reserve is the fixed one: ' + ' and '.join(need) + ' measure it'
@@ -673,7 +693,7 @@ def report(history, names=None, learning=True, cfg=None):
                          + (f" (its own {m:.3f} over {len(t['rated'])} print{'s' if len(t['rated']) != 1 else ''}" + (f", 90 % interval {ci[0]:.3f}..{ci[1]:.3f}" if ci else '') + ')' if m is not None else
                             ' (no sound whole print of its own: the printer\'s)' if t['rho'] is not None else ': no sound whole print on this printer yet'))
             lines.append('    pre   ' + ('-' if t['pre'] is None else f"{t['pre']:.1f} g") + (f" (its own {t['loss'][0]:.1f} g over {many(len(t['lost']), 'print')})" if t['loss'][0] is not None else ''))
-            seen = [v for v, exact in t['obs'] if not exact]
+            seen = [v for v, _ in t['low']]
             source = {'own': 'from its own spools', 'printer': "from the printer's spools", 'spread': 'its spools, with their spread from spool to spool'}[t['a_from']]
             lines.append('    empty ' + (f"{t['a']:.0f} g: the most it reads with its spool empty ({source})" if t['a'] is not None else 'what it reads with its spool empty is not known') + '; seen: '
                          + (', '.join(f"{v:.0f} g {'ran dry' if k == 'dry' else 'weighed near empty'}" for k, v, _ in t['exact']) or 'no run-dry or weigh-in near empty')
@@ -685,7 +705,7 @@ def report(history, names=None, learning=True, cfg=None):
             else:
                 why = [x for x in (f"{SCORED_MIN - p['scored']} more scored prints on the printer" if p['scored'] < SCORED_MIN else '',
                                    f"{SPREAD_DF - p['df']} more readings at empty in a tray that has one" if p['df'] < SPREAD_DF else '',
-                                   'a reading at empty of its own' if len(t['exact']) < OWN_EXACT_MIN else '', 'the setting is off' if not on else '') if x]
+                                   'a reading at empty of its own' if len(t['spools']) < OWN_EXACT_MIN else '', 'the setting is off' if not on else '') if x]
                 lines.append('    margin not in use: ' + (', '.join(why) or 'no bound yet'))
             split = printed_and_purged(jobs)
             lines.append('    per gram printed / purged: ' + (f'{split[0]:.3f} / {split[1]:.3f} g (a report only, not used)' if split else 'not enough to tell'))
