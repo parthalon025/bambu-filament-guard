@@ -443,7 +443,7 @@ class Tray:
         self.guard, self.icon, self.shown = guard, None, None
         try: import pystray
         except ImportError:
-            fg.log('no icon in the notification area: the Python package pystray is missing (pip install pystray)'); return
+            fg.log('no icon in the notification area: ' + fg.missing('pystray')); return
         Item, Menu, g = pystray.MenuItem, pystray.Menu, guard
         def do(fn): return lambda icon, item: g.todo.put(fn)
         def option(text, key, on, off): return Item(text, do(lambda: g.set_option(key, off if g.cfg[key] == on else on)), checked=lambda item: g.cfg[key] == on)

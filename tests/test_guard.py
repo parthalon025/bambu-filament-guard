@@ -1280,3 +1280,24 @@ def test_the_packaged_guard_starts_tk_without_another_programs_tcl_library(monke
         monkeypatch.setenv('TCL_LIBRARY', 'elsewhere'); monkeypatch.setenv('TK_LIBRARY', 'elsewhere')
         monkeypatch.setattr(fg, 'HERE', fg.os.path.join('C:', 'BambuFilamentGuard', here)); guard_ui.make_root()
         assert seen[-1] == {'TCL_LIBRARY': kept, 'TK_LIBRARY': kept}, here
+
+PACKAGED, FROM_SOURCE = fg.os.path.join('C:', 'BambuFilamentGuard', 'app'), fg.os.path.join('C:', 'src', 'bambu-filament-guard')   # where the scripts are: build.py puts them in app/
+
+def test_a_missing_package_is_told_as_what_can_be_done_about_it(state, monkeypatch):
+    """"pip install paho-mqtt" was the advice on the packaged guard's card too. That guard has no pip, and its Python is
+    its own: there the folder is incomplete, and unzipping it again is what helps."""
+    monkeypatch.setitem(sys.modules, 'paho', None)                                           # no paho-mqtt to import
+    for here, said in ((FROM_SOURCE, 'the Python package paho-mqtt is missing (pip install paho-mqtt)'),
+                       (PACKAGED, "the guard's folder is incomplete (paho-mqtt is missing): unzip the guard again")):
+        monkeypatch.setattr(fg, 'HERE', here)
+        with pytest.raises(fg.PrinterError) as refused: fg.printer_link('192.0.2.1', 'SERIAL', 'code', 'guard', lambda report: None)
+        assert str(refused.value) == said
+
+@pytest.mark.windows
+def test_a_missing_pystray_is_logged_as_what_can_be_done_about_it(state, monkeypatch):
+    import guard_ui
+    monkeypatch.setitem(sys.modules, 'pystray', None)
+    for here, said in ((FROM_SOURCE, 'no icon in the notification area: the Python package pystray is missing (pip install pystray)'),
+                       (PACKAGED, "no icon in the notification area: the guard's folder is incomplete (pystray is missing): unzip the guard again")):
+        monkeypatch.setattr(fg, 'HERE', here); assert guard_ui.Tray(guard_with()).icon is None
+        assert (state / 'guard.log').read_text().splitlines()[-1].endswith(' ' + said)

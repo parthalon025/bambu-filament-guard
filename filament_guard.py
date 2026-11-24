@@ -149,6 +149,11 @@ def packaged():
     """Whether this is the packaged guard: build.py puts the scripts in app/, beside a Python and a Tcl/Tk of their own."""
     return os.path.basename(HERE) == 'app'
 
+def missing(package):
+    """What to say of a Python package the guard cannot import. Run from source: how to install it. The packaged guard
+    has no pip and a Python of its own: there its folder is incomplete, and unzipping it again is what helps."""
+    return f"the guard's folder is incomplete ({package} is missing): unzip the guard again" if packaged() else f'the Python package {package} is missing (pip install {package})'
+
 class StateBusy(OSError):
     """The state folder's files could not be had: another holder kept them past the wait, or a program outside the guard
     held a file past the retries of a write."""
@@ -561,7 +566,7 @@ def printer_link(ip, serial, code, client_id, on_report, on_refused=None):
     on_report gets the "print" part of every report, on the link's own thread. Returns the client; loop_stop() and
     disconnect() end it."""
     try: import paho.mqtt.client as mqtt
-    except ImportError: raise PrinterError('the Python package paho-mqtt is missing (pip install paho-mqtt)')
+    except ImportError: raise PrinterError(missing('paho-mqtt'))
     def on_connect(c, userdata, flags, rc, *rest):
         if rc.is_failure if hasattr(rc, 'is_failure') else rc != 0:
             if on_refused: on_refused(str(rc))
