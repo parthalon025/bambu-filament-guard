@@ -400,6 +400,7 @@ class JobWatch(threading.Thread):
                 except Exception as e:
                     all_out_of_date(self.serial, f'a job could not be counted ({e.__class__.__name__}: {e})')
                 self.remember(key, not running); done = True
+            elif again: self.remember(NO_JOB, True)                          # prepared anew: another run in whatever state it is seen next, also cancelled
             elif not self.ended and not (running and key == self.counted): self.remember(self.counted, True)   # the job counted is over
             self.seen = (gstate, key)
         if gstate in STARTED and key == self.counted: catch_up(self.serial, status, state)

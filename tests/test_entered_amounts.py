@@ -352,3 +352,15 @@ def test_an_amount_entered_long_before_the_printer_was_first_followed_is_out_of_
     assert 'entered amounts out of date: A3: entered more than ten minutes before the printer was first followed' in (state / 'guard.log').read_text()
     running(monkeypatch, over); res = fg.evaluate(needing(300), CFG, 'Next')
     assert res['worst'] == 'UNKNOWN' and 'the amount entered for A3 is out of date' in res['rows'][0]['note']
+
+def test_a_job_sent_again_that_ends_before_it_is_seen_running_is_counted_like_any_other(state):
+    """On a LAN-only printer "Part" is sent again and cancelled so early that no look sees it run: preparing, then
+    failed. Under a new number such a job is taken off in full, the low side; under the number of the run before it
+    is no different, and the next guard knows it too."""
+    part(120.0); spools = [spool(2)]; job = lambda state, layer=0: printing(state, spools, task='0', mapping=(2,), layer=layer)
+    a3 = lambda: fg.load_state()['spools']['SERIAL']['A3']['grams']
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 400)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools, name='', task='0'))
+    for status in (job('PREPARE'), job('RUNNING', 1), job('FINISH', 100)): watch.look(status)
+    assert a3() == 280 and not watch.look(job('PREPARE')) and watch.look(job('FAILED', 1)) and a3() == 160
+    assert not watch.look(job('PREPARE')) and gl.JobWatch('SERIAL', CFG).look(job('FINISH', 100)) and a3() == 40
