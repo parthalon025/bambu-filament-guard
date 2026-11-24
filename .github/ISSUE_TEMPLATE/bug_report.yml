@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        **Remove printer serial numbers and IP addresses** from everything you paste. Never post a LAN access code. The log and the output of `selftest` can hold serials and IP addresses.
+        **Remove printer serial numbers and IP addresses** from everything you paste. Never post a LAN access code. The log and the output of `selftest` can hold serials and IP addresses. The log also holds the titles of your projects, the names of your print jobs, and file paths with your Windows user name in them: take out what you do not want public.
   - type: input
     id: guard_version
     attributes:
@@ -43,5 +43,5 @@ body:
     id: log
     attributes:
       label: Log lines around the event
-      description: From `%LOCALAPPDATA%\BambuFilamentGuard\guard.log`. Serials and IP addresses removed.
+      description: From `%LOCALAPPDATA%\BambuFilamentGuard\guard.log`. Serials and IP addresses removed, and what you do not want public of project titles, job names and your Windows user name (it is in the file paths).
       render: text
