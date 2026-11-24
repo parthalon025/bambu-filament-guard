@@ -3,6 +3,7 @@ import io
 import json
 import os
 import sys
+import time
 import zipfile
 
 import pytest
@@ -178,7 +179,7 @@ def test_a_plate_with_no_filament_the_guard_can_weigh_is_not_checked(state, tmp_
     assert fg.main(['check', str(path)]) == 3 and 'this plate uses no filament the guard can weigh' in capsys.readouterr().out
     mixed = no_weight(weights='0.00,10.87', colours='#0A2989;#FFFFFF;#0A2989'); path.write_text(mixed)      # two blues, one of them without a weight
     res = fg.evaluate(fg.parse_plate(mixed), CFG, 'Vase')
-    assert [(r['slot'], r['status'], r['need']) for r in res['rows']] == [(1, 'UNKNOWN', None), (3, 'OK', 10.87)] and res['worst'] == 'UNKNOWN'
+    assert [(r['slot'], r['status'], r['need']) for r in res['rows']] == [(1, 'UNKNOWN', None), (3, 'UNKNOWN', 10.87)] and res['worst'] == 'UNKNOWN'   # both print from C3
     assert fg.headline(res) == 'Enough filament could not be confirmed' and fg.main(['check', str(path)]) == 1
 
 def test_a_filament_without_a_weight_is_carried_as_unknown_wherever_the_grams_are_used(state):
@@ -328,3 +329,14 @@ def test_check_says_when_a_plate_of_the_file_is_not_complete(state, tmp_path, mo
     code, out = checked(capsys, path, '--json')
     assert code == 3 and [bool(r['error']) for r in json.loads(out)] == [False, True, False, True]
     assert checked(capsys, exported(tmp_path, [gcode(complete=False)])) == (3, 'Filament could not be checked: Brackets.gcode.3mf plate 1\n  the G-code of this plate is not complete in the file')
+
+def test_a_long_line_costs_the_profile_no_more_than_its_length():
+    """The custom G-code of a shared project goes into the slice as it is. One move line of 60,000 characters with no
+    E, or with an E that no number follows, took the pattern two to five seconds, and four times that at twice the
+    length: every X and Y of it was tried as the one before the E. That is on the watcher's thread, which checks every
+    later slice. Such a line now costs what its length costs, and a move counts as before, however long it is."""
+    long = ['G1 ' + 'X0 Y0 ' * 10000, 'G1 ' + 'X' * 60000 + ' E', 'G1 ' + 'A' * 60000, 'G1 E ' + 'X' * 60000, ' ' * 60000 + 'G1', ';VG1' + ' E' * 30000]
+    body = ['T0', 'M73 L1', f'G1 X1 E{e(0.5)}'] + long + ['G1 ' + 'X1 ' * 20000 + f'E{e(0.5)}', 'T2', 'M73 L2', f'G1 X2 E{e(0.75)}', 'M73 L3', f'G1 X3 E{e(0.25)}']
+    start = time.perf_counter(); p = profile_of(body, '1.00,1.00'); took = time.perf_counter() - start
+    assert p['layers'] == {1: pytest.approx([0, 1.0, 0, 0], abs=1e-6), 3: pytest.approx([0, 0, 0.75, 0.25], abs=1e-6)}
+    assert took < 0.5                                                                      # some ten milliseconds; seven seconds before

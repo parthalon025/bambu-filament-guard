@@ -49,6 +49,8 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - "Show last result" showed an answer that could be hours old under "Spools as the printer reports them now". A card that shows an answer more than a minute after its check says when the check was made, and that "Check again" asks the printer now.
 - A warning found when "Send print job" opened was thrown away when the dialog had closed before the check ended, which a quick click on Send also looks like. It now shows as a card in the corner, as after a slice.
 - "Check newest slice now" while checks were paused turned the icon green, as if slices were being checked. Paused, the icon stays grey and its tooltip says "Checks are paused"; resumed, it takes the last result's colour again.
+- One very long line in a slice's G-code could hold the guard's watcher for seconds to hours, and until it was done no newly sliced plate was checked and nothing said so. Custom G-code of a shared project goes into the slice as it is: a move line of 60,000 characters with no `E` took two seconds to read for the grams per layer, and four times as long at twice the length. Such a line now takes milliseconds; every other line is read as before.
+- A filament that can print from the same spool as one Bambu Studio gives no weight read "enough" in its own row, though what the other takes of that spool cannot be told. It is "unknown" too, unless it is already tight or short, and its note names the other: "filament 1 can also print from C3, and Bambu Studio gives it no weight". The filament without a weight is shown with its spools and what they hold.
 
 ## [1.4.0] - 2026-11-20
 

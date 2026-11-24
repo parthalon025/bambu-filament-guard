@@ -53,8 +53,9 @@ STARTUP_LNK = os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Windows'
 DEFAULTS = {
     # "Enough" asks for the need plus a reserve, because the AMS's figure is an estimate: the larger of margin_pct of
     # the need and spool_reserve_pct of a spool's full weight (30 g on a 1 kg spool), the largest spool's of those the
-    # filament could be printed from. The AMS counts what it feeds, so its error grows with what the spool has given,
-    # and is largest when the spool is nearly empty.
+    # filament could be printed from; a spool whose full weight the printer does not report, or whose amount was
+    # entered by hand, counts as a 1 kg spool there. The AMS counts what it feeds, so its error grows with what the
+    # spool has given, and is largest when the spool is nearly empty.
     # Measured 2026-11-19 (H2D): a 1 kg spool reported at 105 g ran dry after 84-85 g of a print that needed 85.3 g.
     'margin_pct': 10,
     'spool_reserve_pct': 3,
@@ -337,8 +338,11 @@ def lines_of(stream, size=1 << 20):
 # The lines that move filament or say where it goes, indented or not: a move or "G92" with an E, read only up to a
 # comment, and an X or Y before or after the E when there is one (a move along X or Y, not of the filament alone); a
 # filament selected; the start of a layer; absolute or relative extrusion. The X or Y is caught as one letter, not cut
-# out of the line: a 100 MB file has two and a half million such moves.
-GCODE_STEP = re.compile(rb'[ \t]*(?:G([0-3]|92)[ \t](?:[^;E\n]*?([XY]))?[^;E\n]*E([-+]?(?:\d+\.?\d*|\.\d+))(?:[^;\n]*?([XY]))?|T(\d+)|M73 L(\d+)|M8([23])(?![\d.]))')
+# out of the line: a 100 MB file has two and a half million such moves. What comes before the E is read once and
+# never again ("*+" and "?+" give nothing back; Python 3.11 on). Read as "any text, then an X or Y, then any text",
+# a line of 60,000 characters without an E had every X and Y of it tried as that one: seconds, and four times as
+# many at twice the length, on the watcher's thread. Custom G-code goes into a slice as its author wrote it.
+GCODE_STEP = re.compile(rb'[ \t]*(?:G([0-3]|92)[ \t][^;EXY\n]*+([XY])?+[^;E\n]*+E([-+]?(?:\d+\.?\d*|\.\d+))(?:[^;\n]*?([XY]))?|T(\d+)|M73 L(\d+)|M8([23])(?![\d.]))')
 PURGE_MARKS = (b'; FLUSH_START', b'; FLUSH_END', b'; VFLUSH_START', b'; VFLUSH_END', b';VG1')
 VG1_E = re.compile(rb';VG1[^;\n]*?[ \t]E([-+]?(?:\d+\.?\d*|\.\d+))')
 PROFILE_TOLERANCE = (0.02, 0.002)            # grams, and share of the total: how far a filament's sum may be from the header's
@@ -686,17 +690,8 @@ def assess(fil, trays, cfg, times=1):
         row['note'] = (f"no {fil['type']} of this colour is loaded; the nearest is {t['label']} {t['name'] or t['type']} ({t['colour']})"
                        + (f", {t['grams']:.0f} g" if t['grams'] is not None else ''))
         return row
-    if need is None:                                         # nothing to hold against the spools: not "enough", whatever they hold
-        row['status'] = 'UNKNOWN'
-        row['note'] = 'Bambu Studio gives no weight for this filament' + (" (its profile's density is 0)" if fil.get('density') == 0 else '')
-        return row
     group = [t for t in near if fil['fid'] and t['fid'] == fil['fid']] or near
     group.sort(key=lambda t: -(t['grams'] or 0))
-    row['sliced'] = need                                     # what the slicer says; the need below never falls under it
-    # What was learned of the trays (guard_learn): the largest rate and loss before layer 1 of the matching spools, as
-    # which of them the print draws on first cannot be read; so learning another tray first never lowers the need.
-    rho, pre = max(group, key=lambda t: t.get('rho') or 0), max(group, key=lambda t: t.get('pre') or 0)
-    need = row['need'] = need * max(1.0, rho.get('rho') or 1.0) + (pre.get('pre') or 0) * times
     row['trays'] = [{'label': t['label'], 'grams': t['grams'], 'colour': t['colour'], 'name': t['name'], 'type': t['type'], 'entered': t.get('entered'),
                      'stale': t.get('stale'), 'reads': t.get('reads'), 'reserved': t.get('reserved'), 'credited': t.get('credited'), 'evidence': t.get('evidence'),
                      'pre': t.get('pre'), 'owes': t.get('owes'), 'refills': t.get('refills'), 'beyond': t.get('beyond'), 'reading': t.get('reading'),
@@ -705,6 +700,17 @@ def assess(fil, trays, cfg, times=1):
     unknown = [t['label'] for t in group if t['grams'] is None]
     other = [t for t in group if fil['fid'] and t['fid'] and t['fid'] != fil['fid']]     # no spool of the project's product is loaded: these count in its place (a spool that names no product is not called another)
     stands_in = (' and '.join(f"{t['label']} is {t['name'] or t['type']}" for t in other) + f", another product than the project's {fil['name'] or fil['type']}") if other else ''
+    if need is None:                                         # nothing to hold against the spools: not "enough", whatever they hold. The row keeps
+        if known: row['best'], row['total'] = max(known), sum(known)   # its spools: the filaments that share one are not "enough" either (share_spools)
+        row['status'] = 'UNKNOWN'
+        row['note'] = ('Bambu Studio gives no weight for this filament' + (" (its profile's density is 0)" if fil.get('density') == 0 else '')
+                       + (f'; {stands_in}' if stands_in else ''))
+        return row
+    row['sliced'] = need                                     # what the slicer says; the need below never falls under it
+    # What was learned of the trays (guard_learn): the largest rate and loss before layer 1 of the matching spools, as
+    # which of them the print draws on first cannot be read; so learning another tray first never lowers the need.
+    rho, pre = max(group, key=lambda t: t.get('rho') or 0), max(group, key=lambda t: t.get('pre') or 0)
+    need = row['need'] = need * max(1.0, rho.get('rho') or 1.0) + (pre.get('pre') or 0) * times
     if not known:
         stale = [t['label'] for t in group if t.get('stale')]
         row['status'] = 'UNKNOWN'
@@ -785,7 +791,9 @@ def tray_note(t):
 def same_filament(a, b):
     """Two loaded spools the AMS goes on with, one after the other, when one runs out (auto refill): the same material
     and colour, the same product where both name one, for the same nozzle (or one that may feed either). Used for
-    what the running print needs beyond its own tray; for the print checked, assess's looser match decides."""
+    what the running print needs beyond its own tray, and by assess for the spools that hold the checked print's need
+    together ("needs two spools": both must be in an AMS as well). Which spools match the checked print at all is
+    assess's own, looser rule."""
     return (a['label'] != b['label'] and a['type'].upper() == b['type'].upper() and a['colour'] == b['colour']
             and (not a['fid'] or not b['fid'] or a['fid'] == b['fid']) and (a.get('nozzle') is None or b.get('nozzle') is None or a['nozzle'] == b['nozzle']))
 
@@ -839,17 +847,25 @@ def share_spools(rows, filaments, trays, cfg, times):
     that does not hold both. Two slots of one colour share all their spools; one spool is enough to share (a spool that
     stands in for another product, the external spool for both nozzles, two shades within the tolerance of one spool).
     Which of them the print takes from the shared spool cannot be read, so each filament is judged against its own
-    spools with the need of every filament it shares one with added."""
+    spools with the need of every filament it shares one with added. One that Bambu Studio gives no weight (parse_plate)
+    adds nobody knows what: a filament that shares a spool with it is not "enough" either, and says which that is."""
     labels = [{t['label'] for t in row['trays']} for row in rows]
     for i, (row, fil) in enumerate(zip(rows, filaments)):
-        with_it = [n for n in range(len(rows)) if n == i or labels[n] & labels[i]]
-        if len(with_it) < 2: continue
-        total = sum(filaments[n]['grams'] for n in with_it)
-        joint = assess(dict(fil, grams=total), trays, cfg, times)
-        shared = [t['label'] for t in row['trays'] if any(t['label'] in labels[n] for n in with_it if n != i)]
-        if SEVERITY[joint['status']] > SEVERITY[row['status']]: row['status'] = joint['status']
-        row['note'] = (f"filaments {', '.join(str(rows[n]['slot']) for n in with_it)} share {' + '.join(shared)} and need {total * times:.0f} g together"
-                       + (f": {joint['note']}" if joint['note'] else ''))
+        if fil['grams'] is None: continue                    # its own row says so
+        mates = [n for n in range(len(rows)) if n == i or labels[n] & labels[i]]
+        with_it, unweighed = [n for n in mates if filaments[n]['grams'] is not None], [n for n in mates if filaments[n]['grams'] is None]
+        shared = lambda them: ' + '.join(t['label'] for t in row['trays'] if any(t['label'] in labels[n] for n in them if n != i))
+        if len(with_it) > 1:
+            total = sum(filaments[n]['grams'] for n in with_it)
+            joint = assess(dict(fil, grams=total), trays, cfg, times)
+            if SEVERITY[joint['status']] > SEVERITY[row['status']]: row['status'] = joint['status']
+            row['note'] = (f"filaments {', '.join(str(rows[n]['slot']) for n in with_it)} share {shared(with_it)} and need {total * times:.0f} g together"
+                           + (f": {joint['note']}" if joint['note'] else ''))
+        if unweighed:
+            if row['status'] == 'OK': row['status'] = 'UNKNOWN'
+            one = len(unweighed) == 1
+            row['note'] += ('; ' if row['note'] else '') + (f"filament{'' if one else 's'} {', '.join(str(rows[n]['slot']) for n in unweighed)} can also print from "
+                                                            f"{shared(unweighed)}, and Bambu Studio gives {'it' if one else 'them'} no weight")
 
 def mark_looked(serial):
     """Notes in the state file that a check looked at the printer (learning follows it, guard_ledger.followed); not again
