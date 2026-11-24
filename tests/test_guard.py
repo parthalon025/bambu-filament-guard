@@ -1563,3 +1563,22 @@ def test_setup_says_at_once_that_it_installs_and_a_second_one_meanwhile_does_not
     monkeypatch.setattr(guard_ui, 'make_root', no_tk)
     assert fg.setup() == 0 and shown[:1] == ['shortcut read'] and 'start' in shown and shown[-1] == ('mutex let go', 7)   # no card to be had: installed all the same
     assert 'setup: its card cannot be shown (RuntimeError: no display): the install goes on without it' in (state / 'guard.log').read_text()
+
+@pytest.mark.windows
+def test_the_self_test_says_whether_it_is_this_copy_that_starts_with_windows(state, tmp_path, monkeypatch, capsys):
+    """A Startup shortcut that exists read "It starts automatically", also when it starts another copy of the guard, in
+    another folder: an update unzipped beside this one, or this one never installed. The self-test and "status" say
+    so only of a shortcut that points into this copy's folder, and name the folder of one that points elsewhere."""
+    import guard_ui
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'app': {'version': '02.09.01.70'}}); monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None)
+    monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {}); monkeypatch.setattr(fg, 'is_running', lambda: True)
+    lnk, points = tmp_path / 'Bambu Filament Guard.lnk', [str(tmp_path / 'other' / 'app')]
+    monkeypatch.setattr(fg, 'STARTUP_LNK', str(lnk)); monkeypatch.setattr(fg, 'shortcut_folder', lambda: points[0])
+    assert fg.selftest(CFG)[-1] == (None, 'It does not start automatically') and fg.main(['status']) == 0 and '| starts automatically: no |' in capsys.readouterr().out
+    lnk.write_text('')
+    assert fg.selftest(CFG)[-1] == (None, f'It starts another copy, in {points[0]}')
+    assert fg.main(['status']) == 0 and f'| starts automatically: another copy, in {points[0]} |' in capsys.readouterr().out
+    points[0] = fg.HERE
+    assert fg.selftest(CFG)[-1] == (True, 'It starts automatically') and fg.main(['status']) == 0 and '| starts automatically: yes |' in capsys.readouterr().out
+    points[0] = ''                                                                           # PowerShell could not read the shortcut
+    assert fg.selftest(CFG)[-1] == (None, 'A Startup shortcut is there, but where it points cannot be read')

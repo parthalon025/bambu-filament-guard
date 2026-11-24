@@ -1797,6 +1797,14 @@ def here(folder):
     """Is `folder` the one this guard's script is in, as Windows tells folders apart?"""
     return bool(folder) and os.path.normcase(os.path.abspath(folder)) == os.path.normcase(HERE)
 
+def autostart():
+    """Which copy of the guard the Startup shortcut starts: None when there is no shortcut, True when this one, else the
+    folder of the other (an update unzipped beside this one and installed, or this one never installed), '' when
+    where it points cannot be read. That a shortcut exists says nothing of this copy."""
+    if not os.path.exists(STARTUP_LNK): return None
+    points = shortcut_folder()
+    return True if here(points) else points
+
 def is_running():
     import ctypes
     h = ctypes.windll.kernel32.OpenMutexW(0x00100000, False, MUTEX)                # SYNCHRONIZE
@@ -1869,7 +1877,9 @@ def selftest_lines(cfg, out):
                 f"{sum(1 for j in jobs if j.get('sound'))} sound (\"learned\" says more)"))
     out.append((True, 'Bambu Studio is running: the card shows in its window') if guard_ui.studio_windows() else (None, 'Bambu Studio is not running: the card shows when it is'))
     out.append((True, 'The guard is running') if is_running() else (False, 'The guard is not running: "install" starts it'))
-    out.append((True, 'It starts automatically') if os.path.exists(STARTUP_LNK) else (None, 'It does not start automatically'))
+    starts = autostart()
+    out.append((None, 'It does not start automatically') if starts is None else (True, 'It starts automatically') if starts is True
+               else (None, f'It starts another copy, in {starts}' if starts else 'A Startup shortcut is there, but where it points cannot be read'))
 
 
 # ---------------------------------------------------------------- installing
@@ -2074,7 +2084,9 @@ def main(argv=None):
     if a.cmd == 'setup': return setup()
     if a.cmd == 'stop': print(STOP_WORDS[stop()]); return 0
     if a.cmd == 'status':
-        print('watcher running' if is_running() else 'watcher not running', '| starts automatically:', 'yes' if os.path.exists(STARTUP_LNK) else 'no', '| log:', os.path.join(STATE_DIR, 'guard.log'))
+        starts = autostart()
+        print('watcher running' if is_running() else 'watcher not running', '| starts automatically:',
+              'no' if starts is None else 'yes' if starts is True else f'another copy, in {starts}' if starts else 'a shortcut that cannot be read', '| log:', os.path.join(STATE_DIR, 'guard.log'))
         return 0
     cfg = load_config()
     if a.cmd == 'selftest':
