@@ -943,3 +943,17 @@ def test_a_result_shown_again_says_when_its_check_was_made(state, monkeypatch):
     failed = answer(1, 'OK', error='the Bambu Lab H2D did not report its status', at=time.time() - 3 * 86400, times=1, model='Bambu Lab H2D', time='')
     labels = card_shown(monkeypatch, failed)[0]
     assert labels[-2:] == ['The Bambu Lab H2D did not report its status.', time.strftime('This answer is from %d %b, %H:%M: "Check again" asks the printer now.', time.localtime(failed['at']))]
+
+@pytest.mark.windows
+def test_a_warning_found_for_send_print_job_shows_though_the_dialog_has_closed(state, tmp_path, monkeypatch):
+    """The check takes a second or three. A dialog closed meanwhile, which is also what a quick click on Send looks like,
+    threw the warning away: no card, the icon as it was. It shows as a card after a slice does."""
+    import guard_ui
+    monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: False); running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 500)))
+    project_of(tmp_path, monkeypatch, [TOO_MUCH, FINE])
+    guard = guard_with(); guard.tray = Icon(); at_send(guard)
+    assert guard.card.shown == [('show', 0)] and guard.card.where is None and guard.card.res['plate_no'] == 1
+    assert guard.tray.was == [('danger', 'Not enough filament for this print · Farm, plate 1')]
+    project_of(tmp_path, monkeypatch, [FINE, FINE])                                          # nothing to warn of: nothing shows, as beside the dialog
+    guard = guard_with(); guard.tray = Icon(); at_send(guard)
+    assert guard.card.shown == [] and guard.tray.was == []

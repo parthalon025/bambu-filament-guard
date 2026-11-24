@@ -35,6 +35,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - The window for a spool's amount closed before the amount was stored: with the state file held by another program the weight typed was gone, and only the log said so. It now stays open and says "Not saved" until the amount is stored. The empty spool's weight is kept after the amount, and a `config.json` that cannot be written no longer costs the amount: the weight is then used until the guard stops. An empty spool of 0, or left blank, is not kept as the next window's start, where it put a later spool's 250 g on as filament; while the field holds it, the result reads "612 g of filament: nothing taken off for the spool". On the card of `check --popup` with no guard running, the window says that the amount is counted down only while the guard runs.
 - A warning could end as a line in the log, with no card, when another program held the state file at the moment the guard looked up whether the finding was ignored. What cannot be looked up counts as not ignored, and the card shows.
 - "Show last result" showed an answer that could be hours old under "Spools as the printer reports them now". A card that shows an answer more than a minute after its check says when the check was made, and that "Check again" asks the printer now.
+- A warning found when "Send print job" opened was thrown away when the dialog had closed before the check ended, which a quick click on Send also looks like. It now shows as a card in the corner, as after a slice.
 
 ## [1.4.0] - 2026-11-20
 

@@ -1222,7 +1222,8 @@ class Guard:
             res, unread, out = found
             try:
                 if res is not None and older: res['unchecked'] = older; log(f"{res['title']}: {len(plates)} sliced plates, of which the {older} sliced first were not checked when \"Send print job\" opened")
-                if beside and not guard_ui.visible(beside): pass                  # the dialog has closed meanwhile
+                if beside and not guard_ui.visible(beside):                       # the dialog has closed meanwhile, as after a quick click on Send:
+                    if res is not None and self.rank(res)[0]: self.deliver(res)   # a warning found is still one, and shows as after a slice
                 elif res is not None and self.deliver(res, full=not beside, beside=beside): pass
                 elif res is not None and older and not self.standing_warning():           # nothing to warn of among those checked, here or in the corner: the rest still has to be said
                     self.card.note('Not every plate was checked', [
