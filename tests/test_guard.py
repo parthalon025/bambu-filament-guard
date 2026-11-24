@@ -579,3 +579,34 @@ def test_the_self_test_does_not_count_the_spools_of_a_status_without_them(state,
     monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None); monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {})
     lines = fg.selftest(CFG)
     assert (None, 'Bambu Lab H2D: it did not report its spools') in lines and fg.load_state()['spools']['SERIAL']['A1']['grams'] == 640
+
+def three_printers(monkeypatch, selected, status=ENOUGH):
+    """Bambu Studio knows two P1S and an H2D, in this order, and has `selected` selected. Returns the serials asked."""
+    asked = []
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'app': {'user_last_selected_machine': selected}, 'access_code': {'P1S-ONE-0001': 'code', 'P1S-TWO-0002': 'code', 'H2D-ONE-0003': 'code'}})
+    monkeypatch.setattr(fg, 'model_by_serial_prefix', lambda: {'P1S': 'Bambu Lab P1S', 'H2D': 'Bambu Lab H2D'})
+    monkeypatch.setattr(fg, 'printer_ip', lambda serial, *a, **k: 'printer'); monkeypatch.setattr(fg, 'read_status', lambda ip, serial, code: (asked.append(serial), status)[1])
+    return asked
+
+P1S_PLATE = dict(BLUE, printer_model='Bambu Lab P1S')
+
+def test_with_two_printers_of_one_model_the_answer_names_the_one_asked(state, monkeypatch):
+    """Two P1S: one holds a full spool, the job goes to the other. The answer said "Bambu Lab P1S" and nothing more, in
+    the report, the log and on the card: nothing showed that the other printer had answered."""
+    asked = three_printers(monkeypatch, 'P1S-TWO-0002'); res = fg.evaluate(P1S_PLATE, CFG, 'Vase')
+    assert asked == ['P1S-TWO-0002'] and res['printer']['name'] == 'Bambu Lab P1S (…0002)' and res['printer']['model'] == 'Bambu Lab P1S'
+    assert '\n  Bambu Lab P1S (…0002), IDLE' in fg.report_text(res) and fg.checking_text(fg.printer_for(P1S_PLATE)) == 'Checking the spools on the Bambu Lab P1S (…0002)…'
+    asked = three_printers(monkeypatch, 'H2D-ONE-0003'); res = fg.evaluate(P1S_PLATE, CFG, 'Vase')   # the printer selected is of another model:
+    assert asked == ['P1S-ONE-0001'] and res['printer']['name'] == 'Bambu Lab P1S (…0001)'           # the first P1S of Bambu Studio's configuration
+    res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert asked[-1] == 'H2D-ONE-0003' and res['printer']['name'] == 'Bambu Lab H2D' and '\n  Bambu Lab H2D, IDLE' in fg.report_text(res)   # the only one of its model: the model says it
+    monkeypatch.setattr(fg, 'printer_ip', lambda *a, **k: None)
+    assert fg.evaluate(P1S_PLATE, CFG, 'Vase')['error'].startswith('the Bambu Lab P1S (…0001) is not announcing itself')
+
+@pytest.mark.windows
+def test_the_card_names_the_printer_asked_where_two_are_of_one_model(state, monkeypatch):
+    three_printers(monkeypatch, 'P1S-TWO-0002'); res = fg.evaluate(P1S_PLATE, CFG, 'Vase')
+    assert card_shown(monkeypatch, res, brief=8)[0][-1] == '1 filament against the spools on the Bambu Lab P1S (…0002)'
+    assert card_shown(monkeypatch, res)[0][-1].startswith('Spools as the Bambu Lab P1S (…0002) reports them now;')
+    busy = dict(ENOUGH, gcode_state='RUNNING', subtask_name='Cube'); three_printers(monkeypatch, 'P1S-TWO-0002', busy)
+    assert 'Spools as the Bambu Lab P1S (…0002) reports them now' in card_shown(monkeypatch, fg.evaluate(P1S_PLATE, CFG, 'Vase'))[0][-1]

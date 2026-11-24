@@ -555,11 +555,15 @@ def model_by_serial_prefix():
     return out
 
 def known_printers(conf):
-    """[{'serial', 'model'}] for every printer Bambu Studio holds a LAN access code for; the one selected there first."""
+    """[{'serial', 'model', 'name'}] for every printer Bambu Studio holds a LAN access code for; the one selected there
+    first. name is what an answer calls the printer: its model, with the last four characters of its serial where
+    another known printer is of the same model ("Bambu Lab P1S (…0002)"), so that the answer says which was asked."""
     models = model_by_serial_prefix()
     last = conf.get('app', {}).get('user_last_selected_machine')
     serials = sorted(conf.get('access_code', {}), key=lambda s: s != last)
-    return [{'serial': s, 'model': models.get(s[:3], 'unknown model')} for s in serials]
+    out = [{'serial': s, 'model': models.get(s[:3], 'unknown model')} for s in serials]
+    for p in out: p['name'] = p['model'] + (f" (…{p['serial'][-4:]})" if sum(o['model'] == p['model'] for o in out) > 1 else '')
+    return out
 
 def discover(seconds=8.0, want=None):
     """{serial: ip} of the Bambu printers announcing themselves on the LAN (SSDP notices on UDP 2021 / 1990)."""
@@ -870,7 +874,8 @@ def credit(trays, owed, learned=None, running=None, order=None):
 
 def pick_printer(model, printers):
     """The printer a plate is checked against: of the known printers of the model it was sliced for, the one selected
-    in Bambu Studio (known_printers lists it first)."""
+    in Bambu Studio (known_printers lists it first); with a printer of another model selected there, the first of
+    this model in Bambu Studio's configuration. The others of the model are not asked: the answer names the one that was."""
     return next((p for p in printers if p['model'] == model), None)
 
 def share_spools(rows, filaments, trays, cfg, times):
@@ -908,7 +913,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         status = (seen or {}).get(printer['serial'])
         if status is None:
             ip = printer_ip(printer['serial'], cfg)
-            if not ip: raise PrinterError(f"the {printer['model']} is not announcing itself on this network (is it on?)")
+            if not ip: raise PrinterError(f"the {printer['name']} is not announcing itself on this network (is it on?)")
             code = conf['access_code'][printer['serial']]
             try: status = read_status(ip, printer['serial'], code)
             except PrinterError:
@@ -917,7 +922,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
                 status = read_status(new_ip, printer['serial'], code)
             if seen is not None: seen[printer['serial']] = status
         if cfg.get('learn'): mark_looked(printer['serial'])
-        if not has_spools(status): raise PrinterError(f"the {printer['model']} did not report its spools")
+        if not has_spools(status): raise PrinterError(f"the {printer['name']} did not report its spools")
     except Exception as e:                   # whatever goes wrong before the printer has answered is an answer too: a card with the reason, not a line in the log
         res['error'] = str(e) if isinstance(e, PrinterError) else f'{e.__class__.__name__}: {e}'
         return res
@@ -944,9 +949,9 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
             offer = guard_learn.weigh_offer(printer['serial'], rows, cfg, busy=status.get('gcode_state') in BUSY)
             if offer: res['weigh'] = offer
     except Exception as e:                   # a status the guard does not understand must end as a card that says so, not as a line in the log
-        res['error'] = f"the {printer['model']}'s report could not be worked out ({e.__class__.__name__}: {e})"
+        res['error'] = f"the {printer['name']}'s report could not be worked out ({e.__class__.__name__}: {e})"
         return res
-    res['printer'] = {'model': printer['model'], 'serial': printer['serial'], 'state': status.get('gcode_state', '?'), 'job': status.get('subtask_name', ''),
+    res['printer'] = {'model': printer['model'], 'name': printer['name'], 'serial': printer['serial'], 'state': status.get('gcode_state', '?'), 'job': status.get('subtask_name', ''),
                       'percent': status.get('mc_percent'), 'layer': status.get('layer_num'), 'layers': status.get('total_layer_num'), 'counted': counted,
                       'beyond': {t['label']: t['beyond'] for t in trays if round(t.get('beyond') or 0)}, 'reserve': reserve, 'unlearned': unlearned}
     res['rows'] = rows
@@ -990,7 +995,7 @@ def report_text(res):
         busy = f"{job_text(p)}: " + ('the running print is counted: what it still needs is taken off its spools' if p.get('counted') else
                                                     "its spools are still being used, and the guard could not count that print: the amounts are the spools' amounts now")
         busy += beyond_text(p)
-    lines.append(f"  {p['model']}, {p['state']}" + busy + ''.join(f'; {p[key]}' for key in ('reserve', 'unlearned') if p.get(key)))
+    lines.append(f"  {p['name']}, {p['state']}" + busy + ''.join(f'; {p[key]}' for key in ('reserve', 'unlearned') if p.get(key)))
     for r in res['rows']:
         lines.append(f"  {r['slot']:>2} {r['type']:<8} {r['colour']} {r['name'][:22]:<22} needs {r['need']:7.1f} g   {tray_text(r):<10} has {has_text(r):<22} {STATUS_WORD[r['status']]}"
                      + (f"  ({r['note']})" if r['note'] else ''))
@@ -1034,7 +1039,7 @@ def printer_for(plate):
     except (OSError, ValueError, KeyError): return None
 
 def checking_text(printer):
-    return f"Checking the spools on the {printer['model']}…" if printer else 'Checking the spools…'
+    return f"Checking the spools on the {printer['name']}…" if printer else 'Checking the spools…'
 
 def studio_version():
     try: return str(bs_conf().get('app', {}).get('version', ''))
@@ -1481,8 +1486,8 @@ def selftest(cfg):
             status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
             if not has_spools(status): raise PrinterError('it did not report its spools')
             trays, _ = trays_of(status); guard_ledger.apply(trays, p['serial'])
-            out.append((True, f"{p['model']}: {len(trays)} spool(s), {sum(t['grams'] is not None for t in trays)} with a known amount"))
-        except PrinterError as e: out.append((False if 'refused' in str(e) else None, f"{p['model']}: {e}"))
+            out.append((True, f"{p['name']}: {len(trays)} spool(s), {sum(t['grams'] is not None for t in trays)} with a known amount"))
+        except PrinterError as e: out.append((False if 'refused' in str(e) else None, f"{p['name']}: {e}"))
     import guard_learn
     history = guard_learn.load()
     jobs = [j for trays in history.values() for h in trays.values() for j in h.get('jobs', [])]
@@ -1552,7 +1557,7 @@ def install(start_line=True):
         conf, cfg = bs_conf(), load_config()
         for p in known_printers(conf):
             ip = printer_ip(p['serial'], cfg, refresh=True)
-            print(f"  {p['model']}: " + (ip or 'not announcing itself on this network now (it is looked for again when a plate is sliced)'))
+            print(f"  {p['name']}: " + (ip or 'not announcing itself on this network now (it is looked for again when a plate is sliced)'))
     except (OSError, ValueError): print("  Bambu Studio's configuration was not found: the guard waits for it")
     was, ours, logfile = guard_folder(), False, os.path.join(STATE_DIR, 'guard.log')
     if stop(60) == 'still running':
@@ -1652,9 +1657,9 @@ def main(argv=None):
                 if not ip: raise PrinterError('not announcing itself on this network')
                 status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
                 if not has_spools(status): raise PrinterError('did not report its spools')
-            except PrinterError as e: print(f"{p['model']}: {e}"); continue
+            except PrinterError as e: print(f"{p['name']}: {e}"); continue
             trays, two = trays_of(status); guard_ledger.apply(trays, p['serial'])
-            print(f"{p['model']} ({ip}), {status.get('gcode_state')}")
+            print(f"{p['name']} ({ip}), {status.get('gcode_state')}")
             for t in trays:
                 amount = 'entered amount out of date' if t.get('stale') else 'amount unknown' if t['grams'] is None else f"{t['grams']:.0f} g" + (' (entered by hand)' if t.get('entered') else '')
                 print(f"  {t['label']:<5} {t['type']:<8} {t['name'][:18]:<18} {t['colour']}  {amount}" + (f"  {t['nozzle']} nozzle" if two and t['nozzle'] else ''))
