@@ -241,7 +241,7 @@ def parse_plate(text):
     if '; HEADER_BLOCK_END' not in text or '; CONFIG_BLOCK_END' not in text: return None
     head, _, body = text.partition('; HEADER_BLOCK_END')
     def header(key):
-        m = re.search(r'^; ' + re.escape(key) + r'\s*:\s*(.*)$', head, re.M)
+        m = re.search(r'^; ' + re.escape(key) + r'[ \t]*:[ \t]*(.*)$', head, re.M)       # not \s: across a line end, a line without a value takes the next line for it
         return m.group(1).strip() if m else None
     def setting(key):
         m = re.search(r'^; ' + re.escape(key) + r' = (.*)$', body, re.M)

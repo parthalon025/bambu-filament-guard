@@ -295,3 +295,11 @@ def test_slices_are_looked_for_under_the_temp_folder_windows_names(tmp_path, mon
     profile, temp = tmp_path / 'profile', tmp_path / 'Temp'; in_profile, in_temp = slice_in(profile), slice_in(temp)
     temp_folders(monkeypatch, temp, profile, tmp_path / 'none', windows=profile)
     assert fg.temp_roots() == [str(profile), str(temp), str(tmp_path / 'none' / 'tmp')] and fg.temp_gcodes() == [in_profile, in_temp]
+
+def test_a_header_line_without_a_value_does_not_take_the_next_line_for_it():
+    """An empty "; filament:" line read as the line below it, "; filament_density: 1.26,...": no slot list could be made
+    of that, and a plate whose totals can be placed was refused."""
+    slots = lambda text: [(f['slot'], f['grams']) for f in fg.parse_plate(text)['filaments']]
+    assert slots(gcode(weights='1.00,2.00,3.00', used=None).replace('; filament_density', '; filament:\n; filament_density')) == [(1, 1.0), (2, 2.0), (3, 3.0)]
+    with pytest.raises(ValueError, match='0 filament totals for the 2 filaments in use'): fg.parse_plate(gcode(weights=''))   # and what is wrong is what is said
+    assert slots(gcode().replace('\n', '\r\n')) == [(1, 9.99), (3, 10.87)] and slots(gcode().replace('[g] : ', '[g]\t:\t')) == [(1, 9.99), (3, 10.87)]
