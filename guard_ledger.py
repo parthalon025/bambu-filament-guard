@@ -517,9 +517,11 @@ class JobWatch(threading.Thread):
                     link = fg.printer_link(ip, self.serial, conf['access_code'][self.serial], f'bambu-filament-guard-jobs-{fg.os.getpid()}', on_report, on_refused)
                     passed = opened                                                  # when this loop last came round
                     while not self.stopped.wait(3):
-                        state = fg.load_state()                                      # read once a look: who is followed, and what is entered
-                        if not self.wanted(state): self.stopped.set(); break        # no entered amount, and nothing for learning to watch
                         now, before = time.time(), passed; passed = now
+                        try: state = fg.load_state()                                 # read once a look: who is followed, and what is entered
+                        except fg.StateBusy as e:                                    # held elsewhere: that costs this look, not the link, whose
+                            self.say(f'following the printer: {e}; tried again at the next look'); continue   # ending leaves a minute and more unseen
+                        if not self.wanted(state): self.stopped.set(); break        # no entered amount, and nothing for learning to watch
                         with lock: first, latest = (heard[0], heard[-1]) if heard else (None, None)
                         if first is None:
                             if now - opened > 40: self.lost = True; break            # no report: the address or the access code has changed

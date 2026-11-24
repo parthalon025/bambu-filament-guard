@@ -104,12 +104,14 @@ def test_a_weight_far_from_the_printers_reading_is_doubted_either_way():
     assert fg.weigh_doubt(59.9, 110.0).startswith('60 g weighed, 110 g read by the printer: 50 g apart') and '51 g apart' in fg.weigh_doubt(161.0, 110.0)
 
 
-def follow(monkeypatch, script, passes, leap=(0, 0)):
+def follow(monkeypatch, script, passes, leap=(0, 0), busy=()):
     """JobWatch.run for SERIAL against a scripted link and clock. script: {pass: report}, what the printer sends at that
-    pass of the follower's 3-second wait; leap: (pass, seconds) the wall clock jumps there (the computer slept). Returns
-    the follower, [(pass, job id)] of the statuses it looked at, and for each link it made whether the address was
-    looked up afresh."""
+    pass of the follower's 3-second wait; leap: (pass, seconds) the wall clock jumps there (the computer slept); busy:
+    the passes at which the state file is held elsewhere when the follower reads it. Returns the follower, [(pass, job
+    id)] of the statuses it looked at, and for each link it made whether the address was looked up afresh."""
     clock, n, looks, links, tell = [time.time()], [0], [], [], {}
+    load, held = fg.load_state, set(busy)
+    monkeypatch.setattr(fg, 'load_state', lambda: load() if n[0] not in held else (held.discard(n[0]), (_ for _ in ()).throw(fg.StateBusy('the state folder was held elsewhere for more than 10 s')))[1])
     monkeypatch.setattr(gl, 'time', types.SimpleNamespace(time=lambda: clock[0]))
     monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {'SERIAL': 'code'}})
     monkeypatch.setattr(fg, 'printer_ip', lambda serial, cfg, refresh=False: links.append(refresh) or 'printer')
@@ -448,3 +450,14 @@ def test_the_line_on_the_running_print_does_not_call_it_counted_above_an_amount_
     assert res['rows'][0]['status'] == 'UNKNOWN' and res['printer']['counted'] is True and res['printer']['dated'] == ['A3']
     assert 'is counted' not in report and "RUNNING (Part, layer 30 of 100): what the running print still needs is taken off the spools whose amount is known" in report
     assert fg.known_text(res['printer']) == " where a spool's amount is known"
+
+def test_a_state_file_held_at_one_look_costs_that_look_and_not_the_link(state, monkeypatch):
+    """Another program holds the state file when the follower reads it, at one look and then for a minute and a half
+    of looks. Each of those looks is lost and no more: the link stays (ended, it is a minute and more before the next
+    look, in which a print can start unseen), the log says so once, and the job that starts right after is counted at
+    the next look."""
+    gl.enter('SERIAL', {'label': 'C3', 'type': 'PETG', 'colour': '#101010'}, 400); fg.remember_slice('Benchy', 1, SLICE)
+    over = dict(H2D_JOB, gcode_state='FINISH', task_id='10')
+    watch, looks, links = follow(monkeypatch, {n: over if n < 41 else H2D_JOB for n in range(1, 60)}, 60, busy=[5] + list(range(10, 41)))
+    assert links == [False] and [n for n, _ in looks][:8] == [2, 3, 4, 6, 7, 8, 9, 41] and c3()['grams'] == 280
+    assert (state / 'guard.log').read_text().count('held elsewhere for more than 10 s; tried again at the next look') == 1
