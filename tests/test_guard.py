@@ -439,3 +439,42 @@ def test_install_brings_the_settings_over_from_the_folder_of_the_copy_installed_
     assert (True, f'Your settings are kept: config.json was brought over from {old}.') in said and f'brought over from {old}' in capsys.readouterr().out
     (old / 'config.json').write_text('{"spool_reserve_pct": 2}')
     assert not any('brought over' in text for mark, text in fg.install()) and fg.load_config()['spool_reserve_pct'] == 5   # settings are there now: not again
+
+def set_up(monkeypatch):
+    """setup() on stand-ins for Tk, after install_on: the card it showed, as (headline, lines, tone)."""
+    import guard_ui
+    notes = []
+    monkeypatch.setattr(guard_ui, 'make_root', lambda: type('Root', (), {'quit': None, 'after': lambda *a: None, 'mainloop': lambda *a: None})())
+    monkeypatch.setattr(guard_ui.Card, 'note', lambda card, headline, lines, tone='muted', pid=None: notes.append((headline, lines, tone)))
+    assert fg.setup() == 0 and len(notes) == 1
+    return notes[0]
+
+def no_powershell():
+    raise fg.subprocess.CalledProcessError(1, ['powershell', '-NoProfile'], stderr='Cannot create type. Only core types are supported in this language mode.\n')
+
+@pytest.mark.windows
+def test_install_starts_the_guard_and_says_so_when_the_startup_shortcut_cannot_be_made(state, monkeypatch):
+    """PowerShell in Constrained Language Mode, blocked by a policy or not found: the shortcut cannot be made. Install.cmd
+    then did nothing at all: no card, no line in the log, and no guard for this session either."""
+    done = install_on(monkeypatch); monkeypatch.setattr(fg, 'make_shortcut', no_powershell)
+    headline, lines, tone = set_up(monkeypatch)
+    assert done == ['shortcut read', 'stop', 'start'] and (headline, tone) == ('Bambu Filament Guard runs, but is not fully installed', 'warn')
+    assert (False, 'It runs now but will not start with Windows: the Startup shortcut could not be made (PowerShell ended with code 1).') in lines
+    assert 'the Startup shortcut could not be made (PowerShell ended with code 1): Cannot create type. Only core types are supported in this language mode.' in (state / 'guard.log').read_text()
+
+@pytest.mark.windows
+def test_setup_says_on_its_card_whatever_else_kept_it_from_installing(state, monkeypatch):
+    """Install.cmd runs without a console: an error that left install as an error was seen by nobody."""
+    install_on(monkeypatch, running=(False,)); monkeypatch.setattr(fg, 'start', lambda *a, **k: 1 / 0)
+    headline, lines, tone = set_up(monkeypatch)
+    assert (headline, tone) == ('Bambu Filament Guard did not start', 'danger') and (False, f"It could not be installed (ZeroDivisionError: division by zero). The log is {state / 'guard.log'}.") in lines
+    assert 'install failed: ZeroDivisionError: division by zero' in (state / 'guard.log').read_text()
+
+@pytest.mark.windows
+def test_a_guard_that_fails_while_it_starts_says_so_in_the_log(state, monkeypatch):
+    """The guard runs without a console (pythonw): Tk, the icon or a stop file that cannot be removed ended it at its
+    start with nothing anywhere."""
+    import guard_ui
+    def no_screen(): raise RuntimeError('no display')
+    monkeypatch.setattr(fg, 'sole_guard', lambda: 0); monkeypatch.setattr(guard_ui, 'make_root', no_screen)
+    assert fg.watch() == 1 and 'the guard has stopped on an error: RuntimeError: no display (test_guard.py, line ' in (state / 'guard.log').read_text()

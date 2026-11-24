@@ -37,7 +37,7 @@ What it reads, and from where:
 The access code goes from Bambu Studio's configuration to the printer and nowhere else: not into the log, the state
 file, a window or the output. Settings: the icon's menu, or config.json (see DEFAULTS). Settings, log and state:
 %LOCALAPPDATA%/BambuFilamentGuard/. The card and the icon are in guard_ui.py."""
-import sys, os, re, json, ssl, time, glob, math, ctypes, hashlib, itertools, contextlib, zipfile, socket, struct, threading, queue, subprocess, argparse, tempfile
+import sys, os, re, json, ssl, time, glob, math, ctypes, hashlib, itertools, contextlib, zipfile, socket, struct, threading, queue, subprocess, argparse, tempfile, traceback
 
 APP = 'BambuFilamentGuard'
 VERSION = '1.5.0'
@@ -1378,21 +1378,29 @@ def sole_guard():
     return None if ctypes.get_last_error() == 183 else handle or 0               # ERROR_ALREADY_EXISTS: one guard is enough
 
 def watch(start_line=True):
-    import guard_ui
-    handle = sole_guard()
-    if handle is None: return 0
-    os.makedirs(STATE_DIR, exist_ok=True)
-    stop_flag = os.path.join(STATE_DIR, 'stop')
-    if os.path.exists(stop_flag): os.remove(stop_flag)
-    with open(os.path.join(STATE_DIR, 'guard.pid'), 'w') as f: f.write(str(os.getpid()))
-    guard = Guard(load_config(), guard_ui.make_root()); guard.greeted = not start_line
-    note = settings_note(guard.cfg)
-    if note: guard.todo.put(lambda: guard.card.note(*note))                      # the guard runs on defaults the user did not choose: said at once, not only in the log
-    log(f'watching for sliced plates (pid {os.getpid()}, guard {VERSION}, Bambu Studio {studio_version() or "not found"})')
-    threading.Thread(target=guard.watch_slices, daemon=True).start()
-    guard.loop()
-    log('stopped'); ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
-    return 0
+    handle = None
+    try:
+        handle = sole_guard()
+        if handle is None: return 0
+        import guard_ui
+        os.makedirs(STATE_DIR, exist_ok=True)
+        stop_flag = os.path.join(STATE_DIR, 'stop')
+        if os.path.exists(stop_flag): os.remove(stop_flag)
+        with open(os.path.join(STATE_DIR, 'guard.pid'), 'w') as f: f.write(str(os.getpid()))
+        guard = Guard(load_config(), guard_ui.make_root()); guard.greeted = not start_line
+        note = settings_note(guard.cfg)
+        if note: guard.todo.put(lambda: guard.card.note(*note))                  # the guard runs on defaults the user did not choose: said at once, not only in the log
+        log(f'watching for sliced plates (pid {os.getpid()}, guard {VERSION}, Bambu Studio {studio_version() or "not found"})')
+        threading.Thread(target=guard.watch_slices, daemon=True).start()
+        guard.loop()
+        log('stopped')
+        return 0
+    except Exception as e:                   # pythonw has no console: without this line, a guard that Tk, the icon or a file ended at its start left no trace
+        at = traceback.extract_tb(e.__traceback__)[-1]
+        log(f'the guard has stopped on an error: {e.__class__.__name__}: {e} ({os.path.basename(at.filename)}, line {at.lineno})')
+        return 1
+    finally:
+        if handle: ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
 
 def is_running():
     import ctypes
@@ -1485,20 +1493,24 @@ def make_shortcut():
     subprocess.run(['powershell', '-NoProfile', '-Command',
                     "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:FG_LNK); $s.TargetPath=$env:FG_EXE; $s.Arguments=$env:FG_ARGS; "
                     "$s.WorkingDirectory=$env:FG_DIR; $s.Description='Warns when the loaded spools do not hold enough filament for a sliced print'; $s.Save()"],
-                   env=env, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                   env=env, check=True, capture_output=True, text=True, errors='replace', timeout=60, creationflags=subprocess.CREATE_NO_WINDOW)
 
 def install(start_line=True):
     """Makes the guard start automatically, from where it is, and starts it. start_line: the guard says so on a card of
     its own, once Bambu Studio is open; setup, which says it on its card, turns that off. Returns what there is to say
     besides, as lines of setup's card: [(mark, text)]. The settings of a copy installed before, up to 1.4.0 beside its
     script, are brought over when there are none yet: the shortcut still points into that copy's folder, so it is read
-    before it is made to point here."""
-    said, before = [], shortcut_folder()
+    before it is made to point here. A shortcut that cannot be made (PowerShell not found, blocked by a policy or in
+    Constrained Language Mode) is said and logged, and the guard is started all the same: it then runs until Windows
+    is next started."""
+    said, before, shortcut = [], shortcut_folder(), ''
     try:
         if before and bring_settings(os.path.join(before, 'config.json')): said.append((True, f'Your settings are kept: config.json was brought over from {before}.'))
     except OSError as e: said.append((False, f'Your settings in {before} could not be brought over ({e.__class__.__name__}): the defaults are in use.'))
-    make_shortcut()
-    print('starts automatically:', STARTUP_LNK)
+    try: make_shortcut(); print('starts automatically:', STARTUP_LNK)
+    except (OSError, subprocess.SubprocessError) as e:
+        shortcut = 'the Startup shortcut could not be made (' + (f'PowerShell ended with code {e.returncode}' if isinstance(e, subprocess.CalledProcessError) else f'{e.__class__.__name__}: {e}') + ')'
+        log(shortcut + (': ' + ' '.join(str(e.stderr).split())[:300] if getattr(e, 'stderr', None) else '')); print(shortcut)
     try:
         conf, cfg = bs_conf(), load_config()
         for p in known_printers(conf):
@@ -1507,7 +1519,9 @@ def install(start_line=True):
     except (OSError, ValueError): print("  Bambu Studio's configuration was not found: the guard waits for it")
     if stop(): time.sleep(0.5)                                                   # a running copy may be an older version
     start(start_line); time.sleep(1.5)
-    print('watcher running' if is_running() else 'watcher did NOT start: run it with "watch" to see why')
+    running = is_running()
+    print('watcher running' if running else 'watcher did NOT start: run it with "watch" to see why')
+    if shortcut: said.append((False, ('It runs now but will not start with Windows: ' if running else 'It will not start with Windows: ') + shortcut + '.'))
     for mark, text in said: print(text)
     return said
 
@@ -1520,13 +1534,16 @@ def setup():
     """Install, and say so on a card: for someone who started the packaged guard with a double click and sees no console."""
     import guard_ui
     if sys.stdout is None: sys.stdout = sys.stderr = open(os.devnull, 'w')       # pythonw has no console to print to
-    said = install(start_line=False)                                             # this card says it, in the same corner as the guard's start line would
+    try: said = install(start_line=False)                                        # this card says it, in the same corner as the guard's start line would
+    except Exception as e:                   # no console shows it: whatever kept install from its end is said on the card, and in the log
+        log(f'install failed: {e.__class__.__name__}: {e}'); said = [(False, f"It could not be installed ({e.__class__.__name__}: {e}). The log is {os.path.join(STATE_DIR, 'guard.log')}.")]
+    running, failed = is_running(), any(mark is False for mark, _ in said)
     root = guard_ui.make_root(); card = guard_ui.Card(root, on_close=root.quit)
-    card.note('Bambu Filament Guard is installed' if is_running() else 'Bambu Filament Guard did not start', [
+    card.note('Bambu Filament Guard did not start' if not running else 'Bambu Filament Guard runs, but is not fully installed' if failed else 'Bambu Filament Guard is installed', [
         (True, "It checks every plate you slice in Bambu Studio and shows the answer in Bambu Studio's window."),
         (True, 'Its icon, a spool, is in the notification area while Bambu Studio runs: settings, self-test, quit.'), *said,
         (None, f'It runs from this folder, so the folder has to stay: {os.path.dirname(HERE) if os.path.basename(HERE) == "app" else HERE}'),
-        (None, 'To remove it: Uninstall.cmd in that folder, then delete the folder.')], 'ok' if is_running() else 'danger')
+        (None, 'To remove it: Uninstall.cmd in that folder, then delete the folder.')], 'danger' if not running else 'warn' if failed else 'ok')
     def tick(): card.follow(); root.after(400, tick)
     tick(); root.mainloop()
     return 0
