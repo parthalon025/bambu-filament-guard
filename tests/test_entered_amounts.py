@@ -186,10 +186,12 @@ def test_what_a_job_needs_beyond_a_measured_spool_comes_off_the_entered_spool_of
     watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools(50), task='1'))
     before = amounts_at(monkeypatch, watch, printing('PREPARE', spools(50)), needing(850))
     assert before == ('SHORT', {'A2': 750, 'A1': 0})
-    for status in (printing('RUNNING', spools(50), layer=1), printing('RUNNING', spools(0), layer=60), printing('FINISH', spools(0), layer=100)):
-        assert amounts_at(monkeypatch, watch, status, needing(850)) == before
-    running(monkeypatch, printing('RUNNING', spools(50), layer=1)); res = fg.evaluate(needing(850), CFG, 'Next')
+    assert amounts_at(monkeypatch, watch, printing('RUNNING', spools(50), layer=1), needing(850)) == before
+    res = fg.evaluate(needing(850), CFG, 'Next')
     assert res['printer']['beyond'] == {} and 'A1 reads 50 g; the running print still needs 300 g: 250 g more than it holds, taken off A2' in res['rows'][0]['note']
+    assert fg.load_state()['spools']['SERIAL']['A2']['gave'] == {'A1': 250}
+    for status in (printing('RUNNING', spools(0), layer=60), printing('FINISH', spools(0), layer=100)):
+        assert amounts_at(monkeypatch, watch, status, needing(850)) == before
 
 def test_what_a_job_needs_beyond_an_entered_spool_stays_owed_to_the_measured_spool_of_it(state, monkeypatch):
     """A1, entered at 50 g, is the job's tray; A2, the same filament, is measured at 900 g. No entered spool can give the
@@ -200,10 +202,10 @@ def test_what_a_job_needs_beyond_an_entered_spool_stays_owed_to_the_measured_spo
     watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools(900), task='1'))
     before = amounts_at(monkeypatch, watch, printing('PREPARE', spools(900)), needing(700))
     assert before == ('SHORT', {'A2': 650, 'A1': 0})
-    for status in (printing('RUNNING', spools(900), layer=1), printing('RUNNING', spools(773), layer=60), printing('FINISH', spools(650), layer=100)):
+    assert amounts_at(monkeypatch, watch, printing('RUNNING', spools(900), layer=1), needing(700)) == before
+    assert 'A1 holds 0 g as entered; the running print still needs 250 g: 250 g more than it holds, taken off A2' in fg.evaluate(needing(700), CFG, 'Next')['rows'][0]['note']
+    for status in (printing('RUNNING', spools(773), layer=60), printing('FINISH', spools(650), layer=100)):
         assert amounts_at(monkeypatch, watch, status, needing(700)) == before         # at layer 60 A2 has given 127 g and owes 123 g more
-    running(monkeypatch, printing('RUNNING', spools(900), layer=1)); note = fg.evaluate(needing(700), CFG, 'Next')['rows'][0]['note']
-    assert 'A1 holds 0 g as entered; the running print still needs 250 g: 250 g more than it holds, taken off A2' in note
 
 def test_a_job_on_a_spool_of_unknown_amount_makes_the_entered_spools_of_its_filament_out_of_date(state):
     """A1 has no tag and no entered amount; A2, the same filament, is entered at 1000 g; A3 is another material. How
@@ -264,3 +266,33 @@ def test_an_amount_entered_during_a_print_without_a_profile_has_the_whole_print_
     entry = fg.load_state()['spools']['SERIAL']['A3']
     assert entry['grams'] == 30 and not entry.get('stale') and 'missed' not in entry
     assert 'A3: entered during "Part": all that print needs of it, 120 g (how far it is cannot be told), taken off: 30 g' in (state / 'guard.log').read_text()
+
+def test_a_job_sent_again_under_the_same_name_and_number_is_another_run(state, monkeypatch):
+    """A LAN-only printer gives every job the number 0. "Part" (120 g) is printed from A3, entered at 400 g: 280 g.
+    Sent again, it comes off the amount at the check while the printer prepares it and when it has started, before
+    the follower has looked, though the entry carries its key from the first run; and the follower counts it once."""
+    part(120.0); spools = [spool(2)]; job = lambda state, layer=0: printing(state, spools, task='0', mapping=(2,), layer=layer)
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 400)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools, name='', task='0'))
+    for status in (job('PREPARE'), job('RUNNING', 1), job('FINISH', 100)): watch.look(status)
+    assert fg.load_state()['spools']['SERIAL']['A3']['grams'] == 280
+    def a3(status): running(monkeypatch, status); res = fg.evaluate(needing(200), CFG, 'Next'); return res['worst'], res['rows'][0]['trays'][0]['grams']
+    assert a3(job('FINISH', 100)) == ('OK', 280)
+    watch.look(job('PREPARE')); assert a3(job('PREPARE')) == ('SHORT', 160)
+    assert a3(job('RUNNING', 1)) == ('SHORT', 160)                                       # it runs, and the follower has not looked yet
+    assert watch.look(job('RUNNING', 1)) and fg.load_state()['spools']['SERIAL']['A3']['grams'] == 160 and a3(job('RUNNING', 1)) == ('SHORT', 160)
+    assert not watch.look(job('RUNNING', 50)) and not watch.look(job('FINISH', 100)) and a3(job('FINISH', 100)) == ('SHORT', 160)
+
+def test_a_new_follower_knows_the_job_it_counted_was_over(state):
+    """The follower saw "Part" end; the guard is started again and finds the same name and number running. Minutes
+    later, that is another run, and it is counted; after ten minutes or more nobody knows how many runs there were, and
+    the amounts are out of date. A job the guard last saw running, and finds running, is taken for the same run."""
+    part(120.0); spools = [spool(2)]; job = lambda state, layer=0: printing(state, spools, task='0', mapping=(2,), layer=layer)
+    a3 = lambda: fg.load_state()['spools']['SERIAL']['A3']
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 400)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools, name='', task='0')); watch.look(job('RUNNING', 1))
+    assert not gl.JobWatch('SERIAL', CFG).look(job('RUNNING', 40)) and a3()['grams'] == 280     # started again mid-print: the same run
+    watch.look(job('FINISH', 100))
+    assert gl.JobWatch('SERIAL', CFG).look(job('RUNNING', 30)) and a3()['grams'] == 160 and not a3().get('stale')
+    gl.JobWatch('SERIAL', CFG).look(job('FINISH', 100))
+    assert gl.JobWatch('SERIAL', CFG).look(job('PREPARE'), gap=True) and a3()['stale']        # the computer was off overnight

@@ -703,29 +703,31 @@ def same_filament(a, b):
     return (a['label'] != b['label'] and a['type'].upper() == b['type'].upper() and a['colour'] == b['colour']
             and (not a['fid'] or not b['fid'] or a['fid'] == b['fid']) and (a.get('nozzle') is None or b.get('nozzle') is None or a['nozzle'] == b['nozzle']))
 
-def credit(trays, owed, learned=None, running=None, order=None):
+def credit(trays, owed, learned=None, running=None, order=None, taken=True):
     """What each tray is counted with, for the moment the checked print could start: its reading, corrected by what was
     learned of it (learned: guard_learn.corrections; only ever lower, and never an amount entered by hand), less what the
     print running now still needs of it (owed).
       - An amount entered by hand has the running print taken off it like a reading until guard_ledger has done so
-        itself (the entry's 'accounted' job is the running one, `running`, and nothing was 'missed'). From then on only
-        what the ledger could take off no entered spool is owed here: what the print needs beyond that entry ('over')
-        goes on to the spools the printer measures, and what an entry gave for a measured tray ('gave') is not taken
-        off again.
+        itself: the entry's 'accounted' job is the running one, `running`, nothing was 'missed', and `taken`
+        (guard_ledger.taken_off) says it is that run: never while the printer prepares the job, nor when the job the
+        key was counted for has ended and this is another run of it (a LAN-only printer gives every job the id 0).
+        From then on only what the ledger could take off no entered spool is owed here: what the print needs beyond
+        that entry ('over') goes on to the spools the printer measures, and what an entry gave for a measured tray
+        ('gave') is not taken off again.
       - What the running print needs beyond a tray's amount comes, with AMS auto refill, from the loaded spools of the
         same filament (same_filament), the fullest first: it is taken off them ('taken' on the tray, 'refills' on
         theirs); what none of them holds is 'beyond' (assess and the card say so).
     Keeps the amount before any of this ('reads') whenever something was corrected or taken off. The spools a print
     goes on with are taken in the order they would be without learning (`order`), so that no tray is ever counted
     higher for what was learned of another."""
-    if learned: order = {t['label']: t.get('left', t['grams']) for t in credit([dict(t) for t in trays], owed, None, running)}
+    if learned: order = {t['label']: t.get('left', t['grams']) for t in credit([dict(t) for t in trays], owed, None, running, taken=taken)}
     counted = set()                                              # the entered trays guard_ledger has taken the running print off
     for t in trays:
         if t['grams'] is None or t.get('stale'): continue
         raw, share, fix, over = t['grams'], owed.get(t['label'], 0.0), {}, 0.0
         if not t.get('entered'): fix = (learned or {}).get(t['label'], {})
         elif not running: share = 0.0
-        elif t.get('accounted') == running and t.get('missed') != running: counted.add(t['label']); share, over = 0.0, min(share, t.get('over') or 0.0)
+        elif taken and t.get('accounted') == running and t.get('missed') != running: counted.add(t['label']); share, over = 0.0, min(share, t.get('over') or 0.0)
         base = fix.get('credited', raw)
         t['reading'] = raw
         if 'credited' in fix: t['credited'], t['evidence'] = base, fix['evidence']
@@ -810,7 +812,8 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         guard_ledger.apply(trays, printer['serial'], 'ams' in status)   # spools the printer cannot measure get the amount entered for them
         # The answer is for the moment this print could start: what the print running now still needs is not there for
         # it (see credit: an entered amount the ledger has not yet taken it off included).
-        owed, counted = guard_ledger.owed(status, load_state().get('slices', []))
+        state = load_state()
+        owed, counted = guard_ledger.owed(status, state.get('slices', []))
         running = guard_ledger.job_key(status) if status.get('gcode_state') in BUSY else None
         learned = reserve = unlearned = None
         if cfg.get('learn'):
@@ -819,7 +822,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
             except Exception as e:           # what was learned may make a check stricter, never cost it: the check goes on as with learning off, and says so
                 unlearned = f'what was learned from previous prints could not be used ({e.__class__.__name__}): this check is as without it'
                 log(f'learning: {e.__class__.__name__}: {e}: this check is as with learning off')
-        credit(trays, owed, learned, running)
+        credit(trays, owed, learned, running, taken=guard_ledger.taken_off(status, state, printer['serial']))
         rows = [assess(f, trays, cfg, times) for f in plate['filaments']]
         share_spools(rows, plate['filaments'], trays, cfg, times)
         if cfg.get('learn') and not unlearned:
