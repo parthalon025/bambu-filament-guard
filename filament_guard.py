@@ -326,8 +326,11 @@ def lines_of(stream, size=1 << 20):
 # The lines that move filament or say where it goes, indented or not: a move or "G92" with an E, read only up to a
 # comment, and an X or Y before or after the E when there is one (a move along X or Y, not of the filament alone); a
 # filament selected; the start of a layer; absolute or relative extrusion. The X or Y is caught as one letter, not cut
-# out of the line: a 100 MB file has two and a half million such moves.
-GCODE_STEP = re.compile(rb'[ \t]*(?:G([0-3]|92)[ \t](?:[^;E\n]*?([XY]))?[^;E\n]*E([-+]?(?:\d+\.?\d*|\.\d+))(?:[^;\n]*?([XY]))?|T(\d+)|M73 L(\d+)|M8([23])(?![\d.]))')
+# out of the line: a 100 MB file has two and a half million such moves. What comes before the E is read once and
+# never again ("*+" and "?+" give nothing back; Python 3.11 on). Read as "any text, then an X or Y, then any text",
+# a line of 60,000 characters without an E had every X and Y of it tried as that one: seconds, and four times as
+# many at twice the length, on the watcher's thread. Custom G-code goes into a slice as its author wrote it.
+GCODE_STEP = re.compile(rb'[ \t]*(?:G([0-3]|92)[ \t][^;EXY\n]*+([XY])?+[^;E\n]*+E([-+]?(?:\d+\.?\d*|\.\d+))(?:[^;\n]*?([XY]))?|T(\d+)|M73 L(\d+)|M8([23])(?![\d.]))')
 PURGE_MARKS = (b'; FLUSH_START', b'; FLUSH_END', b'; VFLUSH_START', b'; VFLUSH_END', b';VG1')
 VG1_E = re.compile(rb';VG1[^;\n]*?[ \t]E([-+]?(?:\d+\.?\d*|\.\d+))')
 PROFILE_TOLERANCE = (0.02, 0.002)            # grams, and share of the total: how far a filament's sum may be from the header's
