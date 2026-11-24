@@ -218,7 +218,8 @@ class Card:
         import tkinter as tk
         t = self.t
         b = tk.Button(parent, text=text, command=command, bg=t['raised'], fg=t['text'], activebackground=t['border'], activeforeground=t['text'],
-                      disabledforeground=t['muted'], relief='flat', bd=0, font=('Segoe UI', 9), padx=2 * SPACE, pady=SPACE // 2, takefocus=1 if focus else 0)
+                      disabledforeground=t['muted'], relief='flat', bd=0, font=('Segoe UI', 9), padx=2 * SPACE, pady=SPACE // 2, takefocus=1 if focus else 0,
+                      highlightthickness=1, highlightbackground=t['border'], highlightcolor=t['ok'])   # a border: 'raised' on 'surface' is 1.11 to 1 in the light theme, plain text to the eye
         if focus: b.bind('<Return>', lambda event: command())
         b.grid(**grid); return b
 

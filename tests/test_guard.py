@@ -1237,3 +1237,15 @@ def test_an_ampersand_in_a_projects_title_shows_as_one_in_the_icons_menu(state, 
     guard = guard_with(); menu = icon_menu(monkeypatch, guard); guard.deliver(answer(1, 'OK', 'Black & White'))
     line = next(i for i in menu.items if callable(i.text))
     assert line.text(line) == 'Enough filament for this print · Black && White, plate 1' and guard.last_text() == 'Enough filament for this print · Black & White, plate 1'
+
+@pytest.mark.windows
+def test_buttons_have_a_border_from_the_theme(state, monkeypatch):
+    """In the light theme a button's background is 1.11 to 1 against the card's surface (1.21 to 1 in the dark one), and
+    buttons had no border: they read as plain text. One pixel of the theme's own border colour, in both themes."""
+    import guard_ui
+    running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 2))); res = fg.evaluate(fg.parse_plate(gcode()), CFG, 'Benchy')
+    for theme in ('light', 'dark'):
+        buttons = [w for w in card_widgets(monkeypatch, res, theme=theme) if type(w).__name__ == 'Button']
+        assert [w.k['text'] for w in buttons] == ['Check again', 'Ignore for this project']
+        assert {(w.k.get('highlightthickness'), w.k.get('highlightbackground')) for w in buttons} == {(1, guard_ui.THEMES[theme]['border'])}
+    assert {(w.k.get('highlightthickness'), w.k.get('highlightbackground')) for w in amount_asked(monkeypatch, EXT).made if type(w).__name__ == 'Button'} == {(1, guard_ui.THEMES['dark']['border'])}
