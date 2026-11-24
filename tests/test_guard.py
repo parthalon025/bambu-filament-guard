@@ -1106,14 +1106,30 @@ def test_install_brings_the_settings_over_from_the_folder_of_the_copy_installed_
     (old / 'config.json').write_text('{"spool_reserve_pct": 2}'); install_on(monkeypatch, shortcut=str(old))
     assert fg.install() == (True, []) and fg.load_config()['spool_reserve_pct'] == 5         # settings are there now: not again
 
-def set_up(monkeypatch):
-    """setup() on stand-ins for Tk, after install_on: the card it showed, as (headline, lines, tone)."""
+def set_up(monkeypatch, mutex=7, shown=None):
+    """setup() on stand-ins for Tk and for the mutex it holds while it installs (None: another setup holds it), after
+    install_on. The stand-in's main loop turns, as Tk's does, until the card that ends the install is shown, and that
+    card is closed at once. Returns what was shown, in order: ('line', text), ('mutex let go', it), and the card as
+    (headline, lines, tone)."""
     import guard_ui
-    notes = []
-    monkeypatch.setattr(guard_ui, 'make_root', lambda: type('Root', (), {'quit': None, 'after': lambda *a: None, 'mainloop': lambda *a: None})())
-    monkeypatch.setattr(guard_ui.Card, 'note', lambda card, headline, lines, tone='muted', pid=None: notes.append((headline, lines, tone)))
-    assert fg.setup() == 0 and len(notes) == 1
-    return notes[0]
+    shown = [] if shown is None else shown
+    class Root:
+        def __init__(self): self.todo, self.over = [], False
+        def after(self, ms, then): self.todo.append(then)
+        def quit(self): self.over = True
+        def mainloop(self):
+            turn = threading.Event()
+            for _ in range(2000):                                                          # ten seconds at most
+                if self.over: return
+                for then in self.todo[:]: self.todo.remove(then); then()
+                turn.wait(0.005)
+    root = Root()
+    monkeypatch.setattr(guard_ui, 'make_root', lambda: root); monkeypatch.setattr(fg, 'sole_guard', lambda name=None: mutex)
+    monkeypatch.setattr(fg, 'let_go', lambda handle: shown.append(('mutex let go', handle)))
+    monkeypatch.setattr(guard_ui.Card, 'line', lambda card, text, *a, **k: shown.append(('line', text)))
+    monkeypatch.setattr(guard_ui.Card, 'note', lambda card, headline, lines, tone='muted', **k: (shown.append((headline, lines, tone)), root.quit()))
+    assert fg.setup() == 0
+    return shown
 
 def no_powershell():
     raise fg.subprocess.CalledProcessError(1, ['powershell', '-NoProfile'], stderr='Cannot create type. Only core types are supported in this language mode.\n')
@@ -1123,7 +1139,7 @@ def test_install_starts_the_guard_and_says_so_when_the_startup_shortcut_cannot_b
     """PowerShell in Constrained Language Mode, blocked by a policy or not found: the shortcut cannot be made. Install.cmd
     then did nothing at all: no card, no line in the log, and no guard for this session either."""
     done = install_on(monkeypatch); monkeypatch.setattr(fg, 'make_shortcut', no_powershell)
-    headline, lines, tone = set_up(monkeypatch)
+    headline, lines, tone = set_up(monkeypatch)[-1]
     assert done == ['shortcut read', 'stop', 'start'] and (headline, tone) == ('Bambu Filament Guard runs, but is not fully installed', 'warn')
     assert (False, 'It runs now but will not start with Windows: the Startup shortcut could not be made (PowerShell ended with code 1).') in lines
     assert 'the Startup shortcut could not be made (PowerShell ended with code 1): Cannot create type. Only core types are supported in this language mode.' in (state / 'guard.log').read_text()
@@ -1132,7 +1148,7 @@ def test_install_starts_the_guard_and_says_so_when_the_startup_shortcut_cannot_b
 def test_setup_says_on_its_card_whatever_else_kept_it_from_installing(state, monkeypatch):
     """Install.cmd runs without a console: an error that left install as an error was seen by nobody."""
     install_on(monkeypatch); monkeypatch.setattr(fg, 'start', lambda *a, **k: 1 / 0)
-    headline, lines, tone = set_up(monkeypatch)
+    headline, lines, tone = set_up(monkeypatch)[-1]
     assert (headline, tone) == ('Bambu Filament Guard did not start', 'danger') and (False, f"It could not be installed (ZeroDivisionError: division by zero). The log is {state / 'guard.log'}.") in lines
     assert 'install failed: ZeroDivisionError: division by zero' in (state / 'guard.log').read_text()
 
@@ -1329,8 +1345,9 @@ def test_the_self_test_fails_on_a_printer_whose_model_cannot_be_told(state, monk
     assert (False, "The printer …0001: the guard cannot tell which model it is (Bambu Studio's list of printers does not name its serial number): plates sliced for it are not checked") in lines
     assert (True, 'Bambu Lab H2D: 2 spool(s), 2 with a known amount') in lines and not any('unknown model' in text for mark, text in lines)
 
-def announcements(monkeypatch, *datagrams):
-    """discover() on a stand-in for the two UDP sockets it listens on: these datagrams arrive on port 2021, one a look."""
+def announcements(monkeypatch, want, *datagrams):
+    """discover() asked for the serials `want`, on a stand-in for the two UDP sockets it listens on: these datagrams
+    arrive on port 2021, one a look."""
     waiting = list(datagrams)
     class Socket:
         def __init__(self, *a): self.port = None
@@ -1342,7 +1359,7 @@ def announcements(monkeypatch, *datagrams):
             if self.port != 2021 or not waiting: raise OSError('timed out')
             return waiting.pop(0), ('192.0.2.99', 2021)
     monkeypatch.setattr(fg.socket, 'socket', Socket)
-    return fg.discover(seconds=0.2)
+    return fg.discover(want, seconds=0.05)
 
 def notice(usn, location, nt):
     return f'NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nServer: UPnP/1.0\r\nLocation: {location}\r\nNT: {nt}\r\nUSN: {usn}\r\n\r\n'.encode()
@@ -1350,7 +1367,7 @@ def notice(usn, location, nt):
 def test_only_a_bambu_printers_announcement_is_taken_for_a_printer(monkeypatch):
     """Every datagram with a USN line was taken: a television or a router announcing itself on the same ports was kept
     in the state file as a printer's address."""
-    found = announcements(monkeypatch, notice('uuid:a-television', 'http://192.0.2.9:8080/desc.xml', 'urn:schemas-upnp-org:device:MediaRenderer:1'),
+    found = announcements(monkeypatch, ['SERIAL', 'uuid:a-television'], notice('uuid:a-television', '192.0.2.9', 'urn:schemas-upnp-org:device:MediaRenderer:1'),
                           notice('SERIAL', '192.0.2.50', 'urn:bambulab-com:device:3dprinter'), b'not an announcement at all')
     assert found == {'SERIAL': '192.0.2.50'}
 
@@ -1359,7 +1376,8 @@ def test_a_printer_that_is_not_heard_is_not_only_asked_whether_it_is_on(state, m
     off: the answer names both, and the address that can be given in config.json, whose shape no document showed."""
     running(monkeypatch, ENOUGH); monkeypatch.setattr(fg, 'printer_ip', lambda *a, **k: None)
     said = ('is not announcing itself on this network. Is it on? If it is, Windows Firewall may keep its announcements from the guard: allow the guard on private networks, '
-            'or give the printer\'s address in config.json: {"printers": {"<serial>": {"ip": "<address>"}}}')
+            'or give the printer\'s address in config.json: {"printers": {"<serial>": {"ip": "<address>"}}}. A printer with a public address must be named there: '
+            'an announcement is taken for a local address only')
     assert fg.evaluate(BLUE, CFG, 'Benchy')['error'] == f'the Bambu Lab H2D {said}'
     assert fg.main(['trays']) == 0 and f'Bambu Lab H2D: {said[3:]}' in capsys.readouterr().out
 
@@ -1873,3 +1891,174 @@ def test_a_card_that_is_no_answer_does_not_end_a_standing_warning(state, monkeyp
         assert guard.card.shown[-1] == ('show', 0) and guard.card.res is short and guard.held == {} and guard.standing_warning()
     shown, icon, guard = warned(short); guard.forget_learned(); guard.deliver(answer(1, 'OK'))   # its plate fine meanwhile: nothing waits any more
     assert guard.held == {} and guard.card.shown[-1] == ('show', CFG['ok_seconds'])
+
+BAMBU = 'urn:bambulab-com:device:3dprinter'
+
+def an_internet_address():
+    """An IPv4 address of the internet at large, made from the documentation address by arithmetic: none is written here."""
+    import ipaddress
+    return next(str(a) for a in (ipaddress.ip_address('192.0.2.50') + n * 2 ** 24 for n in range(1, 9)) if a.is_global)
+
+def test_an_announcement_names_the_printers_address_only_when_it_is_a_local_one(monkeypatch):
+    """Announcements are not authenticated: whoever sends one with the printer's serial names the address the access
+    code is then sent to. Its Location was taken as it came: a host name, an address of the internet, this computer
+    itself. Only an IPv4 address a printer on a local network can have is taken; anything else is dropped."""
+    for location in ('printer.example.net', an_internet_address(), 'localhost', '127.0.0.1', '0.0.0.0', '239.255.255.250', '255.255.255.255',
+                     '192.0.2.50:8883', 'http://192.0.2.50/', '::1', 'fe80::1'):
+        assert announcements(monkeypatch, ['SERIAL'], notice('SERIAL', location, BAMBU)) == {}, location
+    for location in ('192.0.2.50', '192.168.1.50', '10.0.0.7', '172.20.3.4', '169.254.10.2'):
+        assert announcements(monkeypatch, ['SERIAL'], notice('SERIAL', location, BAMBU)) == {'SERIAL': location}
+    assert announcements(monkeypatch, ['SERIAL'], notice('SERIAL', 'printer.example.net', BAMBU), notice('SERIAL', '192.0.2.50', BAMBU)) == {'SERIAL': '192.0.2.50'}   # the forged one first: the real one is still heard
+    assert announcements(monkeypatch, ['SERIAL'], notice('ANOTHER', '192.0.2.51', BAMBU)) == {}                  # a printer that was not asked for
+
+def test_the_address_kept_for_a_printer_is_the_one_asked_for_and_a_local_one(state, monkeypatch):
+    """printer_ip kept every announcement it heard in state.json, and used whatever address was kept there, for good: a
+    forged one outlasted the guard's restarts. It keeps the address of the serial it asked for alone, and an address
+    kept by an earlier version that is no local IPv4 address is not used: the printer is looked for again."""
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {'SERIAL': 'code', 'SERIAL2': 'code'}}); heard = {'SERIAL': '192.0.2.50', 'SERIAL2': '192.0.2.51'}
+    monkeypatch.setattr(fg, 'discover', lambda want, seconds=8.0: dict(heard))             # whatever was heard, of whichever printer
+    assert fg.printer_ip('SERIAL', CFG) == '192.0.2.50' and fg.load_state()['ips'] == {'SERIAL': '192.0.2.50'}
+    fg.update_state(lambda st: st.update(ips={'SERIAL': 'printer.example.net'}, discovered_at=0)); heard.clear()
+    assert fg.printer_ip('SERIAL', CFG) is None and fg.load_state()['ips'] == {}                                   # kept by 1.4.0 from a forged announcement: not used, and gone
+    fg.update_state(lambda st: st.update(ips={'SERIAL': an_internet_address()}, discovered_at=0)); heard['SERIAL'] = '192.0.2.50'
+    assert fg.printer_ip('SERIAL', CFG) == '192.0.2.50'
+    assert fg.printer_ip('SERIAL', dict(CFG, printers={'SERIAL': {'ip': 'printer.example.net'}})) == 'printer.example.net'   # named in config.json: the user's own word, taken as it is
+    assert [fg.local_address(a) for a in (3232235826, None, ['192.0.2.50'], '')] == [None] * 4                    # and nothing but text is an address
+
+def test_what_is_kept_for_no_printer_of_bambu_studio_goes_at_the_next_look_for_an_address(state, monkeypatch):
+    """Every USN that was heard was kept in state.json, which is never pruned, read whole every 3 seconds and rewritten
+    at every change: a burst of junk announcements made it hundreds of MB, for good. Only the serials Bambu Studio
+    knows are kept now, and a file bloated before heals at the next look for a printer's address, also where that
+    address is at hand and nothing is listened for. A USN or an address longer than one can be is refused."""
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {'SERIAL': 'code', 'SERIAL2': 'code'}}); listened = []
+    monkeypatch.setattr(fg, 'discover', lambda want, seconds=8.0: listened.append(want) or {})
+    junk = {f'{n:07d}' + 'A' * 1900: '192.0.2.9' for n in range(300)}
+    fg.update_state(lambda st: st.update(ips=dict(junk, SERIAL='192.0.2.50', SERIAL2='192.0.2.51'), discovered_at=fg.time.time(), spools={'SERIAL': {'A1': {'grams': 400.0}}}))
+    assert (state / 'state.json').stat().st_size > 500_000
+    assert fg.printer_ip('SERIAL', CFG) == '192.0.2.50' and listened == []
+    st = fg.load_state()
+    assert st['ips'] == {'SERIAL': '192.0.2.50', 'SERIAL2': '192.0.2.51'} and st['spools'] == {'SERIAL': {'A1': {'grams': 400.0}}} and (state / 'state.json').stat().st_size < 1000
+    fg.update_state(lambda st: st.update(ips=['not', 'a', 'dict']))                                               # and what is no such list at all
+    assert fg.printer_ip('SERIAL', CFG, refresh=True) is None and fg.load_state()['ips'] == {}
+    assert announcements(monkeypatch, ['SERIAL'], notice('SERIAL' + 'A' * 1900, '192.0.2.50', BAMBU), notice('SERIAL', '192.0.2.50' + '0' * 1900, BAMBU)) == {}
+
+def test_the_startup_shortcut_is_made_and_read_by_windows_own_powershell(tmp_path, monkeypatch):
+    """`powershell` was started by its bare name. Windows looks for that in the folder of the running Python and in the
+    current folder before System32: a powershell.exe lying where `install` is run from was what ran, at every install.
+    It is started by its full path under %SystemRoot%, and by its bare name only where that file is not."""
+    ran = []
+    monkeypatch.setattr(fg.subprocess, 'run', lambda cmd, **how: ran.append(cmd[0]) or type('Done', (), {'stdout': ''})())
+    monkeypatch.setattr(fg.subprocess, 'CREATE_NO_WINDOW', 0, raising=False)
+    lnk = tmp_path / 'Bambu Filament Guard.lnk'; lnk.write_text(''); monkeypatch.setattr(fg, 'STARTUP_LNK', str(lnk))
+    monkeypatch.setenv('SystemRoot', str(tmp_path / 'Windows'))
+    fg.make_shortcut(); fg.shortcut_folder()
+    assert ran == ['powershell', 'powershell']                                             # no such file here: the name, as before
+    own = tmp_path / 'Windows' / 'System32' / 'WindowsPowerShell' / 'v1.0' / 'powershell.exe'; own.parent.mkdir(parents=True); own.write_text('')
+    del ran[:]; fg.make_shortcut(); fg.shortcut_folder()
+    assert ran == [str(own), str(own)]
+
+NO_AMS = {'gcode_state': 'IDLE', 'vt_tray': {'id': '254', 'tray_type': 'PLA', 'tray_color': '0A2989FF', 'remain': 0, 'tray_weight': '0'}}
+
+def entered(monkeypatch, status):
+    """The printer reports `status`; 640 g were entered for its AMS tray A1 and 400 g for its external spool."""
+    import guard_ledger as gl
+    running(monkeypatch, status)
+    gl.enter('SERIAL', {'label': 'A1', 'type': 'PLA', 'colour': '#0A2989'}, 640); gl.enter('SERIAL', {'label': 'Ext', 'type': 'PLA', 'colour': '#0A2989'}, 400)
+    return lambda: {label: e['grams'] for label, e in fg.load_state()['spools']['SERIAL'].items()}
+
+def test_a_printer_without_an_ams_is_judged_on_its_external_spool(state, monkeypatch, capsys):
+    """A status is judged in two cases: it has the list of its AMS units, or it has no "ams" at all and names an external
+    spool, which is a printer with no AMS: such a one was answered "did not report its spools" at every check. With
+    "ams" there and no list in it, it is the report in pieces, and with neither there is nothing to judge: not judged.
+    No amount entered for an AMS tray ends on a status without the list."""
+    kept = entered(monkeypatch, NO_AMS); res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['error'] is None and res['worst'] == 'OK' and [(t['label'], t['grams']) for t in res['rows'][0]['trays']] == [('Ext', 400.0)]
+    assert kept() == {'A1': 640.0, 'Ext': 400.0}                                             # A1 is not in this status: its amount is left alone
+    assert fg.main(['trays']) == 0 and 'Bambu Lab H2D (printer), IDLE\n  Ext   PLA ' in capsys.readouterr().out and kept() == {'A1': 640.0, 'Ext': 400.0}
+    slots = {'gcode_state': 'IDLE', 'vir_slot': [dict(NO_AMS['vt_tray'])]}                   # the external holders as newer firmware names them
+    assert fg.can_judge(slots) and fg.can_judge(ENOUGH) and fg.evaluate(BLUE, CFG, 'Benchy', seen={'SERIAL': slots})['worst'] == 'OK'
+    for status in (dict(NO_AMS, ams={'tray_now': '255', 'version': 4}), {'gcode_state': 'IDLE'}, {'gcode_state': 'IDLE', 'vir_slot': []}, dict(NO_AMS, ams=None)):
+        kept = entered(monkeypatch, status)
+        assert not fg.can_judge(status) and fg.evaluate(BLUE, CFG, 'Benchy')['error'] == 'the Bambu Lab H2D did not report its spools'
+        assert fg.main(['trays']) == 0 and 'Bambu Lab H2D: did not report its spools' in capsys.readouterr().out and kept() == {'A1': 640.0, 'Ext': 400.0}
+    entered(monkeypatch, dict(NO_AMS, ams={'ams': []}))                                      # the list, with no AMS in it: judged, as before
+    assert fg.evaluate(BLUE, CFG, 'Benchy')['worst'] == 'OK'
+
+@pytest.mark.windows
+def test_the_self_test_counts_the_external_spool_of_a_printer_without_an_ams(state, monkeypatch):
+    """The same rule as a check: no "ams" at all and an external spool is a printer the guard can read; "ams" without its
+    list is not. Neither ends an amount entered for an AMS tray."""
+    import guard_ui
+    monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None); monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {})
+    kept = entered(monkeypatch, NO_AMS)
+    assert (True, 'Bambu Lab H2D: 1 spool(s), 1 with a known amount') in fg.selftest(CFG) and kept() == {'A1': 640.0, 'Ext': 400.0}
+    kept = entered(monkeypatch, dict(NO_AMS, ams={'tray_now': '255'}))
+    assert (None, 'Bambu Lab H2D: it did not report its spools') in fg.selftest(CFG) and kept() == {'A1': 640.0, 'Ext': 400.0}
+
+@pytest.mark.windows
+def test_setup_says_at_once_that_it_installs_and_a_second_one_meanwhile_does_nothing(state, monkeypatch):
+    """Install.cmd showed nothing until the install was over: up to a minute of waiting for a guard that runs to go, and
+    eight seconds of listening for each printer that is off. A second double click in that time started a second
+    install beside the first. A line now says at once that the install is under way, the install runs behind it, and
+    the card comes as before; while it runs, a second setup finds the first one's mutex and leaves."""
+    done = install_on(monkeypatch); shown = set_up(monkeypatch, shown=done)
+    assert shown[:2] == [('line', 'Installing Bambu Filament Guard…'), 'shortcut read'] and 'start' in shown           # the line, before anything of the install
+    assert shown[-2] == ('mutex let go', 7) and shown[-1][0] == 'Bambu Filament Guard is installed'                    # the next double click installs again
+    done = install_on(monkeypatch); assert set_up(monkeypatch, mutex=None, shown=done) == []                           # one is at work: nothing is shown, nothing installed
+    def no_tk(): raise RuntimeError('no display')
+    import guard_ui
+    done = install_on(monkeypatch); shown = set_up(monkeypatch, shown=done); del shown[:]
+    monkeypatch.setattr(guard_ui, 'make_root', no_tk)
+    assert fg.setup() == 0 and shown[:1] == ['shortcut read'] and 'start' in shown and shown[-1] == ('mutex let go', 7)   # no card to be had: installed all the same
+    assert 'setup: its card cannot be shown (RuntimeError: no display): the install goes on without it' in (state / 'guard.log').read_text()
+
+@pytest.mark.windows
+def test_the_self_test_says_whether_it_is_this_copy_that_starts_with_windows(state, tmp_path, monkeypatch, capsys):
+    """A Startup shortcut that exists read "It starts automatically", also when it starts another copy of the guard, in
+    another folder: an update unzipped beside this one, or this one never installed. The self-test and "status" say
+    so only of a shortcut that points into this copy's folder, and name the folder of one that points elsewhere."""
+    import guard_ui
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'app': {'version': '02.09.01.70'}}); monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None)
+    monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {}); monkeypatch.setattr(fg, 'is_running', lambda: True)
+    lnk, points = tmp_path / 'Bambu Filament Guard.lnk', [str(tmp_path / 'other' / 'app')]
+    monkeypatch.setattr(fg, 'STARTUP_LNK', str(lnk)); monkeypatch.setattr(fg, 'shortcut_folder', lambda: points[0])
+    assert fg.selftest(CFG)[-1] == (None, 'It does not start automatically') and fg.main(['status']) == 0 and '| starts automatically: no |' in capsys.readouterr().out
+    lnk.write_text('')
+    assert fg.selftest(CFG)[-1] == (None, f'It starts another copy, in {points[0]}')
+    assert fg.main(['status']) == 0 and f'| starts automatically: another copy, in {points[0]} |' in capsys.readouterr().out
+    points[0] = fg.HERE
+    assert fg.selftest(CFG)[-1] == (True, 'It starts automatically') and fg.main(['status']) == 0 and '| starts automatically: yes |' in capsys.readouterr().out
+    points[0] = ''                                                                           # PowerShell could not read the shortcut
+    assert fg.selftest(CFG)[-1] == (None, 'A Startup shortcut is there, but where it points cannot be read')
+
+@pytest.mark.windows
+def test_the_menus_start_automatically_leaves_the_shortcut_of_another_copy_alone(state, tmp_path, monkeypatch):
+    """"Start automatically" in the icon's menu removed the Startup shortcut whenever there was one: also the one of a
+    newer copy installed from another folder, which then no longer started with Windows, and nothing said so. It
+    removes only a shortcut that points into its own folder, and says on a card what it left alone."""
+    lnk, points, made = tmp_path / 'Bambu Filament Guard.lnk', [str(tmp_path / 'new' / 'app')], []
+    monkeypatch.setattr(fg, 'STARTUP_LNK', str(lnk)); monkeypatch.setattr(fg, 'shortcut_folder', lambda: points[0]); monkeypatch.setattr(fg, 'make_shortcut', lambda: made.append(1))
+    guard = guard_with(); lnk.write_text(''); guard.toggle_autostart()
+    assert lnk.exists() and guard.card.shown == [('note', 'The Startup shortcut was left alone')]
+    assert guard.card.said == [f'It starts another copy of the guard, in {points[0]}: that copy\'s own menu, or its Uninstall.cmd, removes it.', 'To have this copy start with Windows in its place, install it: Install.cmd in its folder, or "install".']
+    points[0] = ''; guard = guard_with(); guard.toggle_autostart()                           # PowerShell cannot read it: whose it is cannot be told
+    assert lnk.exists() and guard.card.said == ['Where it points could not be read, so it was not removed.']
+    points[0] = fg.HERE; guard = guard_with(); guard.toggle_autostart()
+    assert not lnk.exists() and guard.card.shown == [] and made == []                         # this copy's own: removed, as before
+    guard.toggle_autostart(); assert made == [1] and guard.card.shown == []                   # and none there: made
+
+def test_one_printer_found_does_not_keep_another_from_being_looked_for(state, monkeypatch):
+    """A printer whose address is kept is listened for again at most every ten minutes, when it does not answer there.
+    That was one timer for all printers: within ten minutes of listening for any of them, a second printer that had
+    a new address was not looked for, and its checks went on failing at the old one. Each printer has its own."""
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {'SERIAL': 'code', 'SERIAL2': 'code'}}); listened, now = [], [1000.0]
+    monkeypatch.setattr(fg, 'discover', lambda want, seconds=8.0: listened.append(want) or {'SERIAL2': '192.0.2.61'}); monkeypatch.setattr(fg.time, 'time', lambda: now[0])
+    fg.update_state(lambda st: st.update(ips={'SERIAL': '192.0.2.50', 'SERIAL2': '192.0.2.51'}, discovered_at=990.0))   # as 1.4.0 kept it: one time for all
+    assert fg.printer_ip('SERIAL', CFG, refresh=True) == '192.0.2.50' and listened == [['SERIAL']]                # not heard: the address kept stands
+    assert fg.printer_ip('SERIAL2', CFG, refresh=True) == '192.0.2.61' and listened == [['SERIAL'], ['SERIAL2']]  # the other is looked for all the same, and found
+    now[0] += 300
+    assert fg.printer_ip('SERIAL', CFG, refresh=True) == '192.0.2.50' and fg.printer_ip('SERIAL2', CFG, refresh=True) == '192.0.2.61' and len(listened) == 2   # each within its own ten minutes
+    now[0] += 400
+    assert fg.printer_ip('SERIAL', CFG, refresh=True) == '192.0.2.50' and listened[2:] == [['SERIAL']]
+    st = fg.load_state()
+    assert st['listened'] == {'SERIAL': 1700.0, 'SERIAL2': 1000.0} and 'discovered_at' not in st

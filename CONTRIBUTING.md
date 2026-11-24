@@ -73,6 +73,6 @@ A useful report holds:
 - the output of `python filament_guard.py selftest`
 - the lines of `%LOCALAPPDATA%\BambuFilamentGuard\guard.log` around the event
 
-**Remove printer serial numbers and IP addresses** from everything you paste, and never post a LAN access code. The log and the output of `selftest` and `trays` can hold serials and IP addresses.
+**Remove printer serial numbers and IP addresses** from everything you paste, and never post a LAN access code. The log and the output of `selftest`, `trays`, `learned` and `check --json` can hold serials and IP addresses. The log also holds project titles, print job names and file paths under the Windows user's folder, with the user name in them.
 
 Reports from printers other than the H2D are especially welcome. The H2D is the one the guard was built on, and how other models report their spools and nozzles has not been seen.

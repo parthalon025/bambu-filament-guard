@@ -36,10 +36,11 @@ What it reads, and from where:
             %LOCALAPPDATA%/BambuFilamentGuard/profiles/), is taken off the spools first. The answer is for the moment
             the checked print could start.
 
-The access code goes from Bambu Studio's configuration to the printer and nowhere else: not into the log, the state
-file, a window or the output. Settings: the icon's menu, or config.json (see DEFAULTS). Settings, log and state:
+The access code goes from Bambu Studio's configuration to the printer's address (config.json's, or a local one that an
+announcement names for it: see discover and SECURITY.md) and nowhere else: not into the log, the state file, a window
+or the output. Settings: the icon's menu, or config.json (see DEFAULTS). Settings, log and state:
 %LOCALAPPDATA%/BambuFilamentGuard/. The card and the icon are in guard_ui.py."""
-import sys, os, re, json, ssl, time, glob, math, ctypes, hashlib, itertools, contextlib, zipfile, socket, struct, threading, queue, subprocess, argparse, tempfile, traceback
+import sys, os, re, json, ssl, time, glob, math, ctypes, hashlib, itertools, contextlib, zipfile, socket, struct, threading, queue, subprocess, argparse, tempfile, traceback, ipaddress
 
 APP = 'BambuFilamentGuard'
 VERSION = '1.5.0'
@@ -333,6 +334,17 @@ def write_json(path, data, **how):
     finally:
         with contextlib.suppress(OSError): os.remove(temp)
     raise StateBusy(f'{os.path.basename(path)} could not be written: another program holds it')
+
+def forget_copy(path):
+    """Removes the last good copy of a state file (<path>.bak), for whatever has just written out of that file something
+    the user asked to forget (an entered amount, a tray's history, a weigh-in): the copy still held it, and gave it
+    back when the file was next damaged. The file's next write keeps a copy again. A copy that cannot be removed now
+    (the folder held elsewhere) is said in the log, not raised: what was to be forgotten is out of the file itself."""
+    name = os.path.basename(path)
+    try:
+        with state_lock(): os.remove(path + '.bak')
+    except FileNotFoundError: pass
+    except OSError as e: log(f'{name}.bak could not be removed ({e.__class__.__name__}): what was forgotten stays in it until {name} is next written')
 
 def load_state():
     """The state file ({} when there is none; see read_json)."""
@@ -648,11 +660,23 @@ def known_printers(conf):
 # A printer the guard does not hear may be off, or Windows Firewall keeps what it announces from pythonw (a network marked
 # Public, a prompt answered "no"): the guard only listens, so both are the same silence, and the answer names both.
 NOT_ANNOUNCED = ('not announcing itself on this network. Is it on? If it is, Windows Firewall may keep its announcements from the guard: allow the guard on private networks, '
-                 'or give the printer\'s address in config.json: {"printers": {"<serial>": {"ip": "<address>"}}}')
+                 'or give the printer\'s address in config.json: {"printers": {"<serial>": {"ip": "<address>"}}}. A printer with a public address must be named there: '
+                 'an announcement is taken for a local address only')
 
-def discover(seconds=8.0, want=None):
-    """{serial: ip} of the Bambu printers announcing themselves on the LAN (SSDP notices on UDP 2021 / 1990). Only a
-    notice whose NT is Bambu's counts: other devices announce themselves on these ports too."""
+def local_address(text):
+    """text when it is an IPv4 address a printer on a local network can have, else None: no host name, no address of the
+    internet at large, not this computer itself, no multicast, unspecified or reserved one."""
+    try: a = ipaddress.ip_address(text if isinstance(text, str) else '')      # a number would be read as an address
+    except ValueError: return None
+    return text if a.version == 4 and not (a.is_global or a.is_loopback or a.is_multicast or a.is_unspecified or a.is_reserved) else None
+
+def discover(want, seconds=8.0):
+    """{serial: ip} of those of the printers `want` (serials) that announce themselves on the LAN (SSDP notices on UDP
+    2021 / 1990). Only a notice whose NT is Bambu's counts: other devices announce themselves on these ports too.
+    An announcement is not authenticated, and the access code is sent to the address it names. So it counts only for
+    a serial that was asked for, and only with a local address (local_address): its Location, taken as it came, let
+    one packet from any device on the network name a host on the internet. A device on the network that names itself
+    is still taken for the printer (SECURITY.md); an address given in config.json is not looked for here at all."""
     socks, found = [], {}
     for port in (2021, 1990):
         try:
@@ -663,26 +687,40 @@ def discover(seconds=8.0, want=None):
             s.settimeout(0.3); socks.append(s)
         except OSError: pass
     t0 = time.time()
-    while socks and time.time() - t0 < seconds and not (want and set(want) <= set(found)):
+    while socks and time.time() - t0 < seconds and not set(want) <= set(found):
         for s in socks:
             try: data, addr = s.recvfrom(4096)
             except OSError: continue
             h = {k.strip().lower(): v.strip() for k, v in (l.split(':', 1) for l in data.decode('utf-8', 'replace').split('\r\n') if ':' in l)}
-            if h.get('usn') and h.get('nt', '').lower() == 'urn:bambulab-com:device:3dprinter': found[h['usn']] = h.get('location') or addr[0]
+            where = local_address(h.get('location') or addr[0])
+            if h.get('usn') in want and where and h.get('nt', '').lower() == 'urn:bambulab-com:device:3dprinter': found[h['usn']] = where
     for s in socks: s.close()
     return found
 
 def printer_ip(serial, cfg, refresh=False):
-    """The printer's IP: config.json, else the last one seen, else its LAN announcement (asked for at most every 10 minutes)."""
+    """The printer's IP: config.json, else the last one seen, else its LAN announcement (asked for at most every 10
+    minutes, by a time of this printer's own, 'listened': one time for all kept a second printer from being looked for
+    within ten minutes of the first). Of what discover heard, the address of this serial alone is kept. What an
+    earlier version kept is not used and goes from the state file at this look, listened or not: an address that is no
+    local one (it took whatever an announcement named), and whatever is kept under a key that is no serial Bambu
+    Studio knows (it kept every USN it heard, for good: a burst of junk made the state file, read whole every 3
+    seconds, hundreds of MB)."""
     fixed = cfg.get('printers', {}).get(serial, {}).get('ip')
     if fixed: return fixed
-    state = load_state(); ips = state.get('ips', {})
-    if serial in ips and not refresh: return ips[serial]
-    if time.time() - state.get('discovered_at', 0) > (0 if serial not in ips else 600):
-        found = discover(want=[serial])
-        def change(st): st.setdefault('ips', {}).update(found); st['discovered_at'] = time.time(); return st['ips'].get(serial)
-        return update_state(change)
-    return ips.get(serial)
+    try: known = set(bs_conf().get('access_code', {})) | {serial}
+    except Exception: known = {serial}
+    tidy = lambda kept: {s: a for s, a in (kept.items() if isinstance(kept, dict) else ()) if s in known and local_address(a)}
+    times = lambda kept: {s: t for s, t in (kept.items() if isinstance(kept, dict) else ()) if s in known and type(t) in (int, float)}
+    state = load_state(); ips = tidy(state.get('ips', {}))
+    listen = (refresh or serial not in ips) and time.time() - times(state.get('listened')).get(serial, 0) > (0 if serial not in ips else 600)
+    if not listen and ips == state.get('ips', {}): return ips.get(serial)
+    found = local_address(discover([serial]).get(serial)) if listen else None
+    def change(st):
+        st['ips'], st['listened'] = tidy(st.get('ips', {})), times(st.get('listened')); st.pop('discovered_at', None)   # 1.4.0's one time for all
+        if listen: st['listened'][serial] = time.time()
+        if found: st['ips'][serial] = found
+        return st['ips'].get(serial)
+    return update_state(change)
 
 def merge(a, b):
     for k, v in b.items():
@@ -709,7 +747,7 @@ def printer_link(ip, serial, code, client_id, on_report, on_refused=None):
     try: c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
     except AttributeError: c = mqtt.Client(client_id=client_id)
     c.username_pw_set('bblp', code)
-    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE      # the printer signs its own certificate
+    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE      # no public authority has signed the printer's certificate: whatever is shown is accepted (SECURITY.md)
     c.tls_set_context(ctx); c.on_connect = on_connect; c.on_message = on_message
     try: c.connect(ip, 8883, keepalive=30)
     except OSError as e: raise PrinterError(f'no connection to {ip} ({e.__class__.__name__})')
@@ -722,6 +760,12 @@ def has_spools(status):
     printer with nothing loaded, and ended every amount entered for an AMS tray. Without the list nothing is judged."""
     return isinstance(status.get('ams'), dict) and isinstance(status['ams'].get('ams'), list)
 
+def can_judge(status):
+    """Can the spools of this status be judged? With the list of its AMS units (has_spools); or with no "ams" at all and
+    an external spool named (vt_tray, vir_slot), which is a printer that has no AMS: judged on its external spool,
+    and no amount entered for an AMS tray ends on it. "ams" there without its list is the report still in pieces."""
+    return has_spools(status) or ('ams' not in status and bool(status.get('vir_slot') or isinstance(status.get('vt_tray'), dict)))
+
 def code_refused(why):
     """Is this refusal of a connection about the access code? why: the reason as the link gives it, paho 2's name for it
     or paho 1's number (4 = bad user name or password, 5 = not authorised). Any other is not: a printer that is still
@@ -730,7 +774,8 @@ def code_refused(why):
 
 def read_status(ip, serial, code, wait=10.0):
     """The printer's full status, read once: waited for until it has its spools (has_spools), three seconds at most
-    after its first piece, and returned as it then is. The caller asks has_spools before it judges by it."""
+    after its first piece, and returned as it then is. The caller asks can_judge before it judges by it: a printer
+    without an AMS never has that list, and is told from a report in pieces only once the three seconds are over."""
     state, lock, full, refused = {}, threading.Lock(), threading.Event(), []
     def on_report(d):
         with lock: merge(state, d)
@@ -1091,7 +1136,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
                 status = read_status(new_ip, printer['serial'], code)
             if seen is not None: seen[printer['serial']] = status
         if cfg.get('learn'): mark_looked(printer['serial'])
-        if not has_spools(status): raise PrinterError(f"the {printer['name']} did not report its spools")
+        if not can_judge(status): raise PrinterError(f"the {printer['name']} did not report its spools")
     except Exception as e:                   # whatever goes wrong before the printer has answered is an answer too: a card with the reason, not a line in the log
         res['error'] = str(e) if isinstance(e, PrinterError) else f'{e.__class__.__name__}: {e}'
         return res
@@ -1740,8 +1785,15 @@ class Guard:
         self.set_option('popup_on', [s for s in on if s != status] if status in on else on + [status])
 
     def toggle_autostart(self):
-        if os.path.exists(STARTUP_LNK): os.remove(STARTUP_LNK)
-        else: make_shortcut()
+        """The menu's "Start automatically". There is one Startup shortcut, and it may be another copy's (a newer one,
+        installed from another folder): removed from here, that copy no longer started with Windows. As for uninstall,
+        only a shortcut that points into this folder is removed; another is left alone, and a card says so."""
+        starts = autostart()
+        if starts is None: make_shortcut()
+        elif starts is True: os.remove(STARTUP_LNK)
+        else: self.card.note('The Startup shortcut was left alone', [(None, 'Where it points could not be read, so it was not removed.')] if not starts else [
+            (None, f"It starts another copy of the guard, in {starts}: that copy's own menu, or its Uninstall.cmd, removes it."),
+            (None, 'To have this copy start with Windows in its place, install it: Install.cmd in its folder, or "install".')])
         if self.tray: self.tray.refresh()
 
     def toggle_pause(self):
@@ -1850,12 +1902,16 @@ class Guard:
             for job in self.jobs.values(): job.stopped.set()
 
 
-def sole_guard():
-    """The named mutex that makes this process the one running guard: its handle, or None when another guard holds it
-    (0 when Windows made none: the guard runs all the same)."""
+def sole_guard(name=MUTEX):
+    """The named mutex that makes this process the one running guard (or, by another name, the one setup at work): its
+    handle, or None when another process holds it (0 when Windows made none: the guard runs all the same)."""
     k32 = ctypes.WinDLL('kernel32', use_last_error=True); k32.CreateMutexW.restype = ctypes.c_void_p
-    handle = k32.CreateMutexW(None, False, MUTEX)
+    handle = k32.CreateMutexW(None, False, name)
     return None if ctypes.get_last_error() == 183 else handle or 0               # ERROR_ALREADY_EXISTS: one guard is enough
+
+def let_go(handle):
+    """Gives back a mutex sole_guard made: the name is free for the next process as soon as no handle to it is open."""
+    if handle: ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
 
 def watch(start_line=True):
     handle = None
@@ -1879,8 +1935,7 @@ def watch(start_line=True):
         at = traceback.extract_tb(e.__traceback__)[-1]
         log(f'the guard has stopped on an error: {e.__class__.__name__}: {e} ({os.path.basename(at.filename)}, line {at.lineno})')
         return 1
-    finally:
-        if handle: ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
+    finally: let_go(handle)
 
 def guard_folder():
     """The folder the running guard was started from, which watch() notes under its process id in guard.pid; '' when
@@ -1892,6 +1947,14 @@ def guard_folder():
 def here(folder):
     """Is `folder` the one this guard's script is in, as Windows tells folders apart?"""
     return bool(folder) and os.path.normcase(os.path.abspath(folder)) == os.path.normcase(HERE)
+
+def autostart():
+    """Which copy of the guard the Startup shortcut starts: None when there is no shortcut, True when this one, else the
+    folder of the other (an update unzipped beside this one and installed, or this one never installed), '' when
+    where it points cannot be read. That a shortcut exists says nothing of this copy."""
+    if not os.path.exists(STARTUP_LNK): return None
+    points = shortcut_folder()
+    return True if here(points) else points
 
 def is_running():
     import ctypes
@@ -1952,8 +2015,8 @@ def selftest_lines(cfg, out):
             ip = printer_ip(p['serial'], cfg)
             if not ip: raise PrinterError(f'it is {NOT_ANNOUNCED}')
             status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
-            if not has_spools(status): raise PrinterError('it did not report its spools')
-            trays, _ = trays_of(status); guard_ledger.apply(trays, p['serial'])
+            if not can_judge(status): raise PrinterError('it did not report its spools')
+            trays, _ = trays_of(status); guard_ledger.apply(trays, p['serial'], has_spools(status))
             out.append((True, f"{p['name']}: {len(trays)} spool(s), {sum(t['grams'] is not None for t in trays)} with a known amount")); answered += 1
         except PrinterError as e: out.append((False if 'refused the access code' in str(e) else None, f"{p['name']}: {e}"))
         except Exception as e: out.append((False, f"{p['name']}: {e.__class__.__name__}: {e}"))     # one printer's error does not cost the others their line
@@ -1965,7 +2028,9 @@ def selftest_lines(cfg, out):
                 f"{sum(1 for j in jobs if j.get('sound'))} sound (\"learned\" says more)"))
     out.append((True, 'Bambu Studio is running: the card shows in its window') if guard_ui.studio_windows() else (None, 'Bambu Studio is not running: the card shows when it is'))
     out.append((True, 'The guard is running') if is_running() else (False, 'The guard is not running: "install" starts it'))
-    out.append((True, 'It starts automatically') if os.path.exists(STARTUP_LNK) else (None, 'It does not start automatically'))
+    starts = autostart()
+    out.append((None, 'It does not start automatically') if starts is None else (True, 'It starts automatically') if starts is True
+               else (None, f'It starts another copy, in {starts}' if starts else 'A Startup shortcut is there, but where it points cannot be read'))
 
 
 # ---------------------------------------------------------------- installing
@@ -1982,13 +2047,20 @@ def start(start_line=True):
     if is_running(): return
     subprocess.Popen(own_command('watch', *([] if start_line else ['--no-start-line'])), cwd=HERE, close_fds=True, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
+def powershell():
+    """Windows' own PowerShell, by its full path under %SystemRoot%. Started by its bare name, the one that ran was the
+    first Windows found, and it looks in the folder of the running Python and in the current folder before System32:
+    a powershell.exe lying where `install` is run from. The bare name only where that file is not."""
+    own = os.path.join(os.environ.get('SystemRoot') or r'C:\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    return own if os.path.isfile(own) else 'powershell'
+
 def shortcut_folder():
     """The folder the Startup shortcut starts a guard from (its working directory: where that guard's script is), or ''
     when there is no shortcut or it cannot be read. Asked of the same WScript.Shell object that makes it; the answer
     comes as the bytes of its UTF-8 in hex, because the console's code page would garble a folder name outside it."""
     if not os.path.exists(STARTUP_LNK): return ''
     try:
-        out = subprocess.run(['powershell', '-NoProfile', '-Command', "$d=(New-Object -ComObject WScript.Shell).CreateShortcut($env:FG_LNK).WorkingDirectory; "
+        out = subprocess.run([powershell(), '-NoProfile', '-Command', "$d=(New-Object -ComObject WScript.Shell).CreateShortcut($env:FG_LNK).WorkingDirectory; "
                               "[BitConverter]::ToString([Text.Encoding]::UTF8.GetBytes($d))"], env=dict(os.environ, FG_LNK=STARTUP_LNK),
                              capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
         return bytes.fromhex(out.stdout.strip().replace('-', '')).decode('utf-8')
@@ -1998,7 +2070,7 @@ def make_shortcut():
     """The Startup shortcut. The guard starts with Windows and waits; its icon shows while Bambu Studio runs."""
     cmd = own_command('watch')
     env = dict(os.environ, FG_LNK=STARTUP_LNK, FG_EXE=cmd[0], FG_ARGS=subprocess.list2cmdline(cmd[1:]), FG_DIR=HERE)
-    subprocess.run(['powershell', '-NoProfile', '-Command',
+    subprocess.run([powershell(), '-NoProfile', '-Command',
                     "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:FG_LNK); $s.TargetPath=$env:FG_EXE; $s.Arguments=$env:FG_ARGS; "
                     "$s.WorkingDirectory=$env:FG_DIR; $s.Description='Warns when the loaded spools do not hold enough filament for a sliced print'; $s.Save()"],
                    env=env, check=True, capture_output=True, text=True, errors='replace', timeout=60, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -2063,21 +2135,41 @@ def uninstall():
     print(f'settings, entered amounts, what was learned and the log stay in {STATE_DIR}: delete it, and this folder, to remove every trace')
 
 def setup():
-    """Install, and say so on a card: for someone who started the packaged guard with a double click and sees no console."""
-    import guard_ui
+    """Install, and say so on a card: for someone who started the packaged guard with a double click and sees no console.
+    The install can take a minute and more (it waits for a guard that runs to go, and listens eight seconds for each
+    printer that is off): a line says at once that it is under way, the install runs behind it on a thread of its own,
+    and the card takes the line's place. A second double click meanwhile must not install beside the first: setup
+    holds a named mutex of its own while it installs (the guard's own is held by whichever guard runs), and one that
+    finds it held leaves; the line of the first is on the screen."""
     if sys.stdout is None: sys.stdout = sys.stderr = open(os.devnull, 'w')       # pythonw has no console to print to
-    try: running, said = install(start_line=False)                               # this card says it, in the same corner as the guard's start line would
-    except Exception as e:                   # no console shows it: whatever kept install from its end is said on the card, and in the log
-        log(f'install failed: {e.__class__.__name__}: {e}')
-        running, said = False, [(False, f"It could not be installed ({e.__class__.__name__}: {e}). The log is {os.path.join(STATE_DIR, 'guard.log')}.")]
-    failed = any(mark is False for mark, _ in said)
-    root = guard_ui.make_root(); card = guard_ui.Card(root, on_close=root.quit)
-    card.note('Bambu Filament Guard did not start' if not running else 'Bambu Filament Guard runs, but is not fully installed' if failed else 'Bambu Filament Guard is installed', [
-        *([(True, "It checks every plate you slice in Bambu Studio and shows the answer in Bambu Studio's window."),
-           (True, 'Its icon, a spool, is in the notification area while Bambu Studio runs: settings, self-test, quit.')] if running else []), *said,
-        (None, f'It runs from this folder, so the folder has to stay: {os.path.dirname(HERE) if os.path.basename(HERE) == "app" else HERE}'),
-        (None, 'To remove it: Uninstall.cmd in that folder, then delete the folder.')], 'danger' if not running else 'warn' if failed else 'ok')
-    def tick(): card.follow(); root.after(400, tick)
+    mutex = sole_guard(MUTEX + '-setup')
+    if mutex is None: return 0
+    def installed(start_line=False):         # no console shows it: whatever kept install from its end is said on the card, and in the log
+        try: return install(start_line)
+        except Exception as e:
+            log(f'install failed: {e.__class__.__name__}: {e}')
+            return False, [(False, f"It could not be installed ({e.__class__.__name__}: {e}). The log is {os.path.join(STATE_DIR, 'guard.log')}.")]
+    try:
+        import guard_ui
+        root = guard_ui.make_root(); card = guard_ui.Card(root)                  # closing the line does not end setup: the install behind it would end with it
+        card.line('Installing Bambu Filament Guard…')
+    except Exception as e:                   # Tk that does not start costs the card, not the install; the guard then says itself that it runs
+        log(f'setup: its card cannot be shown ({e.__class__.__name__}: {e}): the install goes on without it')
+        installed(start_line=True); let_go(mutex)
+        return 0
+    done = queue.Queue()
+    threading.Thread(target=lambda: done.put(installed()), daemon=True).start()
+    def tick():
+        card.follow()
+        if not done.empty():
+            running, said = done.get(); failed = any(mark is False for mark, _ in said)
+            let_go(mutex); card.on_close = root.quit                             # the next double click installs again; closing this card ends setup
+            card.note('Bambu Filament Guard did not start' if not running else 'Bambu Filament Guard runs, but is not fully installed' if failed else 'Bambu Filament Guard is installed', [
+                *([(True, "It checks every plate you slice in Bambu Studio and shows the answer in Bambu Studio's window."),
+                   (True, 'Its icon, a spool, is in the notification area while Bambu Studio runs: settings, self-test, quit.')] if running else []), *said,
+                (None, f'It runs from this folder, so the folder has to stay: {os.path.dirname(HERE) if os.path.basename(HERE) == "app" else HERE}'),
+                (None, 'To remove it: Uninstall.cmd in that folder, then delete the folder.')], 'danger' if not running else 'warn' if failed else 'ok')
+        root.after(400, tick)
     tick(); root.mainloop()
     return 0
 
@@ -2143,7 +2235,9 @@ def main(argv=None):
     if a.cmd == 'setup': return setup()
     if a.cmd == 'stop': print(STOP_WORDS[stop()]); return 0
     if a.cmd == 'status':
-        print('watcher running' if is_running() else 'watcher not running', '| starts automatically:', 'yes' if os.path.exists(STARTUP_LNK) else 'no', '| log:', os.path.join(STATE_DIR, 'guard.log'))
+        starts = autostart()
+        print('watcher running' if is_running() else 'watcher not running', '| starts automatically:',
+              'no' if starts is None else 'yes' if starts is True else f'another copy, in {starts}' if starts else 'a shortcut that cannot be read', '| log:', os.path.join(STATE_DIR, 'guard.log'))
         return 0
     cfg = load_config()
     if a.cmd == 'selftest':
@@ -2172,8 +2266,8 @@ def main(argv=None):
                 ip = printer_ip(p['serial'], cfg)
                 if not ip: raise PrinterError(NOT_ANNOUNCED)
                 status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
-                if not has_spools(status): raise PrinterError('did not report its spools')
-                trays, two = trays_of(status); guard_ledger.apply(trays, p['serial'])
+                if not can_judge(status): raise PrinterError('did not report its spools')
+                trays, two = trays_of(status); guard_ledger.apply(trays, p['serial'], has_spools(status))
             except PrinterError as e: print(f"{p['name']}: {e}"); continue
             except Exception as e: print(f"{p['name']}: {e.__class__.__name__}: {e}"); continue      # one printer's error does not cost the others their answer
             print(f"{p['name']} ({ip}), {status.get('gcode_state')}")

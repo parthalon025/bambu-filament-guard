@@ -53,7 +53,7 @@ Its colour and tooltip are the last result, with its project and plate; while a 
 - Reserve: 2, 3 or 5 % of the full spool (`spool_reserve_pct`)
 - Learn from prints, tray by tray (`learn`, on; see [Learning](learning.md))
 - Measure the reserve from past prints (experimental) (`measured_reserve`, off; see [Learning, the measured reserve](learning.md#the-measured-reserve) before turning it on)
-- Start automatically
+- Start automatically (turned off, it removes the Startup shortcut only when that is this copy's own; one that starts another copy of the guard, in another folder, is left alone, and a card says so)
 - Forget what was learned…: asks first, on a card with "Forget" and "Keep". Learning then starts again from nothing; what was learned is kept beside it as `learned.json.forgotten`, one copy, replaced the next time something is forgotten (see [Learning](learning.md))
 
 Settings are saved to `config.json` in `%LOCALAPPDATA%\BambuFilamentGuard\`, beside the log and the state, so an update into a new folder keeps them. The file holds only what was changed. Up to 1.4.0 it was beside the script (`app\config.json` in the packaged folder): with no settings in the new place yet, the guard brings that file over when it finds it beside its own script, and `Install.cmd` from the folder of the copy installed before (see [Updating](../README.md#updating)). The keys, their defaults and their meaning are `DEFAULTS` at the top of [`filament_guard.py`](../filament_guard.py). When the file cannot be written (the disk full, the file held by another program), a setting you change is in force until the guard stops, and a card says that it was not kept.
@@ -64,7 +64,7 @@ The file can be written by hand; the guard reads it when it starts, so a change 
 {"printers": {"<serial>": {"ip": "192.168.1.50"}}}
 ```
 
-The address as plain text, `{"printers": {"<serial>": "192.168.1.50"}}`, is read as well. The guard finds a printer by listening for what the printer announces on the local network (UDP ports 2021 and 1990). When a card says that a printer is not announcing itself although it is on, Windows Firewall may be keeping those announcements from the guard: allow the guard (`pythonw.exe`) on private networks, or give the address as above.
+The address as plain text, `{"printers": {"<serial>": "192.168.1.50"}}`, is read as well. The guard finds a printer by listening for what the printer announces on the local network (UDP ports 2021 and 1990). When a card says that a printer is not announcing itself although it is on, Windows Firewall may be keeping those announcements from the guard: allow the guard (`pythonw.exe`) on private networks, or give the address as above. An announcement is taken only when it names a local address: a printer with a public address must be named in `config.json`. Any device on the network can send such an announcement; with the address in `config.json` the guard does not listen for that printer at all (see [SECURITY.md](../SECURITY.md)).
 
 ## What the results mean
 

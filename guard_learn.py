@@ -238,8 +238,7 @@ def forget(label=None, printer=None, names=None):
             serial = whose(history, label, printer, names)
             del history[serial][label]
             what = f'what was learned of {label} on {names.get(serial, serial)}'
-        save(history)
-        with fg.contextlib.suppress(OSError): fg.os.remove(path() + '.bak')      # the copy write_json keeps of the file it replaced still held what is forgotten
+        save(history); fg.forget_copy(path())
     fg.log(f'{what} is forgotten')
     return what
 
@@ -252,7 +251,7 @@ def forget_weigh(label, printer=None, names=None):
         history, names = load(), names or {}
         serial = whose(history, label, printer, names, 'weighs')
         w = history[serial][label]['weighs'].pop()
-        save(history)
+        save(history); fg.forget_copy(path())
     what = f"the weigh-in of {label} on {names.get(serial, serial)} of {day(w['at'])}, {w['weight']:.0f} g on a spool that read {w['reading']:.0f} g,"
     fg.log(f'{what} is forgotten')
     return what

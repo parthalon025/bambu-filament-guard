@@ -1,6 +1,7 @@
 """python build.py  ->  dist/BambuFilamentGuard-<version>.zip: the guard with a Python of its own, for a computer that has none.
 
-To use it: unzip it where it can stay, open Install.cmd. Remove it with Uninstall.cmd, then delete the folder.
+To use it: unzip it into a folder of your own where it can stay, open Install.cmd. Remove it with Uninstall.cmd, then
+delete the folder.
 
 No program in it is of the guard's own making: it runs on python.org's signed pythonw.exe, exactly as the guard runs
 from source. That is on purpose. The first packaging was one self-installing .exe (PyInstaller, --onefile); Windows
@@ -66,6 +67,8 @@ open(os.path.join(out, 'README.txt'), 'w', newline='').write('\r\n'.join([
     f'Bambu Filament Guard {fg.VERSION}', '',
     'Warns before a print when the spools on your Bambu Lab printer do not hold enough filament for it.', '',
     'To install: open Install.cmd. The guard starts now and with Windows, and runs from this folder, so the folder has to stay.',
+    'Keep it in a folder of your own, inside your user folder: what is in it is started each time you log on, so no other',
+    'account of this computer should be able to change it. Move the folder there before you open Install.cmd.',
     'To remove it: open Uninstall.cmd, then delete this folder.', '',
     'What Windows may ask at the first start:',
     '  "Windows protected your PC", when Install.cmd opens: the file came from the internet and is not signed.',

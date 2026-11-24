@@ -69,8 +69,8 @@ A report from any other model, whether it works or not, is welcome: [Printer rep
 ### Packaged (no Python needed)
 
 1. Download `BambuFilamentGuard-<version>.zip` from the [latest release](https://github.com/parthalon025/bambu-filament-guard/releases/latest).
-2. Unzip it where it can stay: it runs from that folder.
-3. Open `Install.cmd`.
+2. Unzip it into a folder of your own where it can stay, inside your user folder (`C:\Users\<you>\…`): the guard runs from that folder and is started from it each time you log on, so it should be one that no other account of the computer can change.
+3. Open `Install.cmd`. A line says at once that it is installing, which can take a minute; a card then says what was done.
 
 `Uninstall.cmd` removes it. `README.txt` in the folder says what Windows may ask at the first start. `python build.py` makes such a zip in `dist\`, on the Python and from the wheels the script and `requirements-bundle.txt` name.
 
@@ -160,7 +160,7 @@ python filament_guard.py uninstall    # remove the shortcut and stop
 
 ## Privacy and security
 
-The guard makes no internet connection, and it sends the printer no command that changes it: no print, pause, stop, temperature or motion command. The LAN access code is read from Bambu Studio's configuration each time and goes to the printer only. What it reads, sends and keeps, and how to report a vulnerability, is in [SECURITY.md](SECURITY.md).
+The guard makes no internet connection, and it sends the printer no command that changes it: no print, pause, stop, temperature or motion command. The LAN access code is read from Bambu Studio's configuration each time and goes only to the address the guard holds for the printer: the one you name in `config.json`, or a local one the printer's announcement names. Announcements are not authenticated, and a device on your own network can answer in the printer's place. What it reads, sends and keeps, and how to report a vulnerability, is in [SECURITY.md](SECURITY.md).
 
 ## Contributing
 
