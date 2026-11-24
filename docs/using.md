@@ -67,7 +67,7 @@ Settings are saved to `config.json` beside the script, which holds only what was
 | Not enough | The matching spools together hold less than the need, or hold it only with a spool AMS auto refill does not go on to (another product or shade, the external spool): the note names those and their amounts. |
 | Not loaded | No spool of that material is loaded where the print's nozzle can reach it. |
 | Colour not loaded | The material is loaded, this colour of it is not. The nearest spool is named and counts for nothing. |
-| Unknown | The matching spool reports no remaining amount. Shown as one line, like "enough", unless `popup_on` names it. |
+| Unknown | The matching spool reports no remaining amount, or Bambu Studio gives the filament no weight (its profile has density 0). Shown as one line, like "enough", unless `popup_on` names it. |
 
 A spool matches a filament when it is the same material, on the nozzle that prints it, in the project's colour. While a spool of the project's own product is loaded, only that product counts: a spool of similar colour but another product is named in the note and not counted. When none is loaded, a spool of another product counts, because you can pick it at "Send print job", and the note names it whatever the result, "enough" included: "B3 is PLA Silk+, another product than the project's Bambu PLA Basic".
 

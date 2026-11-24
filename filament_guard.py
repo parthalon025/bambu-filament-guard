@@ -234,8 +234,9 @@ def split_list(value):
     return [p.strip().strip('"') for p in parts]
 
 def parse_plate(text):
-    """{'printer_model', 'time', 'layers', 'filaments': [{slot, type, fid, colour, name, grams, nozzle}]} from the head of a
-    Bambu Studio G-code. None while the file is not complete (Bambu Studio writes the totals last)."""
+    """{'printer_model', 'time', 'layers', 'filaments': [{slot, type, fid, colour, name, grams, nozzle, density}]} from the
+    head of a Bambu Studio G-code. None while the file is not complete (Bambu Studio writes the totals last). grams is
+    None for a filament in use that Bambu Studio gives no weight: how much it needs cannot be told."""
     if '; HEADER_BLOCK_END' not in text or '; CONFIG_BLOCK_END' not in text: return None
     head, _, body = text.partition('; HEADER_BLOCK_END')
     def header(key):
@@ -257,12 +258,22 @@ def parse_plate(text):
     # be used by the nozzle its AMS is plumbed to, so the nozzle is part of what "enough" means.
     nozzle_of = setting('filament_map') if len(setting('nozzle_diameter')) > 1 else []
     def at(lst, slot, default=''): return lst[slot - 1] if 0 < slot <= len(lst) else default
+    def numbers(key):
+        try: return [float(v) for v in (header(key) or '').split(',') if v.strip()]
+        except ValueError: return []
+    lengths, densities = numbers('total filament length [mm]'), numbers('filament_density')    # for each filament in use, like the totals; for each slot
+    if len(lengths) != len(weights): lengths = []
     filaments = []
-    for slot, grams in zip(slots, weights):
-        if grams <= 0: continue
+    for n, (slot, grams) in enumerate(zip(slots, weights), start=1):
+        if grams <= 0:
+            # 0.00 g is also what Bambu Studio writes for a filament that is printed, when its profile has density 0 (a
+            # profile made by hand, until one is entered). Dropped as not in use, a two-colour plate once read "enough" on
+            # the other colour alone. In use: named by "; filament:", and with a length, or a density of 0.
+            if not used or not (at(lengths, n, 0.0) > 0 or at(densities, slot, None) == 0): continue
+            grams = None
         filaments.append({'slot': slot, 'type': at(types, slot, '?'), 'fid': at(fids, slot), 'colour': at(colours, slot, '#808080')[:7].upper(),
                           'name': re.sub(r'\s*@.*$', '', at(names, slot)), 'grams': grams,
-                          'nozzle': {'1': 'left', '2': 'right'}.get(at(nozzle_of, slot))})
+                          'nozzle': {'1': 'left', '2': 'right'}.get(at(nozzle_of, slot)), 'density': at(densities, slot, None)})
     time_line = re.search(r'total estimated time: ([^;\n]+)', head)
     layers = header('total layer number')
     return {'printer_model': (setting('printer_model') or [''])[0], 'time': time_line.group(1).strip() if time_line else '',
@@ -285,12 +296,13 @@ def plates_of_file(path):
 
 def plates_together(plates):
     """One plate that needs what the plates of a file need together, for "Print all plates": the grams of each filament
-    added up over the plates. A filament is one material, colour, product and nozzle, whichever slot it is in."""
+    added up over the plates. A filament is one material, colour, product and nozzle, whichever slot it is in; without
+    a weight on one plate (parse_plate) it has none in all."""
     sums = {}
     for plate in plates:
         for f in plate['filaments']:
             key = (f['type'].upper(), f['colour'], f['fid'], f['nozzle'])
-            if key in sums: sums[key]['grams'] += f['grams']
+            if key in sums: sums[key]['grams'] = None if None in (sums[key]['grams'], f['grams']) else sums[key]['grams'] + f['grams']
             else: sums[key] = dict(f)
     return {'printer_model': plates[0]['printer_model'], 'time': '', 'layers': None, 'filaments': list(sums.values())}
 
@@ -330,7 +342,7 @@ def layer_profile(stream, plate, why=None):
     command. A filament whose sum is further from the header's total than PROFILE_TOLERANCE is not understood; within it,
     its lists are scaled to the total, so they add up to it exactly. None also for a file that is not the one the plate
     was read from (its totals differ), that ends before its first or its last layer, whose layers are out of order, or
-    that lacks a filament's density or diameter."""
+    that lacks a filament's density or diameter, or the weight of a filament in use (parse_plate)."""
     def refuse(reason):
         if why is not None: why.append(reason)
     head, lines = {}, lines_of(stream)
@@ -347,6 +359,7 @@ def layer_profile(stream, plate, why=None):
     def numbers(key):
         try: return [float(v) for v in head.get(key, b'').split(b',') if v.strip()]
         except ValueError: return []
+    if any(f['grams'] is None for f in plate['filaments']): return refuse('a filament of it has no weight in the header')
     if [w for w in numbers(b'total filament weight [g]') if w > 0] != [f['grams'] for f in plate['filaments']]: return refuse('its totals are not the plate\'s: the file has changed')
     density, diameter, holds = numbers(b'filament_density'), numbers(b'filament_diameter'), numbers(b'nozzle_volume')
     nozzle_of = [int(z) - 1 for z in numbers(b'filament_map')] if len(numbers(b'nozzle_diameter')) > 1 else []
@@ -619,11 +632,11 @@ def assess(fil, trays, cfg, times=1):
              on to by itself (another product or shade, the external spool): those are named, with their amounts
     MISSING  no spool of this material is loaded where the print's nozzle can reach it
     COLOUR   the material is loaded, this colour of it is not: the nearest spool is named, and counts for nothing
-    UNKNOWN  the matching spool reports no remaining amount
+    UNKNOWN  the matching spool reports no remaining amount, or Bambu Studio gives the filament no weight (parse_plate)
     Matching: same material type, on the nozzle that prints it, of the project's colour. Of the project's own product
     while a spool of it is loaded; otherwise of any product, since that spool can be picked at "Send print job", and
     the note then names it, whatever the answer."""
-    need = fil['grams'] * times
+    need = fil['grams'] * times if fil['grams'] is not None else None
     row = {'slot': fil['slot'], 'type': fil['type'], 'name': fil['name'], 'colour': fil['colour'], 'nozzle': fil['nozzle'], 'need': need,
            'trays': [], 'best': None, 'total': None, 'note': ''}
     same = [t for t in trays if t['type'].upper() == fil['type'].upper()]
@@ -638,6 +651,10 @@ def assess(fil, trays, cfg, times=1):
         row['status'] = 'COLOUR'
         row['note'] = (f"no {fil['type']} of this colour is loaded; the nearest is {t['label']} {t['name'] or t['type']} ({t['colour']})"
                        + (f", {t['grams']:.0f} g" if t['grams'] is not None else ''))
+        return row
+    if need is None:                                         # nothing to hold against the spools: not "enough", whatever they hold
+        row['status'] = 'UNKNOWN'
+        row['note'] = 'Bambu Studio gives no weight for this filament' + (" (its profile's density is 0)" if fil.get('density') == 0 else '')
         return row
     group = [t for t in near if fil['fid'] and t['fid'] == fil['fid']] or near
     group.sort(key=lambda t: -(t['grams'] or 0))
@@ -807,6 +824,9 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
     """{'title', 'model', 'time', 'times', 'plate', 'printer', 'rows', 'worst', 'error'}: the whole answer for one sliced plate.
     seen: a dict that carries the printers' status from one call to the next, for several plates checked in one go."""
     res = {'title': title, 'model': plate['printer_model'], 'time': plate['time'], 'times': times, 'plate': plate, 'printer': None, 'rows': [], 'worst': 'OK', 'error': None}
+    if all(f['grams'] is None for f in plate['filaments']):  # no row to judge: the worst of none once read "Enough filament", exit code 0
+        res['error'] = 'this plate uses no filament the guard can weigh'
+        return res
     try:
         conf = bs_conf()
         printer = pick_printer(plate['printer_model'], known_printers(conf))
@@ -872,6 +892,9 @@ STATUS_WORD = {'OK': 'enough', 'TIGHT': 'tight', 'SPLIT': 'two spools', 'SHORT':
 def tray_text(row):
     return ' + '.join(t['label'] for t in row['trays']) or '-'
 
+def need_text(row):
+    return f"{row['need']:.1f} g" if row['need'] is not None else '?'
+
 def has_text(row):
     if row['best'] is None: return '?' if row['trays'] else '-'
     return f"{row['best']:.0f} g" + (f" ({row['total']:.0f} g in all)" if row['total'] > row['best'] else '')
@@ -899,7 +922,7 @@ def report_text(res):
         busy += beyond_text(p)
     lines.append(f"  {p['model']}, {p['state']}" + busy + ''.join(f'; {p[key]}' for key in ('reserve', 'unlearned') if p.get(key)))
     for r in res['rows']:
-        lines.append(f"  {r['slot']:>2} {r['type']:<8} {r['colour']} {r['name'][:22]:<22} needs {r['need']:7.1f} g   {tray_text(r):<10} has {has_text(r):<22} {STATUS_WORD[r['status']]}"
+        lines.append(f"  {r['slot']:>2} {r['type']:<8} {r['colour']} {r['name'][:22]:<22} needs {need_text(r):>9}   {tray_text(r):<10} has {has_text(r):<22} {STATUS_WORD[r['status']]}"
                      + (f"  ({r['note']})" if r['note'] else ''))
     return '\n'.join(lines)
 
@@ -1340,7 +1363,7 @@ def selftest(cfg):
     if newest:
         try:
             with open(newest, 'rb') as f: plate = parse_plate(read_head(f))
-            if plate: out.append((True, f"Newest slice ({project_title(newest)}): {len(plate['filaments'])} filament(s), {sum(f['grams'] for f in plate['filaments']):.0f} g"))
+            if plate: out.append((True, f"Newest slice ({project_title(newest)}): {len(plate['filaments'])} filament(s), {sum(f['grams'] or 0 for f in plate['filaments']):.0f} g"))
             else: out.append((None, 'Newest slice: Bambu Studio is still writing it'))
         except (OSError, ValueError) as e: out.append((False, f'Newest slice cannot be read: {e}'))
     elif verified.get('version') == version:

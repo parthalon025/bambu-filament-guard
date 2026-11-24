@@ -234,7 +234,7 @@ class Card:
                 tk.Frame(table, bg=r['colour'], width=18, height=18, highlightthickness=1, highlightbackground=t['border']).grid(row=2 * i, column=0, padx=(0, 2 * SPACE), pady=SPACE // 2)
                 name = f"{r['slot']}  {r['name'] or r['type']}" + (f"  ({r['nozzle']} nozzle)" if r['nozzle'] else '')
                 word, colour = STATUS_LOOK[r['status']]
-                for col, (text, c, bold) in enumerate(((name, 'text', False), (f"{r['need']:.1f} g", 'text', False), (fg.tray_text(r), 'text', False),
+                for col, (text, c, bold) in enumerate(((name, 'text', False), (fg.need_text(r), 'text', False), (fg.tray_text(r), 'text', False),
                                                        (fg.has_text(r), 'text', False), (word, colour, True)), start=1):
                     self._label(table, text, c, 10, bold, row=2 * i, column=col, padx=(0, 3 * SPACE))
                 if r['note']: self._label(table, r['note'][:1].upper() + r['note'][1:], 'muted', 9, wrap=600, row=2 * i + 1, column=1, columnspan=5, pady=(0, SPACE // 2))

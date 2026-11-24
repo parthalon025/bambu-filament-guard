@@ -142,10 +142,13 @@ def paired(status, slices, all_labels):
     return s, pairs, set()
 
 def draws(status, slices, all_labels):
-    """({tray label: grams} the job the printer shows draws, the trays whose draw cannot be told)."""
+    """({tray label: grams} the job the printer shows draws, the trays whose draw cannot be told). A filament the slice
+    has no weight for (fg.parse_plate) puts its tray among those."""
     _, pairs, unknown = paired(status, slices, all_labels)
     drawn = {}
-    for label, f in pairs: drawn[label] = drawn.get(label, 0.0) + f['grams']
+    for label, f in pairs:
+        if f['grams'] is None: unknown = unknown | {label}
+        else: drawn[label] = drawn.get(label, 0.0) + f['grams']
     return drawn, unknown
 
 def owed(status, slices):

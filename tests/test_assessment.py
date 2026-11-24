@@ -174,3 +174,19 @@ def test_two_spools_count_together_only_where_ams_auto_refill_goes_on_from_one_t
     assert row['status'] == 'SPLIT' and row['note'] == 'only across these spools: AMS auto refill must be on'
     res = {'error': None, 'worst': 'SHORT', 'rows': [fg.assess(fil(100), [tray('A1', 60), tray('Ext', 60)], CFG)]}
     assert fg.exit_code(res) == 2 and fg.headline(res) == 'Not enough filament for this print'
+
+def test_a_filament_without_a_weight_is_unknown_and_says_why():
+    """Bambu Studio writes 0.00 g for a filament whose profile has density 0 (parse_plate keeps it, with no grams): how
+    much it needs cannot be told, so it is not "enough" whatever the spool holds. A spool that is not loaded is still
+    the worse answer."""
+    blue = dict(fil(None, colour='#0A2989'), density=0.0)
+    row = fg.assess(blue, [tray('C3', 900, colour='#0A2989')], CFG, times=3)
+    assert (row['status'], row['need'], row['trays']) == ('UNKNOWN', None, [])
+    assert row['note'] == "Bambu Studio gives no weight for this filament (its profile's density is 0)"
+    assert fg.assess(dict(blue, density=1.24), [tray('C3', 900, colour='#0A2989')], CFG)['note'] == 'Bambu Studio gives no weight for this filament'
+    assert fg.assess(blue, [tray('C3', 900)], CFG)['status'] == 'COLOUR' and fg.assess(blue, [tray('A2', 900, typ='PETG')], CFG)['status'] == 'MISSING'
+    res = {'title': 'Vase', 'times': 1, 'error': None, 'worst': 'UNKNOWN', 'rows': [row], 'printer': {'model': 'Bambu Lab H2D', 'state': 'IDLE'}}
+    assert fg.need_text(row) == '?' and fg.need_text(fg.assess(fil(50), [tray('B2', 81)], CFG)) == '50.0 g'
+    assert fg.exit_code(res) == 1 and fg.report_text(res).splitlines()[2] == (
+        "   2 PLA      #0A2989 Bambu PLA Basic        needs         ?   -          has -                      unknown"
+        "  (Bambu Studio gives no weight for this filament (its profile's density is 0))")

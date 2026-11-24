@@ -6,7 +6,8 @@ import zipfile
 import pytest
 
 import filament_guard as fg
-from helpers import gcode, sliced, e, running, blue_reads
+import guard_ledger as gl
+from helpers import CFG, gcode, sliced, e, running, blue_reads
 
 
 def profile_of(body, weights, layers=3, why=None, **more):
@@ -145,3 +146,51 @@ def test_check_judges_the_plates_of_a_file_together_as_well(state, tmp_path, mon
     assert fg.main(['check', exported(tmp_path, [400, 400]), '--times', '2']) == 2 and 'all plates together x 2' in capsys.readouterr().out   # 1600 g
     assert fg.main(['check', exported(tmp_path, [480, 480])]) == 1 and 'Filament is tight for this print: Brackets.gcode.3mf all plates together' in capsys.readouterr().out
     assert fg.main(['check', exported(tmp_path, [400])]) == 0 and 'together' not in capsys.readouterr().out   # one plate: one answer
+
+def no_weight(weights='0.00,10.87', density='0,1.27,1.26', lengths=None, **more):
+    """A G-code whose blue (slot 1) Bambu Studio gives 0.00 g: its profile has density 0, as a profile made by hand does
+    until one is entered. lengths: the header's "total filament length [mm]", one for each filament in use."""
+    text = gcode(weights=weights, **more).replace('; filament_density: 1.26,1.27,1.26', f'; filament_density: {density}')
+    return text.replace('; total filament weight', f'; total filament length [mm] : {lengths}\n; total filament weight') if lengths else text
+
+def test_a_filament_in_use_that_bambu_studio_gives_no_weight_is_kept_without_one():
+    """A slot the "; filament:" line names, at 0.00 g: in use when its density is 0 or its length is above 0. It was
+    dropped without a word, and the plate judged on the other filaments alone."""
+    kept = lambda text: [(f['slot'], f['colour'], f['grams'], f['density']) for f in fg.parse_plate(text)['filaments']]
+    assert kept(no_weight()) == [(1, '#0A2989', None, 0.0), (3, '#C12E1F', 10.87, 1.26)]
+    assert kept(no_weight(density='1.24,1.27,1.26', lengths='310.52,3600.10')) == [(1, '#0A2989', None, 1.24), (3, '#C12E1F', 10.87, 1.26)]   # by its length alone
+    assert kept(no_weight(density='1.24,1.27,1.26', lengths='0.00,3600.10')) == [(3, '#C12E1F', 10.87, 1.26)]    # named, and not used: as before
+    assert kept(no_weight(density='1.24,1.27,1.26')) == [(3, '#C12E1F', 10.87, 1.26)]                             # nothing says it is used
+    assert [f['slot'] for f in fg.parse_plate(no_weight(weights='0.00,5.00,10.87', used=None))['filaments']] == [2, 3]   # no "; filament:" line: a slot at 0 is not in use
+    assert kept(gcode()) == [(1, '#0A2989', 9.99, 1.26), (3, '#C12E1F', 10.87, 1.26)]
+
+def test_a_plate_with_no_filament_the_guard_can_weigh_is_not_checked(state, tmp_path, monkeypatch, capsys):
+    """Every filament in use at 0.00 g: no row to judge, and the worst of no rows read "Enough filament for this print",
+    exit code 0. With another filament beside it the plate is checked, and is not "enough"."""
+    running(monkeypatch, blue_reads(1000)); empty = fg.parse_plate(no_weight(weights='0.00', used='1'))
+    for plate in (empty, dict(empty, filaments=[])):
+        res = fg.evaluate(plate, CFG, 'Vase')
+        assert res['error'] == 'this plate uses no filament the guard can weigh' and res['rows'] == [] and fg.exit_code(res) == 3
+        assert fg.report_text(res) == 'Filament could not be checked: Vase\n  this plate uses no filament the guard can weigh'
+    path = tmp_path / 'Vase.gcode'; path.write_text(no_weight(weights='0.00', used='1'))
+    assert fg.main(['check', str(path)]) == 3 and 'this plate uses no filament the guard can weigh' in capsys.readouterr().out
+    mixed = no_weight(weights='0.00,10.87', colours='#0A2989;#FFFFFF;#0A2989'); path.write_text(mixed)      # two blues, one of them without a weight
+    res = fg.evaluate(fg.parse_plate(mixed), CFG, 'Vase')
+    assert [(r['slot'], r['status'], r['need']) for r in res['rows']] == [(1, 'UNKNOWN', None), (3, 'OK', 10.87)] and res['worst'] == 'UNKNOWN'
+    assert fg.headline(res) == 'Enough filament could not be confirmed' and fg.main(['check', str(path)]) == 1
+
+def test_a_filament_without_a_weight_is_carried_as_unknown_wherever_the_grams_are_used(state):
+    """Nothing adds it up as 0 g: an amount entered for its spool is out of date once a job draws on it, the plate gets
+    no per-layer profile, and all plates of a file together have no weight for it either."""
+    text = no_weight().replace('; filament_density', '; total layer number: 3\n; filament_density'); plate = fg.parse_plate(text)
+    fg.remember_slice('Vase', 1, plate)
+    job = {'gcode_state': 'RUNNING', 'subtask_name': 'Vase', 'task_id': '5', 'layer_num': 1, 'total_layer_num': 3, 'mapping': [254, 65535, 0],
+           'vt_tray': {'id': '254', 'tray_type': 'PLA', 'tray_color': '0A2989FF', 'remain': -1, 'tray_weight': '0'},
+           'ams': {'ams': [{'id': '0', 'tray': [{'id': '0', 'tray_type': 'PLA', 'tray_color': 'C12E1FFF', 'remain_g': 500, 'tray_weight': '1000'}]}]}}
+    assert gl.draws(job, fg.load_state()['slices'], ['A1', 'Ext']) == ({'A1': 10.87}, {'Ext'})
+    gl.enter('SERIAL', {'label': 'Ext', 'type': 'PLA', 'colour': '#0A2989'}, 300); gl.count('SERIAL', job)
+    assert fg.load_state()['spools']['SERIAL']['Ext']['stale'] is True and gl.owed(job, fg.load_state()['slices']) == ({}, False)
+    why = []
+    assert fg.layer_profile(io.BytesIO(text.encode()), plate, why) is None and why == ['a filament of it has no weight in the header']
+    both = fg.plates_together([plate, fg.parse_plate(gcode())])
+    assert [(f['slot'], f['grams']) for f in both['filaments']] == [(1, None), (3, 21.74)]
