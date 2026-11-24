@@ -1182,3 +1182,21 @@ def test_the_one_line_cards_text_wraps_like_the_others(state, monkeypatch):
     res = fg.evaluate(fg.parse_plate(gcode()), CFG, 'Benchy')
     text = next(w for w in card_widgets(monkeypatch, res, brief=8) if type(w).__name__ == 'Label' and 'against the spools' in w.k['text'])
     assert text.k['text'].endswith('which is printing a job the guard could not count') and text.k['wraplength'] == 520
+
+@pytest.mark.windows
+def test_the_footnote_says_whose_the_amounts_are_for_the_rows_shown(state, monkeypatch):
+    """"The amounts are the AMS's estimate" stood under every table: also under an amount entered by hand, and for a
+    printer that has no AMS."""
+    import guard_ledger as gl
+    black = {'tray_type': 'PETG', 'tray_color': '101010FF', 'remain': -1}                    # the external spool: PETG, no reading
+    petg, both = gcode(weights='10', used='2', colours='#0A2989;#101010;#C12E1F'), gcode(weights='9.99,10', used='1,2', colours='#0A2989;#101010;#C12E1F')
+    def footnote(status, text):
+        running(monkeypatch, status); res = fg.evaluate(fg.parse_plate(text), CFG, 'Benchy')
+        return card_shown(monkeypatch, res)[0][-1]
+    start = 'Spools as the Bambu Lab H2D reports them now'
+    assert footnote({'gcode_state': 'IDLE', 'vt_tray': black}, petg) == start + '.'                                                # no amount at all: nothing to say of amounts
+    gl.enter('SERIAL', {'label': 'Ext', 'type': 'PETG', 'colour': '#101010'}, 400)
+    assert footnote({'gcode_state': 'IDLE', 'vt_tray': black}, petg) == start + '; the amounts are the ones entered by hand, less the prints since.'
+    assert footnote(dict(spools((BLUE_PLA, 500)), vt_tray=black), both) == start + "; the amounts are the AMS's estimate, but for Ext: entered by hand, less the prints since."
+    assert footnote(spools((BLUE_PLA, 500), (RED_PLA, 500)), gcode()) == start + "; the amounts are the AMS's estimate."            # as before, where it is true
+    assert footnote({'gcode_state': 'IDLE', 'vt_tray': dict(black, remain_g=300)}, petg) == start + "; the amounts are the printer's estimate."   # a reading from no AMS

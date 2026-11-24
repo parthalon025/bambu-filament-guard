@@ -55,6 +55,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - While a warning stood beside "Send print job", the guard kept about 6 kB more memory at every look at that dialog, 2.5 times a second: some 57 MB an hour. It no longer does.
 - A filament whose colour in the G-code is not six hexadecimal digits (a project made by hand) could keep its plate's warning from showing at all. Its square on the card is now a neutral one.
 - The one-line card could be wider than a small Bambu Studio window when it told of the print running on the printer, with its left part off the screen. Its text now wraps.
+- Under the card's table, "the amounts are the AMS's estimate" also stood where an amount was entered by hand, and for a printer without an AMS. The sentence now says whose the amounts shown are: the AMS's estimate, the ones entered by hand, or both by tray.
 
 ## [1.4.0] - 2026-11-20
 

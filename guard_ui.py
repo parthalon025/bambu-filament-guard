@@ -54,6 +54,15 @@ def swatch(colour, t):
     show(), after the window was made: that warning never showed."""
     return colour if isinstance(colour, str) and len(colour) == 7 and colour[0] == '#' and all(c in '0123456789abcdefABCDEF' for c in colour[1:]) else t['raised']
 
+def amounts_text(res):
+    """Whose the amounts under "Has" are, for the rows shown, as the footnote's clause ('; the amounts are ...', or '' when
+    no row has one): "the AMS's estimate" stood under amounts entered by hand too, and for a printer without an AMS."""
+    known = {t['label']: t for r in res['rows'] for t in r['trays'] if t['grams'] is not None}
+    typed = [label for label, t in known.items() if t.get('entered')]; read = [label for label in known if label not in typed]
+    whose = "the printer's" if any(label.startswith('Ext') for label in read) else "the AMS's"
+    if read: return f'; the amounts are {whose} estimate' + (f", but for {' and '.join(typed)}: entered by hand, less the prints since" if typed else '')
+    return '; the amounts are the ones entered by hand, less the prints since' if typed else ''
+
 def tone_of(res):
     return 'muted' if res['error'] else {0: 'ok', 1: 'muted', 2: 'warn', 3: 'warn', 4: 'danger'}[fg.SEVERITY[res['worst']]]
 
@@ -272,9 +281,9 @@ class Card:
             p, job = res['printer'], fg.job_text(res['printer'])
             told, runs, needs, hold = (f'reported them {then}', 'then', 'needed', 'held') if then else ('reports them', 'now', 'needs', 'hold')
             if p['state'] in fg.BUSY and p.get('counted'):
-                spools = f"Spools as the {p['model']} {told}, less what the print running there{' then' if then else ''}{job} still {needs}; the amounts are the AMS's estimate."
+                spools = f"Spools as the {p['model']} {told}, less what the print running there{' then' if then else ''}{job} still {needs}{amounts_text(res)}."
             else:
-                spools = f"Spools as the {p['model']} {told}{'' if then else ' now'}; the amounts are the AMS's estimate." + (
+                spools = f"Spools as the {p['model']} {told}{'' if then else ' now'}{amounts_text(res)}." + (
                     f" It {'was' if then else 'is'} printing {runs}{job}: that job {'was' if then else 'is'} still drawing from these spools, and the guard could not count what it still {needs}."
                     if p['state'] in fg.BUSY else '')
             spools += ''.join(f" The print running {runs} {needs} {g:.0f} g more of {label}'s filament than the loaded spools {hold}." for label, g in (p.get('beyond') or {}).items())
