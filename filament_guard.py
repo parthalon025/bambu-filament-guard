@@ -1061,7 +1061,10 @@ class Guard:
         elif name in ('weigh', 'asked'):
             import guard_learn
             tray, grams = arg if name == 'weigh' else (arg, None)
-            if name == 'asked': guard_learn.asked(res['printer']['serial'], tray['label']); return
+            if name == 'asked':                               # asked from within the card as it shows: a state file that cannot be written now must not
+                try: guard_learn.asked(res['printer']['serial'], tray['label'])   # cost the card. The offer then may come again.
+                except OSError as e: log(f"{tray['label']}: that a weigh-in was offered could not be noted ({e.__class__.__name__}: {e}): it may be offered again")
+                return
             guard_learn.weigh(res['printer']['serial'], tray['label'], tray['reading'], grams,
                               {'id': tray.get('spool'), 'type': tray['type'], 'colour': tray['colour'], 'fid': tray.get('fid'), 'weight': tray.get('weight')})
             self.recheck(res, self.card.beside)

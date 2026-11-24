@@ -268,8 +268,10 @@ class Card:
             if res.get('weigh') and not res['error']:
                 tray = res['weigh']
                 self._button(bar, f"Weigh {tray['label']}…", lambda: self.ask_amount(res, tray, weigh=True), row=0, column=col, padx=(0, SPACE)); col += 1
-                self.act('asked', res, tray)                        # offered: not again for a week (this tray) or a day (any)
         self._place()
+        # Offered: not again for a week (this tray) or a day (any). Noted only once the card is placed: the card is made
+        # unseen, and a note that failed before this (the state file held elsewhere) left a warning that never showed.
+        if not res['error'] and res.get('weigh'): self.act('asked', res, res['weigh'])
 
     def note(self, headline, lines, tone='muted', pid=None):
         """A card that says something other than a result: the self-test, the welcome after installing."""

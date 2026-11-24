@@ -24,6 +24,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - One spool weighed near empty three times, or weighed and then run dry, counted as three readings at empty. The measured reserve could then be earned on how a scale repeats, with no second spool seen. A spool now counts once, by its largest reading at empty; no tray is counted higher for it.
 - The card could say "the reserve is measured" when the row had used the fixed one (scored prints in one tray, run-dries only in another). With the measured reserve on, it now names the reserve its rows used and, for the fixed one, what the measured one still lacks, in a sentence that can be read. With it off the card says nothing of the reserve.
 - A `learned.json` with one odd record (a key missing, None or text where a number belongs, a list where a record belongs) made every check of that printer end as "could not be checked", and `learned` crash on the same file. Such a record is now left out and the rest of the history used; the log says once what was left out. Whatever else goes wrong in what was learned, the check goes on as with learning off, and the card and the text output say that what was learned could not be used.
+- A warning that offered a weigh-in could fail to show. The card noted the offer in the state file before it was put on the screen; when another program held that file, the note failed and the card stayed unseen. The card is now shown first, and a note that cannot be written is logged: the offer may then come again.
 
 ## [1.4.0] - 2026-11-20
 

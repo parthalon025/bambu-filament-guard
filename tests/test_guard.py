@@ -333,3 +333,21 @@ def test_the_card_says_when_what_was_learned_could_not_be_used(state, monkeypatc
     assert labels[-1] == '1 filament against the spools on the Bambu Lab H2D; what was learned could not be used' and buttons == ['Details']
     assert not any('learned' in text for text in card_shown(monkeypatch, fg.evaluate(BLUE, CFG, 'Benchy'))[0])
 
+@pytest.mark.windows
+def test_the_card_is_on_the_screen_before_its_weigh_in_offer_is_noted(state, monkeypatch):
+    """The card is made unseen and shown by its last step. The note that a weigh-in was offered writes the state file,
+    which can be held elsewhere for seconds and then fail: made before that last step, it left a warning that never
+    showed. It comes after it, and a note that fails is logged, not raised into the card."""
+    running(monkeypatch, blue_reads(110)); res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['worst'] == 'TIGHT' and res['weigh']['label'] == 'C3'
+    labels, buttons, order = card_shown(monkeypatch, res)
+    assert buttons[-1] == 'Weigh C3…' and order == ['placed', ('asked', res['weigh'])]
+    assert card_shown(monkeypatch, res, brief=8)[2] == ['placed']                             # the one line has no such button: nothing was offered
+    guard = guard_with()
+    for error in (fg.StateBusy('the state folder was held elsewhere for more than 10 s'), PermissionError(13, 'Permission denied')):
+        monkeypatch.setattr(gn, 'asked', lambda *a, error=error: (_ for _ in ()).throw(error))
+        guard.act('asked', res, res['weigh'])                                                  # does not raise
+    log = (state / 'guard.log').read_text()
+    assert 'C3: that a weigh-in was offered could not be noted (StateBusy: the state folder was held elsewhere for more than 10 s): it may be offered again' in log and 'could not be noted (PermissionError' in log
+    assert 'weigh_asked' not in fg.load_state() and fg.evaluate(BLUE, CFG, 'Benchy')['weigh']['label'] == 'C3'   # not noted: offered again
+
