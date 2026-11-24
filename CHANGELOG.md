@@ -17,6 +17,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - The reserve's share of a spool's full weight (3 %) is taken from the largest spool the filament could be printed from, not from the fullest one. With a 250 g and a 1 kg spool of one filament loaded, that share is 30 g whichever is the fullest, so a check can be "tight" where it was "enough".
 - No weigh-in is offered while a job is on the printer: the readings are moving then.
 - The window for a spool's amount ("Amount in …", "Weigh C3…") takes what the scale shows and what the empty spool weighs, and takes one from the other: the filament shows as you type. It starts with the empty spool's weight entered last (`empty_spool_g`, 250 g at first); 0 there is the filament weighed alone, as before.
+- Settings are kept in `%LOCALAPPDATA%\BambuFilamentGuard\config.json`, with the state, and no longer beside the script (`app\config.json` of the packaged folder). There, an update unzipped into a new folder left them behind: the reserve, the warnings and a printer's fixed address went back to the defaults without a word. With no settings in the new place yet, a `config.json` beside the script is brought over, and `Install.cmd` brings over the one in the folder the Startup shortcut of the copy installed before points into, and says so on its card. The old file is left where it is. The README has an "Updating" section.
 
 ### Fixed
 

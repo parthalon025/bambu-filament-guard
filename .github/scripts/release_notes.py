@@ -21,7 +21,7 @@ The changes of every version are in [CHANGELOG.md](https://github.com/parthalon0
 1. Download `{name}` below and unzip it where it can stay.
 2. Open `Install.cmd`. The guard starts now and with Windows; `Uninstall.cmd` removes it.
 
-Updating: run `Uninstall.cmd` in the old folder, replace the folder, and open `Install.cmd`. Settings you changed are in `app\\config.json` of the old folder and can be copied to the new one; amounts entered by hand and what was learned are kept either way.
+Updating: quit the old copy from its icon's menu, unzip the new one, and open its `Install.cmd`. Settings, amounts entered by hand and what was learned are kept: from 1.5.0 they are in `%LOCALAPPDATA%\\BambuFilamentGuard`. Settings made with 1.4.0 or earlier are in `app\\config.json` of the old folder; `Install.cmd` brings them over when the old copy was quit, not uninstalled, and otherwise that file can be copied to `%LOCALAPPDATA%\\BambuFilamentGuard`. The README's "Updating" has the steps.
 
 SHA-256 of `{name}`:
 `{hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest()}`

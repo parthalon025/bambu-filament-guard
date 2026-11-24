@@ -182,3 +182,18 @@ def test_only_the_files_that_cannot_be_had_again_keep_a_last_good_copy(state):
     assert json.load(open(state / 'learned.json.bak')) == {'SERIAL': {'C3': {'jobs': []}}}
     gn.forget()
     assert gn.load() == {} and not (state / 'learned.json.bak').exists()
+
+def test_the_settings_file_is_with_the_state_not_beside_the_script():
+    """Beside the script, config.json stayed behind in the old folder at every update into a new one: the reserve, the
+    warnings and a printer's fixed address silently went back to the defaults."""
+    assert fg.CONFIG == os.path.join(fg.STATE_DIR, 'config.json') and fg.CONFIG_BEFORE == os.path.join(fg.HERE, 'config.json')
+
+def test_settings_found_beside_the_script_are_brought_over_once(state):
+    """The layout up to 1.4.0: with no settings in the state folder yet, a config.json beside the script is read, and
+    written to the new place as it is. From then on the new place counts."""
+    before = state / 'before' / 'config.json'; before.parent.mkdir(); before.write_bytes(b'\xef\xbb\xbf{"spool_reserve_pct": 5,\r\n "printers": {"SERIAL": "192.0.2.50"}}')
+    cfg = fg.load_config()
+    assert (cfg['spool_reserve_pct'], cfg['printers']) == (5, {'SERIAL': {'ip': '192.0.2.50'}}) and (state / 'config.json').read_bytes() == before.read_bytes()
+    assert f'settings brought over from {before}' in (state / 'guard.log').read_text()
+    before.write_text('{"spool_reserve_pct": 2}'); cfg['ok_seconds'] = 0; fg.save_config(cfg, 'ok_seconds')
+    assert (fg.load_config()['spool_reserve_pct'], fg.load_config()['ok_seconds']) == (5, 0) and before.read_text() == '{"spool_reserve_pct": 2}'   # the old file is left alone, and read no more

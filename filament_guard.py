@@ -35,7 +35,7 @@ What it reads, and from where:
             the checked print could start.
 
 The access code goes from Bambu Studio's configuration to the printer and nowhere else: not into the log, the state
-file, a window or the output. Settings: the icon's menu, or config.json (see DEFAULTS). Log and state:
+file, a window or the output. Settings: the icon's menu, or config.json (see DEFAULTS). Settings, log and state:
 %LOCALAPPDATA%/BambuFilamentGuard/. The card and the icon are in guard_ui.py."""
 import sys, os, re, json, ssl, time, glob, math, ctypes, hashlib, itertools, contextlib, zipfile, socket, struct, threading, queue, subprocess, argparse, tempfile
 
@@ -43,7 +43,8 @@ APP = 'BambuFilamentGuard'
 VERSION = '1.5.0'
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_DIR = os.path.join(os.environ.get('LOCALAPPDATA') or HERE, APP)
-CONFIG = os.path.join(HERE, 'config.json')
+CONFIG = os.path.join(STATE_DIR, 'config.json')
+CONFIG_BEFORE = os.path.join(HERE, 'config.json')         # where the settings were up to 1.4.0: an update unzipped into a new folder left them behind
 BS_DATA = os.path.join(os.environ.get('APPDATA', ''), 'BambuStudio')
 MUTEX = 'Local\\' + APP
 STARTUP_LNK = os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'Bambu Filament Guard.lnk')
@@ -120,13 +121,28 @@ def config_held():
     except ValueError as e: return {}, str(e)
     return (held, None) if type(held) is dict else ({}, 'it does not hold a JSON object')
 
+def bring_settings(before):
+    """Copies the config.json of the layout up to 1.4.0 (`before`: beside a guard's script) to where the settings are
+    now, as it is, when there are none there yet; True when it did. The old file stays where an older guard reads it."""
+    if os.path.exists(CONFIG) or not os.path.isfile(before): return False
+    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+    temp = f'{CONFIG}.{os.getpid()}.new'
+    try:
+        with open(before, 'rb') as f, open(temp, 'wb') as copy: copy.write(f.read()); copy.flush(); os.fsync(copy.fileno())
+        os.replace(temp, CONFIG)
+    finally:
+        with contextlib.suppress(OSError): os.remove(temp)
+    log(f'settings brought over from {before}')
+    return True
+
 def load_config():
-    """The settings: DEFAULTS, with what config.json holds in their place. Every value is checked (SETTINGS,
+    """The settings: DEFAULTS, with what config.json holds in their place; with none in the state folder yet, a
+    config.json beside the script is brought over first (bring_settings). Every value is checked (SETTINGS,
     fixed_addresses): one that is not what its setting takes leaves that setting alone at its default. cfg['_wrong'] has
     a line for each, and for a file that cannot be read (and is not there when nothing is wrong): the guard shows them
     on a card when it starts, the self-test as failures. They are logged here and never saved."""
     cfg, wrong = dict(DEFAULTS), []
-    try: held, why = config_held()
+    try: bring_settings(CONFIG_BEFORE); held, why = config_held()
     except OSError as e: held, why = {}, f'{e.__class__.__name__}: {e}'
     if why: wrong.append(f'config.json cannot be read ({why}): the defaults are in use')
     for key, (fits, what) in SETTINGS.items():
@@ -1450,6 +1466,18 @@ def start(start_line=True):
     if is_running(): return
     subprocess.Popen(own_command('watch', *([] if start_line else ['--no-start-line'])), cwd=HERE, close_fds=True, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
+def shortcut_folder():
+    """The folder the Startup shortcut starts a guard from (its working directory: where that guard's script is), or ''
+    when there is no shortcut or it cannot be read. Asked of the same WScript.Shell object that makes it; the answer
+    comes as the bytes of its UTF-8 in hex, because the console's code page would garble a folder name outside it."""
+    if not os.path.exists(STARTUP_LNK): return ''
+    try:
+        out = subprocess.run(['powershell', '-NoProfile', '-Command', "$d=(New-Object -ComObject WScript.Shell).CreateShortcut($env:FG_LNK).WorkingDirectory; "
+                              "[BitConverter]::ToString([Text.Encoding]::UTF8.GetBytes($d))"], env=dict(os.environ, FG_LNK=STARTUP_LNK),
+                             capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
+        return bytes.fromhex(out.stdout.strip().replace('-', '')).decode('utf-8')
+    except (OSError, ValueError, subprocess.SubprocessError): return ''
+
 def make_shortcut():
     """The Startup shortcut. The guard starts with Windows and waits; its icon shows while Bambu Studio runs."""
     cmd = own_command('watch')
@@ -1461,7 +1489,14 @@ def make_shortcut():
 
 def install(start_line=True):
     """Makes the guard start automatically, from where it is, and starts it. start_line: the guard says so on a card of
-    its own, once Bambu Studio is open; setup, which says it on its card, turns that off."""
+    its own, once Bambu Studio is open; setup, which says it on its card, turns that off. Returns what there is to say
+    besides, as lines of setup's card: [(mark, text)]. The settings of a copy installed before, up to 1.4.0 beside its
+    script, are brought over when there are none yet: the shortcut still points into that copy's folder, so it is read
+    before it is made to point here."""
+    said, before = [], shortcut_folder()
+    try:
+        if before and bring_settings(os.path.join(before, 'config.json')): said.append((True, f'Your settings are kept: config.json was brought over from {before}.'))
+    except OSError as e: said.append((False, f'Your settings in {before} could not be brought over ({e.__class__.__name__}): the defaults are in use.'))
     make_shortcut()
     print('starts automatically:', STARTUP_LNK)
     try:
@@ -1473,21 +1508,23 @@ def install(start_line=True):
     if stop(): time.sleep(0.5)                                                   # a running copy may be an older version
     start(start_line); time.sleep(1.5)
     print('watcher running' if is_running() else 'watcher did NOT start: run it with "watch" to see why')
+    for mark, text in said: print(text)
+    return said
 
 def uninstall():
     if os.path.exists(STARTUP_LNK): os.remove(STARTUP_LNK)
     print('stopped' if stop() else 'was not running'); print('shortcut removed')
-    print(f'settings and log stay in {STATE_DIR} and {CONFIG}: delete them, and this folder, to remove every trace')
+    print(f'settings, entered amounts, what was learned and the log stay in {STATE_DIR}: delete it, and this folder, to remove every trace')
 
 def setup():
     """Install, and say so on a card: for someone who started the packaged guard with a double click and sees no console."""
     import guard_ui
     if sys.stdout is None: sys.stdout = sys.stderr = open(os.devnull, 'w')       # pythonw has no console to print to
-    install(start_line=False)                                                    # this card says it, in the same corner as the guard's start line would
+    said = install(start_line=False)                                             # this card says it, in the same corner as the guard's start line would
     root = guard_ui.make_root(); card = guard_ui.Card(root, on_close=root.quit)
     card.note('Bambu Filament Guard is installed' if is_running() else 'Bambu Filament Guard did not start', [
         (True, "It checks every plate you slice in Bambu Studio and shows the answer in Bambu Studio's window."),
-        (True, 'Its icon, a spool, is in the notification area while Bambu Studio runs: settings, self-test, quit.'),
+        (True, 'Its icon, a spool, is in the notification area while Bambu Studio runs: settings, self-test, quit.'), *said,
         (None, f'It runs from this folder, so the folder has to stay: {os.path.dirname(HERE) if os.path.basename(HERE) == "app" else HERE}'),
         (None, 'To remove it: Uninstall.cmd in that folder, then delete the folder.')], 'ok' if is_running() else 'danger')
     def tick(): card.follow(); root.after(400, tick)
@@ -1507,7 +1544,7 @@ def main(argv=None):
     for name in ('install', 'uninstall', 'setup', 'status', 'stop', 'trays', 'selftest'): sub.add_parser(name)
     a = ap.parse_args(argv)
     if a.cmd == 'watch': return watch(start_line=not a.no_start_line)
-    if a.cmd == 'install': return install()
+    if a.cmd == 'install': install(); return 0
     if a.cmd == 'uninstall': return uninstall()
     if a.cmd == 'setup': return setup()
     if a.cmd == 'stop': print('stopped' if stop() else 'was not running'); return 0

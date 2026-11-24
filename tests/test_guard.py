@@ -417,3 +417,25 @@ def test_a_setting_changed_from_the_menu_leaves_what_was_edited_by_hand_meanwhil
     (state / 'config.json').write_text('{"learn": false, "margin_pct": 25}')            # by hand, while the guard runs
     guard.toggle_warning('UNKNOWN')
     assert fg.json.load(open(fg.CONFIG)) == {'learn': False, 'margin_pct': 25, 'popup_on': fg.DEFAULTS['popup_on'] + ['UNKNOWN']}
+
+def install_on(monkeypatch, shortcut='', running=(True,)):
+    """install() on stand-ins for Windows: the Startup shortcut points into the folder `shortcut` ('' = there is none),
+    no Bambu Studio, and is_running answers from `running`, its last answer for good. Returns what was done, in order."""
+    done, answers = [], list(running)
+    monkeypatch.setattr(fg, 'shortcut_folder', lambda: (done.append('shortcut read'), shortcut)[1])
+    monkeypatch.setattr(fg, 'make_shortcut', lambda: done.append('shortcut made')); monkeypatch.setattr(fg, 'bs_conf', no_studio)
+    monkeypatch.setattr(fg, 'is_running', lambda: answers.pop(0) if len(answers) > 1 else answers[0])
+    monkeypatch.setattr(fg, 'stop', lambda *a, **k: done.append('stop') and False); monkeypatch.setattr(fg, 'start', lambda *a, **k: done.append('start'))
+    monkeypatch.setattr(fg.time, 'sleep', lambda s: None)
+    return done
+
+def test_install_brings_the_settings_over_from_the_folder_of_the_copy_installed_before(state, tmp_path, monkeypatch, capsys):
+    """An update unzipped into a new folder: the Startup shortcut still points into the old one, whose config.json
+    (up to 1.4.0, beside the script) holds the settings. They are brought over before the shortcut is made to point
+    here, and the install card says so. They stayed behind, and the new guard ran on the defaults without a word."""
+    old = tmp_path / 'old' / 'app'; old.mkdir(parents=True); (old / 'config.json').write_text('{"spool_reserve_pct": 5, "measured_reserve": false}')
+    done = install_on(monkeypatch, shortcut=str(old)); said = fg.install()
+    assert done[:2] == ['shortcut read', 'shortcut made'] and fg.load_config()['spool_reserve_pct'] == 5
+    assert (True, f'Your settings are kept: config.json was brought over from {old}.') in said and f'brought over from {old}' in capsys.readouterr().out
+    (old / 'config.json').write_text('{"spool_reserve_pct": 2}')
+    assert not any('brought over' in text for mark, text in fg.install()) and fg.load_config()['spool_reserve_pct'] == 5   # settings are there now: not again
