@@ -133,16 +133,37 @@ def job_plate(status):
     m = re.search(r'plate_(\d+)\.gcode$', str(status.get('gcode_file') or ''))
     return int(m.group(1)) if m else None
 
+def fits(s, name, layers, plate=None):
+    """Could a job of this name, layer count and plate (None: the printer does not say) have been made from slice s?
+    Bambu Studio names a job "<project>" or "<project>_<plate name>"."""
+    if not (name == s['title'] or name.startswith(s['title'] + '_')): return False
+    if layers and s.get('layers') and int(layers) != int(s['layers']): return False
+    return plate is None or s.get('plate') == plate
+
 def match_slice(name, layers, slices, plate=None):
-    """The slice a job was made from: the newest one whose project title starts the job's name (Bambu Studio names a
-    job "<project>" or "<project>_<plate name>") and whose layer count is the job's; of that plate, when the job's plate
-    is known. Two plates of one project with the same layer count are told apart only by that."""
-    for s in slices:
-        if not (name == s['title'] or name.startswith(s['title'] + '_')): continue
-        if layers and s.get('layers') and int(layers) != int(s['layers']): continue
-        if plate is not None and s.get('plate') != plate: continue
-        return s
-    return None
+    """The slice a job was made from: the newest one whose project title starts the job's name and whose layer count is
+    the job's (fits); of that plate, when the job's plate is known. Two plates of one project with the same layer count
+    are told apart only by that."""
+    return next((s for s in slices if fits(s, name, layers, plate)), None)
+
+def versions(status, slices):
+    """The slices the job the printer shows may have been made from: the newest that fits it (match_slice) and the
+    earlier slices of the same plate that fit it too, which fg.remember_slice keeps. A plate sliced again while it
+    prints (fewer copies for the next run) once had the running job counted by the new slice: 91 g where it needed
+    205 g. Which of them the printer runs cannot be read, so owed() and draws() take the largest need among them."""
+    name, layers, plate = status.get('subtask_name') or '', status.get('total_layer_num'), job_plate(status)
+    s = match_slice(name, layers, slices, plate)
+    return [x for x in slices if (x['title'], x.get('plate')) == (s['title'], s.get('plate')) and fits(x, name, layers, plate)] if s else []
+
+def note_job(serial, status, state=None):
+    """Keeps in the state file the job the printer has on it (name, layers, plate), or that it has none:
+    fg.remember_slice does not let go of a slice such a job may be printed from. A state file that cannot be written
+    now leaves the note as it was."""
+    job = {'name': status.get('subtask_name') or '', 'layers': status.get('total_layer_num'), 'plate': job_plate(status)} if status.get('gcode_state') in fg.BUSY else None
+    try:
+        if (fg.load_state() if state is None else state).get('on', {}).get(serial) != job:
+            fg.update_state(lambda st: st.setdefault('on', {}).__setitem__(serial, job) if job else st.get('on', {}).pop(serial, None))
+    except OSError: pass
 
 def paired(status, slices, all_labels):
     """The job the printer shows, filament by filament: (the slice it was made from, [(tray label, filament of that
@@ -162,11 +183,16 @@ def paired(status, slices, all_labels):
     return s, pairs, set()
 
 def draws(status, slices, all_labels):
-    """({tray label: grams} the job the printer shows draws, the trays whose draw cannot be told)."""
-    _, pairs, unknown = paired(status, slices, all_labels)
-    drawn = {}
-    for label, f in pairs: drawn[label] = drawn.get(label, 0.0) + f['grams']
-    return drawn, unknown
+    """({tray label: grams} the job the printer shows draws, the trays whose draw cannot be told). Of a plate kept in
+    several slices that fit the job (versions), per tray the largest; and when one of them leaves a tray in doubt, no
+    draw is told."""
+    drawn, doubt = {}, set()
+    for v in versions(status, slices) or [None]:
+        _, pairs, unknown = paired(status, [v] if v else [], all_labels)
+        one = {}
+        for label, f in pairs: one[label] = one.get(label, 0.0) + f['grams']
+        doubt |= unknown; drawn.update({label: max(g, drawn.get(label, 0.0)) for label, g in one.items()})
+    return ({}, doubt) if doubt else (drawn, doubt)
 
 def owed(status, slices):
     """({tray label: grams the job the printer shows still needs from it}, counted). counted: None when no job is on
@@ -174,17 +200,20 @@ def owed(status, slices):
     watched, no profile, a tray that cannot be named), and then nothing is guessed; True with the grams. Still needed is
     the slice's per-layer profile from the printer's layer to the end, that layer counted whole: a figure too low loses
     a print, one too high only warns early. In PREPARE, or without a layer, all of it: a printer that prepares a job may
-    still show the last layer of the job before."""
+    still show the last layer of the job before. Of a plate kept in several slices that fit the job (versions), per tray
+    the largest: never less than the job needs; and when one of them cannot be told, none is."""
     if status.get('gcode_state') not in fg.BUSY: return {}, None
     trays, _ = fg.trays_of(status)
-    s, pairs, _ = paired(status, slices, [t['label'] for t in trays])
-    profile = fg.load_profile(s) if pairs else None
-    if not profile or any(f['slot'] not in profile for _, f in pairs): return {}, False
     try: layer = int(status.get('layer_num'))
     except (TypeError, ValueError): layer = 0
-    start = layer if status['gcode_state'] != 'PREPARE' and layer >= 1 else 0
-    out = {}
-    for label, f in pairs: out[label] = out.get(label, 0.0) + sum(profile[f['slot']][start:])
+    start, out = layer if status['gcode_state'] != 'PREPARE' and layer >= 1 else 0, {}
+    for v in versions(status, slices) or [None]:
+        s, pairs, _ = paired(status, [v] if v else [], [t['label'] for t in trays])
+        profile = fg.load_profile(s) if pairs else None
+        if not profile or any(f['slot'] not in profile for _, f in pairs): return {}, False
+        one = {}
+        for label, f in pairs: one[label] = one.get(label, 0.0) + sum(profile[f['slot']][start:])
+        out.update({label: max(g, out.get(label, 0.0)) for label, g in one.items()})
     return out, True
 
 def take_off(book, trays, need, now):
@@ -331,7 +360,7 @@ class JobWatch(threading.Thread):
             if entered and not self.entered: self.restart(state)
             self.entered = entered
             if entered: self.look(status, gap=bool(self.followed) and at - self.followed > GAP, state=state)
-            self.mark_followed(at); self.mark_printing(status.get('gcode_state') in fg.BUSY)
+            self.mark_followed(at); self.mark_printing(status.get('gcode_state') in fg.BUSY); note_job(self.serial, status, state)
         except fg.StateBusy as e: self.say(f'following the printer: {e}; tried again at the next look')
         if self.cfg.get('learn'):
             try: self.recorder.look(status)

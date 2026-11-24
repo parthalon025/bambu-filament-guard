@@ -812,7 +812,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         guard_ledger.apply(trays, printer['serial'], 'ams' in status)   # spools the printer cannot measure get the amount entered for them
         # The answer is for the moment this print could start: what the print running now still needs is not there for
         # it (see credit: an entered amount the ledger has not yet taken it off included).
-        state = load_state()
+        state = load_state(); guard_ledger.note_job(printer['serial'], status, state)
         owed, counted = guard_ledger.owed(status, state.get('slices', []))
         running = guard_ledger.job_key(status) if status.get('gcode_state') in BUSY else None
         learned = reserve = unlearned = None
@@ -927,8 +927,8 @@ def studio_version():
     except (OSError, ValueError): return ''
 
 def profile_name(title, plate_no, plate):
-    """The file that holds a slice's per-layer profile, named from the slice: its title, plate and grams."""
-    key = json.dumps([title, plate_no, [[f['slot'], round(f['grams'], 2)] for f in plate['filaments']]])
+    """The file that holds a slice's per-layer profile, named from the slice: its title, plate, layers and grams."""
+    key = json.dumps([title, plate_no, plate.get('layers'), [[f['slot'], round(f['grams'], 2)] for f in plate['filaments']]])
     return hashlib.sha1(key.encode('utf-8')).hexdigest()[:16] + '.json'
 
 def load_profile(entry, part='layers'):
@@ -943,7 +943,12 @@ def remember_slice(title, plate_no, plate, profile=None):
     (guard_ledger counts a print down from it when the printer starts a job of that name) and, when given, its per-layer
     profile (what a print of it still needs while it runs). A profile is a file of its own in profiles/, because the
     state file is read and written whole at every change: its parts as layer_profile gives them, by slot and layer.
-    It goes with its slice, when a re-slice of the same plate replaces it or it drops out of the 30 kept."""
+    Kept are the 30 newest slices, each with its profile. A plate sliced again keeps its 3 newest slices that differ
+    (an unchanged re-slice takes the place of its like): the job on the printer may be printed from an earlier one, and
+    guard_ledger counts it by the one that needs most (versions). And no slice is let go, for either limit, that a job
+    a printer was last seen with may be printed from (the state's 'on', guard_ledger.note_job): the nine-up that
+    prints for a day is still there after thirty other plates."""
+    import guard_ledger
     version, folder = studio_version(), os.path.join(STATE_DIR, 'profiles')
     name = profile_name(title, plate_no, plate) if profile else None
     with state_lock():
@@ -958,7 +963,12 @@ def remember_slice(title, plate_no, plate, profile=None):
             mine = {'title': title, 'plate': plate_no, 'layers': plate.get('layers'), 'at': time.time(),
                     'filaments': [{'slot': f['slot'], 'grams': f['grams']} for f in plate['filaments']]}
             if name: mine['profile'] = name
-            st['slices'] = ([mine] + [s for s in st.get('slices', []) if (s['title'], s.get('plate')) != (title, plate_no)])[:30]
+            same = lambda s: (s['title'], s.get('plate')) == (title, plate_no)
+            held = lambda s: any(guard_ledger.fits(s, job.get('name') or '', job.get('layers'), job.get('plate')) for job in st.get('on', {}).values())
+            rest = [s for s in st.get('slices', []) if not (same(s) and (s.get('layers'), s['filaments']) == (mine['layers'], mine['filaments']))]
+            older = [s for s in rest if same(s)]
+            gone = [id(s) for s in older[2:] if not held(s)]
+            st['slices'] = [s for n, s in enumerate([mine] + [s for s in rest if id(s) not in gone]) if n < 30 or held(s)]
             return {s.get('profile') for s in st['slices']}
         kept = update_state(change)
         for old in (os.listdir(folder) if os.path.isdir(folder) else []):

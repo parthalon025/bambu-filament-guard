@@ -5,7 +5,7 @@ import pytest
 
 import filament_guard as fg
 import guard_ledger as gl
-from helpers import CFG, H2D_JOB, SLICE, kept, running, BLUE, BLUE_JOB
+from helpers import CFG, H2D_JOB, SLICE, kept, running, BLUE, BLUE_JOB, needing, part, printing, spool
 
 
 PETG_PLATE = {'printer_model': 'Bambu Lab H2D', 'time': '', 'layers': 3,
@@ -105,10 +105,10 @@ def test_profiles_are_kept_beside_the_state_file_and_go_with_their_slice(state):
     assert set(entry) == {'title', 'plate', 'layers', 'at', 'filaments', 'profile'} and os.listdir(state / 'profiles') == [entry['profile']]
     assert fg.load_profile(entry) == {1: [0.0, 40.0, 40.0, 40.0], 2: [0.0, 10.0, 10.0, 10.0]} and fg.load_profile(entry, 'purge') == {1: [0.0, 3.5, 0.0, 0.0], 2: [0.0] * 4}
     again = dict(plate, filaments=[{'slot': 1, 'grams': 110.0}, {'slot': 2, 'grams': 30.0}])
-    fg.remember_slice('Benchy', 1, again, kept({1: [0.0, 30.0, 40.0, 40.0], 2: [0.0, 10.0, 10.0, 10.0]}))   # the plate sliced again
-    slices = fg.load_state()['slices']
-    assert len(slices) == 1 and slices[0]['profile'] != entry['profile'] and os.listdir(state / 'profiles') == [slices[0]['profile']]
-    for n in range(30): fg.remember_slice(f'Other {n}', 1, plate)                         # thirty newer slices: this one drops out
+    for _ in range(2): fg.remember_slice('Benchy', 1, again, kept({1: [0.0, 30.0, 40.0, 40.0], 2: [0.0, 10.0, 10.0, 10.0]}))   # the plate sliced again, twice alike
+    slices = fg.load_state()['slices']                                                    # the earlier slice is kept: a job may be printing from it
+    assert len(slices) == 2 and slices[1]['profile'] == entry['profile'] != slices[0]['profile'] and sorted(os.listdir(state / 'profiles')) == sorted(s['profile'] for s in slices)
+    for n in range(30): fg.remember_slice(f'Other {n}', 1, plate)                         # thirty newer slices: these drop out
     assert os.listdir(state / 'profiles') == []
 
 def test_a_check_marks_the_printer_looked_at_only_when_that_changes_who_is_followed(state, monkeypatch):
@@ -132,3 +132,50 @@ def test_what_the_running_print_needs_beyond_its_tray_comes_off_the_next_spool_o
     running(monkeypatch, job); res = fg.evaluate(BLUE, CFG, 'Benchy')
     assert res['printer']['beyond'] == {'C3': pytest.approx(65.3)} and "it needs 65 g more of C3's filament than the loaded spools hold" in fg.report_text(res)
     assert 'C3 reads 20 g; the running print still needs 85 g: 65 g more than it holds, and no other spool of this filament is loaded' in res['rows'][0]['note']
+
+def test_a_plate_sliced_again_while_it_prints_is_counted_by_the_slice_that_needs_most(state, monkeypatch):
+    """A nine-up plate "Part" (225 g) prints at layer 10 of 100 from A1, which reads 300 g, and still needs 205 g. The
+    plate is sliced again with four copies (100 g, as many layers) for the next run. The job on the printer may be
+    either slice: it is counted by the one that needs most, and the four-up does not fit beside it."""
+    part(225.0); job = printing('RUNNING', [spool(0, 300)], layer=10, gcode_file='/data/Metadata/plate_1.gcode')
+    assert gl.owed(job, fg.load_state()['slices']) == ({'A1': pytest.approx(204.75)}, True)
+    part(100.0); slices = fg.load_state()['slices']
+    assert [s['filaments'][0]['grams'] for s in slices] == [100.0, 225.0] and len(os.listdir(state / 'profiles')) == 2
+    assert gl.owed(job, slices) == ({'A1': pytest.approx(204.75)}, True) and gl.draws(job, slices, ['A1']) == ({'A1': 225.0}, set())
+    running(monkeypatch, job); res = fg.evaluate(needing(100), CFG, 'Part'); row = res['rows'][0]
+    assert row['status'] == 'SHORT' and 'A1 reads 300 g, of which the running print still needs 205 g' in row['note'] and res['printer']['counted'] is True
+    part(100.0, layers=80)                                                               # sliced again at another layer height: not what the printer runs
+    assert gl.owed(job, fg.load_state()['slices']) == ({'A1': pytest.approx(204.75)}, True)
+
+def test_an_entered_amount_is_counted_down_by_the_slice_that_needs_most(state):
+    """The nine-up is sent; while the printer prepares it, the plate is sliced again with four copies. The entered
+    500 g are counted down by the 225 g the job may take, not by the 100 g of the newer slice."""
+    part(225.0); spools = [spool(2)]
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 500)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools, task='1')); watch.look(printing('PREPARE', spools, mapping=(2,)))
+    part(100.0); watch.look(printing('RUNNING', spools, mapping=(2,), layer=1))
+    assert fg.load_state()['spools']['SERIAL']['A3']['grams'] == 275
+
+def test_three_slices_of_a_plate_are_kept_and_none_that_the_job_on_the_printer_may_be(state, monkeypatch):
+    """Sliced again, a plate keeps its last three slices that differ, each with its profile; an unchanged re-slice
+    takes the place of its like. While the printer has a job on it that a slice fits, that slice is not let go: not
+    for a fourth slice of its plate, and not for thirty newer slices of other plates. Once the printer is seen without
+    the job, it goes like any other."""
+    grams = lambda title='Part': [s['filaments'][0]['grams'] for s in fg.load_state()['slices'] if s['title'] == title]
+    for g in (225.0, 100.0, 100.0, 125.0, 150.0): part(g)
+    assert grams() == [150.0, 125.0, 100.0] and len(os.listdir(state / 'profiles')) == 3
+    job = printing('RUNNING', [spool(0, 300)], layer=10, gcode_file='/data/Metadata/plate_1.gcode')
+    running(monkeypatch, job); fg.evaluate(needing(100), CFG, 'Part'); assert fg.load_state()['on']['SERIAL'] == {'name': 'Part', 'layers': 100, 'plate': 1}
+    part(175.0); part(200.0); assert grams() == [200.0, 175.0, 150.0, 125.0, 100.0]      # any of them may be on the printer
+    for n in range(30): part(10.0, title=f'Other {n}')
+    slices = fg.load_state()['slices']
+    assert len(slices) == 35 and grams() == [200.0, 175.0, 150.0, 125.0, 100.0] and gl.owed(job, slices) == ({'A1': pytest.approx(182.0)}, True)
+    running(monkeypatch, dict(job, gcode_state='FINISH')); fg.evaluate(needing(100), CFG, 'Part'); assert 'SERIAL' not in fg.load_state()['on']
+    part(10.0, title='One more'); assert grams() == [] and len(fg.load_state()['slices']) == 30 and len(os.listdir(state / 'profiles')) == 30
+
+def test_the_follower_notes_the_job_on_the_printer_too(state):
+    """A printer that is followed has its job noted at every look, also when no check reaches it."""
+    part(225.0); gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 500)
+    watch = gl.JobWatch('SERIAL', dict(CFG, learn=False)); watch.see(printing('RUNNING', [spool(2)], mapping=(2,), layer=1))
+    assert fg.load_state()['on'] == {'SERIAL': {'name': 'Part', 'layers': 100, 'plate': None}}
+    watch.see(printing('FINISH', [spool(2)], mapping=(2,), layer=100)); assert fg.load_state()['on'] == {}
