@@ -418,14 +418,14 @@ def test_a_setting_changed_from_the_menu_leaves_what_was_edited_by_hand_meanwhil
     guard.toggle_warning('UNKNOWN')
     assert fg.json.load(open(fg.CONFIG)) == {'learn': False, 'margin_pct': 25, 'popup_on': fg.DEFAULTS['popup_on'] + ['UNKNOWN']}
 
-def install_on(monkeypatch, shortcut='', running=(True,)):
+def install_on(monkeypatch, shortcut=''):
     """install() on stand-ins for Windows: the Startup shortcut points into the folder `shortcut` ('' = there is none),
-    no Bambu Studio, and is_running answers from `running`, its last answer for good. Returns what was done, in order."""
-    done, answers = [], list(running)
+    no Bambu Studio, and no guard runs until install starts its own. Returns what was done, in order."""
+    done = []
     monkeypatch.setattr(fg, 'shortcut_folder', lambda: (done.append('shortcut read'), shortcut)[1])
     monkeypatch.setattr(fg, 'make_shortcut', lambda: done.append('shortcut made')); monkeypatch.setattr(fg, 'bs_conf', no_studio)
-    monkeypatch.setattr(fg, 'is_running', lambda: answers.pop(0) if len(answers) > 1 else answers[0])
-    monkeypatch.setattr(fg, 'stop', lambda *a, **k: done.append('stop') and False); monkeypatch.setattr(fg, 'start', lambda *a, **k: done.append('start'))
+    monkeypatch.setattr(fg, 'is_running', lambda: 'start' in done)
+    monkeypatch.setattr(fg, 'stop', lambda *a, **k: (done.append('stop'), 'not running')[1]); monkeypatch.setattr(fg, 'start', lambda *a, **k: done.append('start'))
     monkeypatch.setattr(fg.time, 'sleep', lambda s: None)
     return done
 
@@ -434,11 +434,11 @@ def test_install_brings_the_settings_over_from_the_folder_of_the_copy_installed_
     (up to 1.4.0, beside the script) holds the settings. They are brought over before the shortcut is made to point
     here, and the install card says so. They stayed behind, and the new guard ran on the defaults without a word."""
     old = tmp_path / 'old' / 'app'; old.mkdir(parents=True); (old / 'config.json').write_text('{"spool_reserve_pct": 5, "measured_reserve": false}')
-    done = install_on(monkeypatch, shortcut=str(old)); said = fg.install()
+    done = install_on(monkeypatch, shortcut=str(old)); ours, said = fg.install()
     assert done[:2] == ['shortcut read', 'shortcut made'] and fg.load_config()['spool_reserve_pct'] == 5
-    assert (True, f'Your settings are kept: config.json was brought over from {old}.') in said and f'brought over from {old}' in capsys.readouterr().out
-    (old / 'config.json').write_text('{"spool_reserve_pct": 2}')
-    assert not any('brought over' in text for mark, text in fg.install()) and fg.load_config()['spool_reserve_pct'] == 5   # settings are there now: not again
+    assert ours and said == [(True, f'Your settings are kept: config.json was brought over from {old}.')] and f'brought over from {old}' in capsys.readouterr().out
+    (old / 'config.json').write_text('{"spool_reserve_pct": 2}'); install_on(monkeypatch, shortcut=str(old))
+    assert fg.install() == (True, []) and fg.load_config()['spool_reserve_pct'] == 5         # settings are there now: not again
 
 def set_up(monkeypatch):
     """setup() on stand-ins for Tk, after install_on: the card it showed, as (headline, lines, tone)."""
@@ -465,7 +465,7 @@ def test_install_starts_the_guard_and_says_so_when_the_startup_shortcut_cannot_b
 @pytest.mark.windows
 def test_setup_says_on_its_card_whatever_else_kept_it_from_installing(state, monkeypatch):
     """Install.cmd runs without a console: an error that left install as an error was seen by nobody."""
-    install_on(monkeypatch, running=(False,)); monkeypatch.setattr(fg, 'start', lambda *a, **k: 1 / 0)
+    install_on(monkeypatch); monkeypatch.setattr(fg, 'start', lambda *a, **k: 1 / 0)
     headline, lines, tone = set_up(monkeypatch)
     assert (headline, tone) == ('Bambu Filament Guard did not start', 'danger') and (False, f"It could not be installed (ZeroDivisionError: division by zero). The log is {state / 'guard.log'}.") in lines
     assert 'install failed: ZeroDivisionError: division by zero' in (state / 'guard.log').read_text()
@@ -486,7 +486,7 @@ def uninstall_on(monkeypatch, tmp_path, shortcut, guard):
     lnk, stopped = tmp_path / 'Bambu Filament Guard.lnk', []
     lnk.write_text(''); monkeypatch.setattr(fg, 'STARTUP_LNK', str(lnk)); monkeypatch.setattr(fg, 'shortcut_folder', lambda: shortcut)
     (tmp_path / 'guard.pid').write_text('4242' if not guard else f'4242\n{guard}\n')
-    monkeypatch.setattr(fg, 'is_running', lambda: guard is not None and not stopped); monkeypatch.setattr(fg, 'stop', lambda *a, **k: stopped.append(1) or True)
+    monkeypatch.setattr(fg, 'is_running', lambda: guard is not None and not stopped); monkeypatch.setattr(fg, 'stop', lambda *a, **k: (stopped.append(1), 'stopped')[1])
     fg.uninstall()
     return lnk.exists(), bool(stopped)
 
@@ -512,3 +512,49 @@ def test_the_guard_notes_the_folder_it_was_started_from(state, monkeypatch):
     assert fg.guard_folder() == ''
     started(monkeypatch)
     assert (state / 'guard.pid').read_text() == f'{fg.os.getpid()}\n{fg.HERE}\n' and fg.guard_folder() == fg.HERE
+
+def old_guard(monkeypatch, state, stops_after):
+    """A guard that is already running, on a clock that only time.sleep moves: once the stop flag is there it stops
+    when the clock reaches `stops_after` seconds (None: never: its watcher hangs). install's shortcut and Bambu Studio
+    are stood in for. Returns (the clock, the times at which a new guard was started)."""
+    clock, started, flag = [0.0], [], state / 'stop'
+    monkeypatch.setattr(fg.time, 'sleep', lambda s: clock.__setitem__(0, clock[0] + s))
+    monkeypatch.setattr(fg, 'is_running', lambda: bool(started) or stops_after is None or clock[0] < stops_after or not flag.exists())
+    monkeypatch.setattr(fg, 'start', lambda *a, **k: started.append(clock[0]))
+    monkeypatch.setattr(fg, 'shortcut_folder', lambda: ''); monkeypatch.setattr(fg, 'make_shortcut', lambda: None); monkeypatch.setattr(fg, 'bs_conf', no_studio)
+    return clock, started
+
+def test_stopping_the_guard_tells_stopped_from_still_running_and_not_running(state, monkeypatch, capsys):
+    """A guard in the middle of a check reads the stop flag when that check ends. After 10 s, "stop" and "uninstall" took
+    one that was still running for one that was not, and said "was not running"."""
+    clock, _ = old_guard(monkeypatch, state, 4.0)
+    assert fg.stop() == 'stopped' and 4.0 <= clock[0] < 5.0 and (state / 'stop').exists()
+    assert fg.stop() == 'not running'
+    (state / 'stop').unlink(); clock, _ = old_guard(monkeypatch, state, 25.0)
+    assert fg.stop() == 'still running' and 10.0 <= clock[0] < 11.0 and (state / 'stop').exists()      # the flag stands: it stops when its check ends
+    (state / 'stop').unlink(); (state / 'guard.pid').write_text(f'4242\n{fg.HERE}\n'); old_guard(monkeypatch, state, 25.0)
+    assert fg.main(['stop']) == 0 and capsys.readouterr().out.strip() == 'still running: it stops when its current check ends'
+    (state / 'stop').unlink(); old_guard(monkeypatch, state, 25.0); fg.uninstall()
+    assert 'still running: it stops when its current check ends' in capsys.readouterr().out
+
+def test_install_waits_for_the_guard_that_runs_to_go_before_it_starts_its_own(state, monkeypatch, capsys):
+    """Updating while the old guard checks a printer that is off ("slice all": some 13 s a plate): install gave up
+    waiting after 10 s, started nothing because a guard was running, and said "watcher running". Seconds later the
+    old guard read the stop flag and went: no guard ran until the next login."""
+    clock, started = old_guard(monkeypatch, state, 40.0)
+    assert fg.main(['install']) == 0 and len(started) == 1 and 40.0 <= started[0] < 41.0 and 'watcher running' in capsys.readouterr().out
+
+def test_install_says_which_guard_runs_when_the_one_that_ran_does_not_go(state, monkeypatch, capsys):
+    """A guard whose watcher hangs never reads the stop flag. Install waits a minute, then leaves it running (the flag
+    is taken back: it must not stop later with nothing in its place), says that it is still the one that runs, and
+    exits 1, as it does when no guard runs at its end."""
+    (state / 'guard.pid').write_text('4242\nC:\\old\\app\n'); clock, started = old_guard(monkeypatch, state, None)
+    ours, said = fg.install()
+    assert (ours, started) == (False, []) and clock[0] >= 60.0 and not (state / 'stop').exists()
+    assert said == [(False, "The guard that was already running (from C:\\old\\app) has not stopped, and is still the one that runs. Quit it from its icon's menu, then open Install.cmd again.")]
+    (state / 'stop').unlink(missing_ok=True); old_guard(monkeypatch, state, None)
+    assert fg.main(['install']) == 1 and 'has not stopped' in capsys.readouterr().out
+    monkeypatch.setattr(fg, 'is_running', lambda: False)                                     # no guard before, and its own does not come up
+    ours, said = fg.install()
+    assert not ours and said == [(False, f"The guard did not start. The log may say why: {state / 'guard.log'}.")] and fg.main(['install']) == 1
+    assert 'watcher did NOT start' in capsys.readouterr().out

@@ -1419,13 +1419,18 @@ def is_running():
     if h: ctypes.windll.kernel32.CloseHandle(h)
     return bool(h)
 
-def stop():
-    if not is_running(): return False
+def stop(wait=10.0):
+    """Asks the running guard to stop and waits for it to go: 'not running', 'stopped', or 'still running' after `wait`
+    seconds. It is asked by the stop flag, which its watcher looks for between plates: a guard in the middle of a check
+    (some 13 s for a printer that is off, and "slice all" brings several) goes when that ends, and the flag stands."""
+    if not is_running(): return 'not running'
     open(os.path.join(STATE_DIR, 'stop'), 'w').close()
-    for _ in range(40):
-        if not is_running(): return True
+    for _ in range(int(wait * 4)):
+        if not is_running(): return 'stopped'
         time.sleep(0.25)
-    return not is_running()
+    return 'still running' if is_running() else 'stopped'
+
+STOP_WORDS = {'not running': 'was not running', 'stopped': 'stopped', 'still running': 'still running: it stops when its current check ends'}
 
 
 # ---------------------------------------------------------------- self-test
@@ -1508,12 +1513,15 @@ def make_shortcut():
 
 def install(start_line=True):
     """Makes the guard start automatically, from where it is, and starts it. start_line: the guard says so on a card of
-    its own, once Bambu Studio is open; setup, which says it on its card, turns that off. Returns what there is to say
-    besides, as lines of setup's card: [(mark, text)]. The settings of a copy installed before, up to 1.4.0 beside its
-    script, are brought over when there are none yet: the shortcut still points into that copy's folder, so it is read
-    before it is made to point here. A shortcut that cannot be made (PowerShell not found, blocked by a policy or in
-    Constrained Language Mode) is said and logged, and the guard is started all the same: it then runs until Windows
-    is next started."""
+    its own, once Bambu Studio is open; setup, which says it on its card, turns that off. Returns (does the guard it
+    started run?, what there is to say besides, as lines of setup's card: [(mark, text)]). The settings of a copy
+    installed before, up to 1.4.0 beside its script, are brought over when there are none yet: the shortcut still
+    points into that copy's folder, so it is read before it is made to point here. A shortcut that cannot be made
+    (PowerShell not found, blocked by a policy or in Constrained Language Mode) is said and logged, and the guard is
+    started all the same: it then runs until Windows is next started. A guard that already runs (it may be an older
+    version) is asked to stop and waited for, a minute at most: started while that one still ran, the new one would
+    end at once, and the old one go when its check ended, with no guard left. One that does not go is left running,
+    and said to be the one that runs."""
     said, before, shortcut = [], shortcut_folder(), ''
     try:
         if before and bring_settings(os.path.join(before, 'config.json')): said.append((True, f'Your settings are kept: config.json was brought over from {before}.'))
@@ -1528,13 +1536,22 @@ def install(start_line=True):
             ip = printer_ip(p['serial'], cfg, refresh=True)
             print(f"  {p['model']}: " + (ip or 'not announcing itself on this network now (it is looked for again when a plate is sliced)'))
     except (OSError, ValueError): print("  Bambu Studio's configuration was not found: the guard waits for it")
-    if stop(): time.sleep(0.5)                                                   # a running copy may be an older version
-    start(start_line); time.sleep(1.5)
-    running = is_running()
-    print('watcher running' if running else 'watcher did NOT start: run it with "watch" to see why')
-    if shortcut: said.append((False, ('It runs now but will not start with Windows: ' if running else 'It will not start with Windows: ') + shortcut + '.'))
+    was, ours, logfile = guard_folder(), False, os.path.join(STATE_DIR, 'guard.log')
+    if stop(60) == 'still running':
+        with contextlib.suppress(OSError): os.remove(os.path.join(STATE_DIR, 'stop'))    # it is not replaced, so it is not left to stop later either
+        time.sleep(2)                                                            # unless it has just read the flag: then it goes now, and ours is started
+    if not is_running():
+        time.sleep(0.5); start(start_line)
+        for _ in range(60):
+            if is_running(): break
+            time.sleep(0.25)
+        time.sleep(1.5); ours = is_running()                                     # still there after its start: one that Tk or the icon ended at once does not run
+        print('watcher running' if ours else f'watcher did NOT start: {logfile} may say why, or run it with "watch" to see')
+        if not ours: said.append((False, f'The guard did not start. The log may say why: {logfile}.'))
+    else: said.append((False, f"The guard that was already running{f' (from {was})' if was else ''} has not stopped, and is still the one that runs. Quit it from its icon's menu, then open Install.cmd again."))
+    if shortcut: said.append((False, ('It runs now but will not start with Windows: ' if ours else 'It will not start with Windows: ') + shortcut + '.'))
     for mark, text in said: print(text)
-    return said
+    return ours, said
 
 def uninstall():
     """Removes the Startup shortcut and stops the guard, where they are this folder's own. There is one shortcut and one
@@ -1547,7 +1564,7 @@ def uninstall():
     elif points: print(f'the Startup shortcut starts the guard in {points}, not this copy: left alone')
     else: print(f'the Startup shortcut could not be read: left alone ({STARTUP_LNK})')
     if not is_running(): print('was not running')
-    elif here(runs): print('stopped' if stop() else 'was not running')
+    elif here(runs): print(STOP_WORDS[stop()])
     elif runs: print(f'the running guard was started from {runs}, not from this folder: left alone ("stop" stops it)')
     else: print('it is not known from which folder the running guard was started: left alone ("stop" stops it)')
     print(f'settings, entered amounts, what was learned and the log stay in {STATE_DIR}: delete it, and this folder, to remove every trace')
@@ -1556,14 +1573,15 @@ def setup():
     """Install, and say so on a card: for someone who started the packaged guard with a double click and sees no console."""
     import guard_ui
     if sys.stdout is None: sys.stdout = sys.stderr = open(os.devnull, 'w')       # pythonw has no console to print to
-    try: said = install(start_line=False)                                        # this card says it, in the same corner as the guard's start line would
+    try: running, said = install(start_line=False)                               # this card says it, in the same corner as the guard's start line would
     except Exception as e:                   # no console shows it: whatever kept install from its end is said on the card, and in the log
-        log(f'install failed: {e.__class__.__name__}: {e}'); said = [(False, f"It could not be installed ({e.__class__.__name__}: {e}). The log is {os.path.join(STATE_DIR, 'guard.log')}.")]
-    running, failed = is_running(), any(mark is False for mark, _ in said)
+        log(f'install failed: {e.__class__.__name__}: {e}')
+        running, said = False, [(False, f"It could not be installed ({e.__class__.__name__}: {e}). The log is {os.path.join(STATE_DIR, 'guard.log')}.")]
+    failed = any(mark is False for mark, _ in said)
     root = guard_ui.make_root(); card = guard_ui.Card(root, on_close=root.quit)
     card.note('Bambu Filament Guard did not start' if not running else 'Bambu Filament Guard runs, but is not fully installed' if failed else 'Bambu Filament Guard is installed', [
-        (True, "It checks every plate you slice in Bambu Studio and shows the answer in Bambu Studio's window."),
-        (True, 'Its icon, a spool, is in the notification area while Bambu Studio runs: settings, self-test, quit.'), *said,
+        *([(True, "It checks every plate you slice in Bambu Studio and shows the answer in Bambu Studio's window."),
+           (True, 'Its icon, a spool, is in the notification area while Bambu Studio runs: settings, self-test, quit.')] if running else []), *said,
         (None, f'It runs from this folder, so the folder has to stay: {os.path.dirname(HERE) if os.path.basename(HERE) == "app" else HERE}'),
         (None, 'To remove it: Uninstall.cmd in that folder, then delete the folder.')], 'danger' if not running else 'warn' if failed else 'ok')
     def tick(): card.follow(); root.after(400, tick)
@@ -1583,10 +1601,10 @@ def main(argv=None):
     for name in ('install', 'uninstall', 'setup', 'status', 'stop', 'trays', 'selftest'): sub.add_parser(name)
     a = ap.parse_args(argv)
     if a.cmd == 'watch': return watch(start_line=not a.no_start_line)
-    if a.cmd == 'install': install(); return 0
+    if a.cmd == 'install': return 0 if install()[0] else 1
     if a.cmd == 'uninstall': return uninstall()
     if a.cmd == 'setup': return setup()
-    if a.cmd == 'stop': print('stopped' if stop() else 'was not running'); return 0
+    if a.cmd == 'stop': print(STOP_WORDS[stop()]); return 0
     if a.cmd == 'status':
         print('watcher running' if is_running() else 'watcher not running', '| starts automatically:', 'yes' if os.path.exists(STARTUP_LNK) else 'no', '| log:', os.path.join(STATE_DIR, 'guard.log'))
         return 0
