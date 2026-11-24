@@ -1460,3 +1460,20 @@ def test_the_address_kept_for_a_printer_is_the_one_asked_for_and_a_local_one(sta
     assert fg.printer_ip('SERIAL', CFG) == '192.0.2.50'
     assert fg.printer_ip('SERIAL', dict(CFG, printers={'SERIAL': {'ip': 'printer.example.net'}})) == 'printer.example.net'   # named in config.json: the user's own word, taken as it is
     assert [fg.local_address(a) for a in (3232235826, None, ['192.0.2.50'], '')] == [None] * 4                    # and nothing but text is an address
+
+def test_what_is_kept_for_no_printer_of_bambu_studio_goes_at_the_next_look_for_an_address(state, monkeypatch):
+    """Every USN that was heard was kept in state.json, which is never pruned, read whole every 3 seconds and rewritten
+    at every change: a burst of junk announcements made it hundreds of MB, for good. Only the serials Bambu Studio
+    knows are kept now, and a file bloated before heals at the next look for a printer's address, also where that
+    address is at hand and nothing is listened for. A USN or an address longer than one can be is refused."""
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {'SERIAL': 'code', 'SERIAL2': 'code'}}); listened = []
+    monkeypatch.setattr(fg, 'discover', lambda want, seconds=8.0: listened.append(want) or {})
+    junk = {f'{n:07d}' + 'A' * 1900: '192.0.2.9' for n in range(300)}
+    fg.update_state(lambda st: st.update(ips=dict(junk, SERIAL='192.0.2.50', SERIAL2='192.0.2.51'), discovered_at=fg.time.time(), spools={'SERIAL': {'A1': {'grams': 400.0}}}))
+    assert (state / 'state.json').stat().st_size > 500_000
+    assert fg.printer_ip('SERIAL', CFG) == '192.0.2.50' and listened == []
+    st = fg.load_state()
+    assert st['ips'] == {'SERIAL': '192.0.2.50', 'SERIAL2': '192.0.2.51'} and st['spools'] == {'SERIAL': {'A1': {'grams': 400.0}}} and (state / 'state.json').stat().st_size < 1000
+    fg.update_state(lambda st: st.update(ips=['not', 'a', 'dict']))                                               # and what is no such list at all
+    assert fg.printer_ip('SERIAL', CFG, refresh=True) is None and fg.load_state()['ips'] == {}
+    assert announcements(monkeypatch, ['SERIAL'], notice('SERIAL' + 'A' * 1900, '192.0.2.50', BAMBU), notice('SERIAL', '192.0.2.50' + '0' * 1900, BAMBU)) == {}

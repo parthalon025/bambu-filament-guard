@@ -677,20 +677,25 @@ def discover(want, seconds=8.0):
 
 def printer_ip(serial, cfg, refresh=False):
     """The printer's IP: config.json, else the last one seen, else its LAN announcement (asked for at most every 10 minutes).
-    Of what discover heard, the address of this serial alone is kept. An address kept by an earlier version that is no
-    local one (it took whatever an announcement named) is not used: the printer is looked for again."""
+    Of what discover heard, the address of this serial alone is kept. What an earlier version kept is not used and
+    goes from the state file at this look, listened or not: an address that is no local one (it took whatever an
+    announcement named), and whatever is kept under a key that is no serial Bambu Studio knows (it kept every USN it
+    heard, for good: a burst of junk made the state file, read whole every 3 seconds, hundreds of MB)."""
     fixed = cfg.get('printers', {}).get(serial, {}).get('ip')
     if fixed: return fixed
-    state = load_state(); ips = {s: a for s, a in state.get('ips', {}).items() if local_address(a)}
-    if serial in ips and not refresh: return ips[serial]
-    if time.time() - state.get('discovered_at', 0) > (0 if serial not in ips else 600):
-        found = local_address(discover([serial]).get(serial))
-        def change(st):
-            st['ips'] = {s: a for s, a in st.get('ips', {}).items() if local_address(a)}; st['discovered_at'] = time.time()
-            if found: st['ips'][serial] = found
-            return st['ips'].get(serial)
-        return update_state(change)
-    return ips.get(serial)
+    try: known = set(bs_conf().get('access_code', {})) | {serial}
+    except Exception: known = {serial}
+    tidy = lambda kept: {s: a for s, a in (kept.items() if isinstance(kept, dict) else ()) if s in known and local_address(a)}
+    state = load_state(); ips = tidy(state.get('ips', {}))
+    listen = (refresh or serial not in ips) and time.time() - state.get('discovered_at', 0) > (0 if serial not in ips else 600)
+    if not listen and ips == state.get('ips', {}): return ips.get(serial)
+    found = local_address(discover([serial]).get(serial)) if listen else None
+    def change(st):
+        st['ips'] = tidy(st.get('ips', {}))
+        if listen: st['discovered_at'] = time.time()
+        if found: st['ips'][serial] = found
+        return st['ips'].get(serial)
+    return update_state(change)
 
 def merge(a, b):
     for k, v in b.items():
