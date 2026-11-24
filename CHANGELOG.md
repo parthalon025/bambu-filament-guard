@@ -36,6 +36,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - A warning could end as a line in the log, with no card, when another program held the state file at the moment the guard looked up whether the finding was ignored. What cannot be looked up counts as not ignored, and the card shows.
 - "Show last result" showed an answer that could be hours old under "Spools as the printer reports them now". A card that shows an answer more than a minute after its check says when the check was made, and that "Check again" asks the printer now.
 - A warning found when "Send print job" opened was thrown away when the dialog had closed before the check ended, which a quick click on Send also looks like. It now shows as a card in the corner, as after a slice.
+- "Check newest slice now" while checks were paused turned the icon green, as if slices were being checked. Paused, the icon stays grey and its tooltip says "Checks are paused"; resumed, it takes the last result's colour again.
 
 ## [1.4.0] - 2026-11-20
 

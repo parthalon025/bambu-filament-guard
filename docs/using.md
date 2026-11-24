@@ -45,7 +45,7 @@ When the guard starts, the first time Bambu Studio runs it shows one line, "Bamb
 
 ## The icon and its settings
 
-Its colour and tooltip are the last result, with its project and plate; while a warning's card stands they stay that warning's. A click shows that result again, and the card says when its check was made once that is more than a minute ago; before there is a result, it checks the newest slice. A click while that check runs shows the "Checking…" line again and starts no second check. The menu: check the newest slice now, pause, self-test, the log, and the settings:
+Its colour and tooltip are the last result, with its project and plate; while a warning's card stands they stay that warning's, and while checks are paused the icon is grey and says so, whatever you check from its menu meanwhile. A click shows that result again, and the card says when its check was made once that is more than a minute ago; before there is a result, it checks the newest slice. A click while that check runs shows the "Checking…" line again and starts no second check. The menu: check the newest slice now, pause, self-test, the log, and the settings:
 
 - One line when there is enough (`ok_seconds`)
 - Warn when a colour is not loaded / when a spool's amount is unknown (`popup_on`: the results that open the full card. "Not enough" and "not loaded" open it whatever that list holds, and one such filament is enough, whatever the others are.)

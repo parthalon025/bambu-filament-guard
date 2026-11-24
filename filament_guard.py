@@ -1092,6 +1092,12 @@ class Guard:
         if not self.last: return 'No slice checked yet'
         return f"{headline(self.last)} · {self.last['title']}" + (f", plate {self.last['plate_no']}" if self.last.get('plate_no') else '')
 
+    def show_icon(self):
+        """The icon's colour and tooltip: the last answer's; grey, and saying so, while checks are paused (an answer asked
+        for from the icon then turned it green, as if slices were being checked)."""
+        import guard_ui
+        if self.tray: self.tray.set('muted' if self.paused or not self.last else guard_ui.tone_of(self.last), self.last_text()); self.tray.refresh()
+
     def standing_warning(self):
         """The warning whose card still stands: (its plate: Bambu Studio's process, the project, the plate number; its
         rank; its card's window), or None."""
@@ -1105,14 +1111,12 @@ class Guard:
         checked again for it) and to what the user asks for; to nothing else. Another plate's fine answer, or another
         Bambu Studio's, once put a line that went after 8 seconds in its place and turned the icon green: now it does
         not show, and the icon keeps the warning's colour."""
-        import guard_ui
         res.setdefault('at', time.time())                     # when its check was made: a card that shows it again later says so
         if not res['error']: res['ignored'] = self.ignored(res)
         rank, plate, stands = self.rank(res), (res.get('pid'), res['title'], res.get('plate_no')), self.standing_warning()
         own = bool(stands) and stands[0] == plate
         if stands and not full and not own and (not rank[0] if beside else rank <= stands[1]): return
-        self.last = res
-        if self.tray: self.tray.set(guard_ui.tone_of(res), self.last_text()); self.tray.refresh()
+        self.last = res; self.show_icon()
         if full or rank[0]:
             self.card.show(res, beside=beside, hold=not full)
             self.warning = (plate, rank, self.card.win) if rank[0] else None
@@ -1306,8 +1310,7 @@ class Guard:
         if self.tray: self.tray.refresh()
 
     def toggle_pause(self):
-        self.paused = not self.paused; log('checks paused' if self.paused else 'checks resumed')
-        if self.tray: self.tray.set('muted', self.last_text()); self.tray.refresh()
+        self.paused = not self.paused; log('checks paused' if self.paused else 'checks resumed'); self.show_icon()
 
     def open_log(self):
         os.startfile(os.path.join(STATE_DIR, 'guard.log'))

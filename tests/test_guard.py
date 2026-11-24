@@ -957,3 +957,17 @@ def test_a_warning_found_for_send_print_job_shows_though_the_dialog_has_closed(s
     project_of(tmp_path, monkeypatch, [FINE, FINE])                                          # nothing to warn of: nothing shows, as beside the dialog
     guard = guard_with(); guard.tray = Icon(); at_send(guard)
     assert guard.card.shown == [] and guard.tray.was == []
+
+@pytest.mark.windows
+def test_the_icon_stays_grey_and_says_paused_while_checks_are_paused(state):
+    """"Check newest slice now" while checks were paused turned the icon green, with nothing left to say that no slice is
+    being checked. Resumed, the icon is the last answer's again."""
+    guard = guard_with(); guard.tray = Icon()
+    guard.deliver(answer(1, 'SHORT')); guard.toggle_pause()
+    assert guard.tray.was[-1] == ('muted', 'Checks are paused')
+    guard.deliver(answer(2, 'OK'), full=True)                                                # asked for from the icon: the answer shows
+    assert guard.card.shown[-1] == ('show', 0) and guard.tray.was[-1] == ('muted', 'Checks are paused')
+    guard.toggle_pause()
+    assert guard.tray.was[-1] == ('ok', 'Enough filament for this print · Bracket, plate 2')
+    fresh = guard_with(); fresh.tray = Icon(); fresh.toggle_pause(); fresh.toggle_pause()
+    assert fresh.tray.was == [('muted', 'Checks are paused'), ('muted', 'No slice checked yet')]
