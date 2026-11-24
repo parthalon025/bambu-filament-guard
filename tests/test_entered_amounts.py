@@ -5,7 +5,7 @@ import types
 
 import filament_guard as fg
 import guard_ledger as gl
-from helpers import CFG, H2D_JOB, SLICE, c3, kept
+from helpers import CFG, H2D_JOB, SLICE, c3, kept, needing, part, printing, running, spool
 
 
 def test_job_mapping_names_the_trays():
@@ -157,3 +157,74 @@ def test_a_follower_that_stood_still_takes_what_it_holds_for_out_of_date(state, 
     over, job = dict(H2D_JOB, gcode_state='FINISH', task_id='10'), dict(H2D_JOB, task_id='14')
     watch, looks, links = follow(monkeypatch, {1: over, 20: {'wifi_signal': '-40dBm'}, 60: job}, 70, leap=(20, 8 * 3600))
     assert max(n for n, task in looks if task == '10') < 20 and links[1:] and all(links[1:]) and c3()['stale']
+
+def amounts_at(monkeypatch, watch, status, plate):
+    """The follower's look at a status, then the check of a plate against it: (the answer, {tray: grams it is counted with})."""
+    watch.look(status); running(monkeypatch, status); res = fg.evaluate(plate, CFG, 'Next')
+    return res['worst'], {t['label']: t['grams'] for t in res['rows'][0]['trays']}
+
+def test_what_a_job_needs_beyond_an_entered_spool_comes_off_the_next_entered_spool_of_it(state, monkeypatch):
+    """A1 and A2 hold the same black PLA without tags, entered as 50 g and 1000 g. A 300 g job goes to A1; the AMS goes
+    on with A2. The check shows A1 at 0 g and A2 at 750 g while the job prepares, and the same once the ledger has
+    counted the job: while it runs, and after it."""
+    part(300.0); spools = [spool(0), spool(1)]
+    for label, grams in (('A1', 50), ('A2', 1000)): gl.enter('SERIAL', {'label': label, 'type': 'PLA', 'colour': '#101010'}, grams)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools, task='1'))
+    before = amounts_at(monkeypatch, watch, printing('PREPARE', spools), needing(850))
+    assert before == ('SHORT', {'A2': 750, 'A1': 0})
+    for status in (printing('RUNNING', spools, layer=1), printing('RUNNING', spools, layer=60), printing('FINISH', spools, layer=100)):
+        assert amounts_at(monkeypatch, watch, status, needing(850)) == before
+    assert {label: entry['grams'] for label, entry in fg.load_state()['spools']['SERIAL'].items()} == {'A1': 0, 'A2': 750}
+    assert 'A1 -50 g, A2 -250 g that it needs beyond A1' in (state / 'guard.log').read_text()
+
+def test_what_a_job_needs_beyond_a_measured_spool_comes_off_the_entered_spool_of_it_once(state, monkeypatch):
+    """The job's own tray, A1, is one the printer measures, at 50 g; A2, the same filament without a tag, is entered at
+    1000 g. The 250 g the job needs beyond A1's reading come off A2 when the job is counted, and the check does not take
+    them off again while the job runs: A2 is counted with 750 g throughout, and still after the print."""
+    part(300.0); spools = lambda a1: [spool(0, a1, fid='GFA00'), spool(1, fid='GFA00')]
+    gl.enter('SERIAL', {'label': 'A2', 'type': 'PLA', 'colour': '#101010'}, 1000)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools(50), task='1'))
+    before = amounts_at(monkeypatch, watch, printing('PREPARE', spools(50)), needing(850))
+    assert before == ('SHORT', {'A2': 750, 'A1': 0})
+    for status in (printing('RUNNING', spools(50), layer=1), printing('RUNNING', spools(0), layer=60), printing('FINISH', spools(0), layer=100)):
+        assert amounts_at(monkeypatch, watch, status, needing(850)) == before
+    running(monkeypatch, printing('RUNNING', spools(50), layer=1)); res = fg.evaluate(needing(850), CFG, 'Next')
+    assert res['printer']['beyond'] == {} and 'A1 reads 50 g; the running print still needs 300 g: 250 g more than it holds, taken off A2' in res['rows'][0]['note']
+
+def test_what_a_job_needs_beyond_an_entered_spool_stays_owed_to_the_measured_spool_of_it(state, monkeypatch):
+    """A1, entered at 50 g, is the job's tray; A2, the same filament, is measured at 900 g. No entered spool can give the
+    250 g the job needs beyond A1: the check goes on taking them off A2 while the job runs, as it did while it prepared,
+    until A2's own reading has fallen by them."""
+    part(300.0); spools = lambda a2: [spool(0, fid='GFA00'), spool(1, a2, fid='GFA00')]
+    gl.enter('SERIAL', {'label': 'A1', 'type': 'PLA', 'colour': '#101010'}, 50)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools(900), task='1'))
+    before = amounts_at(monkeypatch, watch, printing('PREPARE', spools(900)), needing(700))
+    assert before == ('SHORT', {'A2': 650, 'A1': 0})
+    for status in (printing('RUNNING', spools(900), layer=1), printing('RUNNING', spools(773), layer=60), printing('FINISH', spools(650), layer=100)):
+        assert amounts_at(monkeypatch, watch, status, needing(700)) == before         # at layer 60 A2 has given 127 g and owes 123 g more
+    running(monkeypatch, printing('RUNNING', spools(900), layer=1)); note = fg.evaluate(needing(700), CFG, 'Next')['rows'][0]['note']
+    assert 'A1 holds 0 g as entered; the running print still needs 250 g: 250 g more than it holds, taken off A2' in note
+
+def test_a_job_on_a_spool_of_unknown_amount_makes_the_entered_spools_of_its_filament_out_of_date(state):
+    """A1 has no tag and no entered amount; A2, the same filament, is entered at 1000 g; A3 is another material. How
+    much of a job on A1 goes beyond A1 cannot be told: A2's amount is out of date, A3's stands."""
+    part(300.0); spools = [spool(0), spool(1), spool(2, typ='PETG')]
+    gl.enter('SERIAL', {'label': 'A2', 'type': 'PLA', 'colour': '#101010'}, 1000); gl.enter('SERIAL', {'label': 'A3', 'type': 'PETG', 'colour': '#101010'}, 400)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools, task='1')); watch.look(printing('RUNNING', spools, layer=1))
+    book = fg.load_state()['spools']['SERIAL']
+    assert book['A2'].get('stale') and not book['A3'].get('stale') and book['A3']['grams'] == 400
+    assert "out of date: A2, which the print may go on from: A1's amount is not known" in (state / 'guard.log').read_text()
+
+def test_an_amount_entered_during_a_print_has_what_the_print_needs_beyond_its_tray_taken_off(state, monkeypatch):
+    """The print's own tray, A1, reads 30 g at layer 60 of 100 and the print still needs 123 g: it goes on from A2, the
+    same filament without a tag, weighed and entered now at 500 g. The check takes the 93 g off A2 before the follower
+    has looked; the follower's next look takes them off for good, and the check not again."""
+    part(300.0); spools = [spool(0, 30, fid='GFA00'), spool(1, fid='GFA00')]; job = printing('RUNNING', spools, layer=60)
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PETG', 'colour': '#101010'}, 400)        # an amount from before: the printer is followed
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools, task='1')); watch.look(job)
+    gl.enter('SERIAL', {'label': 'A2', 'type': 'PLA', 'colour': '#101010'}, 500)
+    running(monkeypatch, job); seen = lambda: {t['label']: t['grams'] for t in fg.evaluate(needing(450), CFG, 'Next')['rows'][0]['trays']}
+    assert seen() == {'A2': 407, 'A1': 0}
+    watch.look(job); assert fg.load_state()['spools']['SERIAL']['A2']['grams'] == 407 and seen() == {'A2': 407, 'A1': 0}
+    assert 'A2: entered during "Part": what that print still needs beyond A1, 93 g, taken off: 407 g' in (state / 'guard.log').read_text()
+    watch.look(printing('FINISH', [spool(0, 0, fid='GFA00'), spool(1, fid='GFA00')], layer=100)); assert fg.load_state()['spools']['SERIAL']['A2']['grams'] == 407

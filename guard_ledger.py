@@ -7,6 +7,9 @@ ends when the printer reports another filament there, or starts to measure the t
 Counting down errs to the low side, because a figure that is too low warns early and one that is too high loses a
 print:
   - a print is counted in full when it starts to run, also when it is later cancelled;
+  - what a print needs beyond the amount of its tray comes off the other entered spools of the same filament that are
+    loaded, the fullest first (take_off): with AMS auto refill the print goes on from one of them. When the tray's own
+    amount is not known, how much that is cannot be told, and those entries are out of date;
   - an amount entered while a print runs (or after it was counted) has what that print still needs of it taken off at
     the next look at the printer (catch_up): the amount weighed is what the spool held then, and the print goes on;
   - a print the guard cannot count (not sliced on this computer, or its tray cannot be told) makes the entries of
@@ -70,7 +73,9 @@ def apply(trays, serial, complete=True):
                 if complete: del book[label]
             elif t['grams'] is not None or identity(t) != [e['type'], e['colour']]: del book[label]
             elif e.get('stale'): t['stale'] = e['at']
-            else: t['grams'], t['weight'], t['entered'], t['accounted'], t['missed'] = e['grams'], e['first'], e['at'], e.get('job'), e.get('missed')
+            else:
+                t['grams'], t['weight'], t['entered'], t['accounted'], t['missed'] = e['grams'], e['first'], e['at'], e.get('job'), e.get('missed')
+                t['over'], t['gave'] = e.get('over'), e.get('gave')
     fg.update_state(change)
     return trays
 
@@ -170,9 +175,43 @@ def owed(status, slices):
     for label, f in pairs: out[label] = out.get(label, 0.0) + sum(profile[f['slot']][start:])
     return out, True
 
+def take_off(book, trays, need, now):
+    """Takes what a job needs of each tray (need: {label: grams}) off the entries counted in this step (now: their
+    labels), and what it needs beyond a tray's amount off the other entered spools of the same filament that are loaded
+    (fg.same_filament), the fullest first: with AMS auto refill the print goes on from one of them, and fg.credit takes
+    it off them the same way while the job prepares. A tray's amount is its entry's grams, or the reading of a tray the
+    printer measures (trays: fg.trays_of). Where it is not known (no tag and no entry, or an entry out of date), what
+    goes beyond it cannot be told, and those entries become out of date.
+    Kept with the entries while the job runs, for fg.credit: 'over', what the job needs beyond an entry that no entered
+    spool could give (credit takes it off the spools the printer measures until their readings have fallen by it);
+    'gave', {tray: grams} an entry gave for a tray the printer measures (credit does not take that off again).
+    Returns ([(label, grams taken off its entry, the tray they were needed beyond or None)], [(label made out of date,
+    the tray whose amount is not known)])."""
+    by, took, doubt = {t['label']: t for t in trays}, [], []
+    for label, n in need.items():
+        t, e = by.get(label), book.get(label)
+        mates = sorted((l for l in now if l != label and l in by and not book[l].get('stale') and fg.same_filament(t, by[l])), key=lambda l: -book[l]['grams']) if t else []
+        own = e if e and not e.get('stale') else None
+        if own and label in now: excess = over = max(0.0, n - e['grams']); took.append((label, n - excess, None)); e['grams'] = max(0.0, e['grams'] - n)
+        elif own: over = e.get('over') or 0.0; excess = min(over, n)         # counted before: what was then left to the spools the printer measures
+        elif t is None: continue
+        elif t['grams'] is not None: excess = max(0.0, n - t['grams'] - sum((x.get('gave') or {}).get(label, 0.0) for x in book.values()))
+        else:
+            for l in mates: book[l]['stale'] = True; doubt.append((l, label))
+            continue
+        for l in mates:
+            g = min(book[l]['grams'], excess)
+            if g <= 0: continue
+            book[l]['grams'] -= g; excess -= g; took.append((l, g, label))
+            if own: over -= g
+            else: gave = book[l].setdefault('gave', {}); gave[label] = gave.get(label, 0.0) + g
+        if own and over > 1e-6: e['over'] = over
+        elif own: e.pop('over', None)
+    return took, doubt
+
 def count(serial, status):
-    """Takes the job the printer shows off the entered amounts of the trays it uses, and notes it counted (for each entry
-    and for the printer) in the same write: a count is never half done."""
+    """Takes the job the printer shows off the entered amounts of the trays it uses (take_off), and notes it counted (for
+    each entry and for the printer) in the same write: a count is never half done."""
     key = job_key(status)
     def change(state):
         book = state.get('spools', {}).get(serial, {})
@@ -182,29 +221,34 @@ def count(serial, status):
         else: drawn, unknown = {}, set(book)                                 # a status without its spools: nothing is certain
         state.setdefault('jobs', {})[serial] = key
         for label, e in book.items():
-            e['job'] = key
+            e['job'] = key; e.pop('over', None); e.pop('gave', None)          # what the job before left to other spools is history
             if label in unknown: e['stale'] = True
-            elif label in drawn: e['grams'] = max(0.0, e['grams'] - drawn[label])
-        fg.log(f"job \"{status.get('subtask_name')}\" counted: " + (', '.join(f'{l} -{g:.0f} g' for l, g in drawn.items() if l in book) or 'no entered spool drawn on')
-               + (f"; out of date: {', '.join(sorted(l for l in unknown if l in book))}" if unknown & set(book) else ''))
+        took, doubt = take_off(book, trays, drawn, set(book))
+        fg.log(f"job \"{status.get('subtask_name')}\" counted: " + (', '.join(f'{l} -{g:.0f} g' + (f' that it needs beyond {b}' if b else '') for l, g, b in took) or 'no entered spool drawn on')
+               + (f"; out of date: {', '.join(sorted(l for l in unknown if l in book))}" if unknown & set(book) else '')
+               + ''.join(f"; out of date: {l}, which the print may go on from: {b}'s amount is not known" for l, b in doubt))
     fg.update_state(change)
 
 def catch_up(serial, status, state=None):
     """Entries the job the printer shows has not been taken off, although it was counted (or taken as the baseline) for
-    the printer: made while it ran. What it still needs of their trays comes off now, as a print is counted in full;
-    when that cannot be told (not sliced here, no profile), the entry is marked 'missed' and a check takes the running
-    print off it as far as it can tell then. Returns True when it changed an entry."""
+    the printer: made while it ran. What it still needs of their trays comes off now, as a print is counted in full
+    (take_off: what it needs beyond a tray's amount included); when that cannot be told (not sliced here, no profile),
+    the entry is marked 'missed' and a check takes the running print off it as far as it can tell then. Returns True
+    when it changed an entry."""
     key = job_key(status)
     if not any(e.get('job') != key for e in ((fg.load_state() if state is None else state).get('spools', {}).get(serial, {}) or {}).values()): return False
     def change(st):
-        late = {l: e for l, e in st.get('spools', {}).get(serial, {}).items() if e.get('job') != key}
+        book = st.get('spools', {}).get(serial, {})
+        late = {l: e for l, e in book.items() if e.get('job') != key}
         need, counted = owed(status, st.get('slices', []))
-        for label, e in late.items():
-            if counted is False: e['missed'] = key
-            elif need.get(label):
-                e['grams'] = max(0.0, e['grams'] - need[label])
-                fg.log(f"{label}: entered during \"{status.get('subtask_name')}\": what that print still needs of it, {need[label]:.0f} g, taken off: {e['grams']:.0f} g")
-            e['job'] = key
+        if counted is False:
+            for e in late.values(): e['missed'] = key
+        else:
+            took, doubt = take_off(book, fg.trays_of(status)[0], need, set(late))
+            for l, g, b in took:
+                fg.log(f"{l}: entered during \"{status.get('subtask_name')}\": what that print still needs " + (f'beyond {b}, {g:.0f} g' if b else f'of it, {need[l]:.0f} g') + f", taken off: {book[l]['grams']:.0f} g")
+            for l, b in doubt: fg.log(f"{l}: entered during \"{status.get('subtask_name')}\": out of date, as the print may go on from it: {b}'s amount is not known")
+        for e in late.values(): e['job'] = key
         return bool(late)
     return fg.update_state(change)
 

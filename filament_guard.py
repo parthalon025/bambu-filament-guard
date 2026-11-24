@@ -708,7 +708,10 @@ def credit(trays, owed, learned=None, running=None, order=None):
     learned of it (learned: guard_learn.corrections; only ever lower, and never an amount entered by hand), less what the
     print running now still needs of it (owed).
       - An amount entered by hand has the running print taken off it like a reading until guard_ledger has done so
-        itself (the entry's 'accounted' job is the running one, `running`, and nothing was 'missed').
+        itself (the entry's 'accounted' job is the running one, `running`, and nothing was 'missed'). From then on only
+        what the ledger could take off no entered spool is owed here: what the print needs beyond that entry ('over')
+        goes on to the spools the printer measures, and what an entry gave for a measured tray ('gave') is not taken
+        off again.
       - What the running print needs beyond a tray's amount comes, with AMS auto refill, from the loaded spools of the
         same filament (same_filament), the fullest first: it is taken off them ('taken' on the tray, 'refills' on
         theirs); what none of them holds is 'beyond' (assess and the card say so).
@@ -716,23 +719,29 @@ def credit(trays, owed, learned=None, running=None, order=None):
     goes on with are taken in the order they would be without learning (`order`), so that no tray is ever counted
     higher for what was learned of another."""
     if learned: order = {t['label']: t.get('left', t['grams']) for t in credit([dict(t) for t in trays], owed, None, running)}
+    counted = set()                                              # the entered trays guard_ledger has taken the running print off
     for t in trays:
         if t['grams'] is None or t.get('stale'): continue
-        raw, share, fix = t['grams'], owed.get(t['label'], 0.0), {}
+        raw, share, fix, over = t['grams'], owed.get(t['label'], 0.0), {}, 0.0
         if not t.get('entered'): fix = (learned or {}).get(t['label'], {})
-        elif not running or (t.get('accounted') == running and t.get('missed') != running): share = 0.0
+        elif not running: share = 0.0
+        elif t.get('accounted') == running and t.get('missed') != running: counted.add(t['label']); share, over = 0.0, min(share, t.get('over') or 0.0)
         base = fix.get('credited', raw)
         t['reading'] = raw
         if 'credited' in fix: t['credited'], t['evidence'] = base, fix['evidence']
         for key in ('pre', 'rho', 'margin', 'floor'):
             if fix.get(key) is not None: t[key], t[key + '_note'] = fix[key], fix[key + '_note']
-        if share or base < raw: t['reads'] = raw
+        if share or over or base < raw: t['reads'] = raw
         if share: t['owes'], t['reserved'] = share, min(base, share)
+        if over: t['owes'] = over
         t['grams'] = t['left'] = base - t.get('reserved', 0.0)
     order = order or {t['label']: t['left'] for t in trays if 'left' in t}
     for t in trays:
         excess = (t.get('owes') or 0.0) - (t.get('reserved') or 0.0)
         if excess <= 1e-6: continue
+        for o in trays:
+            g = min(excess, (o.get('gave') or {}).get(t['label'], 0.0)) if o['label'] in counted else 0.0
+            if g > 0: excess -= g; t.setdefault('taken', []).append((o['label'], g))
         for o in sorted((o for o in trays if 'left' in o and same_filament(t, o)), key=lambda o: -order.get(o['label'], 0.0)):
             g = min(o['grams'], excess)
             if g <= 0: continue

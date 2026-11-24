@@ -87,3 +87,23 @@ def run_job(rec, before=500.0, lost=2.0, per_layer=4.0, end='FINISH', fault=None
 
 def blue_reads(g):
     return dict(BLUE_JOB, gcode_state='IDLE', ams={'ams': [{'id': '2', 'tray': [{'id': '2', 'tray_type': 'PLA', 'tray_color': '0A2989FF', 'tray_info_idx': 'GFA00', 'remain_g': g, 'tray_weight': '1000'}]}]})
+
+def spool(tray, grams=None, typ='PLA', colour='101010', fid=''):
+    """One tray of AMS A as the printer reports it (0 is A1): with grams, a 1 kg spool it measures; without, a spool it
+    cannot measure."""
+    amount = {'remain_g': grams, 'remain': int(grams / 10), 'tray_weight': '1000'} if grams is not None else {'remain_g': -1, 'remain': -1, 'tray_weight': '0'}
+    return dict({'id': str(tray), 'tray_type': typ, 'tray_color': colour + 'FF', 'tray_info_idx': fid}, **amount)
+
+def printing(state, spools, name='Part', task='2', mapping=(0,), layer=0, layers=100, **more):
+    """The printer's status with a job on it that draws on AMS A, whose trays are `spools`; mapping: the tray of each of
+    the job's filaments."""
+    return dict({'gcode_state': state, 'subtask_name': name, 'task_id': task, 'layer_num': layer, 'total_layer_num': layers, 'mapping': list(mapping),
+                 'ams': {'ams': [{'id': '0', 'tray': spools}]}}, **more)
+
+def part(grams=300.0, title='Part', layers=100):
+    """The slice a job named Part is printed from: one filament, the same grams in each of its 100 layers."""
+    fg.remember_slice(title, 1, {'layers': layers, 'filaments': [{'slot': 1, 'grams': grams}]}, kept({1: [0.0] + [grams / layers] * layers}))
+
+def needing(grams, typ='PLA', colour='#101010'):
+    """A plate for the H2D that needs this much of one filament."""
+    return {'printer_model': 'Bambu Lab H2D', 'time': '', 'layers': 50, 'filaments': [{'slot': 1, 'type': typ, 'fid': '', 'colour': colour, 'name': typ, 'grams': float(grams), 'nozzle': None}]}
