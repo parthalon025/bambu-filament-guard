@@ -44,6 +44,8 @@ def tk_stand_in(monkeypatch):
         def configure(self, **k): self.k.update(k)
         def bind(self, key, then): self.keys[key] = then
         def destroy(self): self.k['destroyed'] = True
+        def winfo_exists(self): return not self.k.get('destroyed')
+        def lift(self): self.k['lifted'] = self.k.get('lifted', 0) + 1
         def geometry(self, where=None): self.k['geometry'] = where
         def winfo_reqheight(self): return 100
         def winfo_reqwidth(self): return 300
@@ -1212,3 +1214,19 @@ def test_the_amount_windows_buttons_can_be_reached_and_pressed_from_the_keyboard
     forget.keys['<Return>'](None); assert w.acts == [('amount', (tray, None))] and w.closed()
     running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 2))); res = fg.evaluate(fg.parse_plate(gcode()), CFG, 'Benchy')
     assert {x.k['takefocus'] for x in card_widgets(monkeypatch, res) if type(x).__name__ == 'Button'} == {0}
+
+@pytest.mark.windows
+def test_one_amount_window_at_a_time_and_it_goes_with_its_card(state, monkeypatch):
+    """The amount window belonged to nothing: every click on "Amount in Ext…" opened another, and each stayed topmost
+    over every program after the card and Bambu Studio had gone."""
+    import guard_ui
+    monkeypatch.setattr(guard_ui, 'theme', lambda: guard_ui.THEMES['dark']); monkeypatch.setattr(guard_ui, 'studio_window', lambda pid=None: None)
+    monkeypatch.setattr(guard_ui.Card, '_place', lambda card: None)
+    card = guard_ui.Card(None); w = amount_asked(monkeypatch, EXT, card=card); window, made = w.made[0], len(w.made)
+    w.scale.set('640'); card.ask_amount(None, EXT)                                           # the button again: the window that is open, brought forward
+    assert len(w.made) == made and window.k.get('lifted') == 1 and w.scale.get() == '640' and not w.closed()
+    card.close(); assert w.closed()                                                          # the card closed: its window goes with it
+    w = amount_asked(monkeypatch, EXT, card=card); assert not w.closed()                     # and a new one can be opened
+    card.note('Self-test: the guard works', []); assert w.closed()                           # another card in its place: the same
+    w = amount_asked(monkeypatch, EXT, card=card); w.scale.set('640'); w.save()              # saved and closed by itself: the next click opens one
+    again = amount_asked(monkeypatch, EXT, card=card); assert w.closed() and not again.closed() and again.made[0] is not w.made[0]

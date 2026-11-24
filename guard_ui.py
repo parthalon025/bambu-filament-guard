@@ -150,13 +150,21 @@ class Card:
         self.root, self.win, self.act, self.on_close = root, None, act or (lambda *a: None), on_close
         self.owner, self.beside, self.spot, self.held = None, None, None, False
         self.empty_spool, self.alone = fg.DEFAULTS['empty_spool_g'], False
+        self.asking = None                                                   # the amount window that is open, if one is: one at a time, and it goes with its card
         self.one_line = False                                                # the card open is one line, which a new line may replace
         self.closes_after = 0                                                # seconds the open card stays once it is on screen; 0 = until closed
 
     def is_open(self):
         return bool(self.win and self.win.winfo_exists())
 
+    def _unask(self):
+        """Closes the amount window with the card it came from: it belonged to nothing, and stayed topmost over every
+        program after the card and Bambu Studio had gone."""
+        if self.asking is not None and self.asking.winfo_exists(): self.asking.destroy()
+        self.asking = None
+
     def close(self):
+        self._unask()
         if self.is_open(): self.win.destroy()
         self.win = None
         if self.on_close: self.on_close()
@@ -183,6 +191,7 @@ class Card:
     # -- building blocks
     def _open(self, pid=None, beside=None, hold=False):
         import tkinter as tk
+        self._unask()
         if self.is_open(): self.win.destroy()
         t = self.t = theme()
         self.beside = beside if visible(beside) else None
@@ -345,7 +354,8 @@ class Card:
         against: what the scale shows and what the empty spool weighs, the filament being the difference. An ordinary
         small window: it has to take the keyboard."""
         import tkinter as tk
-        t = self.t; d = tk.Toplevel(self.root, bg=t['surface'], padx=3 * SPACE, pady=3 * SPACE)
+        if self.asking is not None and self.asking.winfo_exists(): self.asking.lift(); self.asking.focus_force(); return   # every click on the button opened another
+        t = self.t; d = self.asking = tk.Toplevel(self.root, bg=t['surface'], padx=3 * SPACE, pady=3 * SPACE)
         d.title('Bambu Filament Guard'); d.attributes('-topmost', True); d.resizable(False, False)
         self._label(d, f"Filament {'on the spool' if weigh else 'left'} in {tray['label']} ({tray['name'] or tray['type']})", size=10, bold=True, row=0, column=0, columnspan=3)
         self._label(d, 'Put the spool on a scale. The filament is what the scale shows less the empty spool (a Bambu spool: about 250 g; 0 if you weighed the filament alone). '
