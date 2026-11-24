@@ -385,7 +385,7 @@ def test_the_guard_says_at_its_start_which_settings_are_not_in_use(state, monkey
     """A value in config.json the guard cannot use: it starts on the default for that setting, and a card says which."""
     (state / 'config.json').write_text('{"margin_pct": "25", "spool_reserve_pct": 5}')
     assert started(monkeypatch) == (0, [('Settings in config.json are not in use', [
-        (False, 'margin_pct in config.json is "25", not a number from 0 to 100: the default is in use.'),
+        (False, 'margin_pct in config.json is "25", not a number from 0 to 1000: the default is in use.'),
         (None, f'The file is {fg.CONFIG}. The guard reads it when it starts.')], 'danger')])
     (state / 'config.json').write_text('{"spool_reserve_pct": 5}')
     assert started(monkeypatch) == (0, [])                                                # nothing wrong: no card
@@ -397,7 +397,7 @@ def no_studio():
 def test_the_self_test_fails_on_a_setting_that_is_not_in_use(state, monkeypatch):
     """What config.json holds and the guard cannot use is the self-test's first failed line, with Bambu Studio found or not."""
     import guard_ui
-    (state / 'config.json').write_text('{"margin_pct": "25"}'); wrong = (False, 'margin_pct in config.json is "25", not a number from 0 to 100: the default is in use')
+    (state / 'config.json').write_text('{"margin_pct": "25"}'); wrong = (False, 'margin_pct in config.json is "25", not a number from 0 to 1000: the default is in use')
     monkeypatch.setattr(fg, 'bs_conf', lambda: {'app': {'version': '02.09.01.70'}}); monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None)
     monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {})
     assert fg.selftest(fg.load_config())[0] == wrong

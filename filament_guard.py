@@ -91,7 +91,7 @@ def number(low, high):
 ON_OFF = (lambda v: type(v) is bool), 'true or false'
 # What config.json may hold for each setting: (is this value one?, what one is, in words). A value that is none is not
 # used: "poll_seconds": "2" once ended the watcher's thread, "popup_on": null every card, "learn": "off" left learning on.
-SETTINGS = {'margin_pct': number(0, 100), 'spool_reserve_pct': number(0, 100), 'colour_tolerance': number(0, 765),
+SETTINGS = {'margin_pct': number(0, 1000), 'spool_reserve_pct': number(0, 100), 'colour_tolerance': number(0, 765),
             'popup_on': ((lambda v: type(v) is list and all(type(s) is str and s in SEVERITY for s in v)), 'a list of ' + ', '.join(f'"{s}"' for s in SEVERITY)),
             'ok_seconds': number(0, 3600), 'at_send': ON_OFF, 'poll_seconds': number(0.2, 30), 'learn': ON_OFF, 'measured_reserve': ON_OFF, 'empty_spool_g': number(0, 5000)}
 

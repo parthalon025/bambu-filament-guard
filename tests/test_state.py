@@ -65,7 +65,7 @@ def test_a_setting_of_the_wrong_kind_falls_back_to_its_default_alone_and_is_name
     cfg = fg.load_config(); bad = ('margin_pct', 'measured_reserve', 'learn', 'popup_on', 'poll_seconds', 'empty_spool_g')
     assert {k: cfg[k] for k in bad} == {k: fg.DEFAULTS[k] for k in bad} and cfg['spool_reserve_pct'] == 5
     assert cfg['printers'] == {'SERIAL1': {'ip': '192.0.2.50'}, 'SERIAL2': {'ip': '192.0.2.51'}}
-    assert len(cfg['_wrong']) == 7 and 'margin_pct in config.json is "25", not a number from 0 to 100: the default is in use' in cfg['_wrong']
+    assert len(cfg['_wrong']) == 7 and 'margin_pct in config.json is "25", not a number from 0 to 1000: the default is in use' in cfg['_wrong']
     assert 'measured_reserve in config.json is "false", not true or false: the default is in use' in cfg['_wrong']
     assert any(line.startswith('printers in config.json: the address for the printer …IAL3 is 5') for line in cfg['_wrong'])
     cfg['ok_seconds'] = 0; fg.save_config(cfg, 'ok_seconds')
@@ -218,3 +218,11 @@ def test_a_write_of_the_state_that_fails_leaves_no_temp_file(state):
     fg.update_state(lambda st: st.__setitem__('x', 1))
     with pytest.raises(TypeError): fg.save_state({'x': 1, 'y': {1, 2}})
     assert sorted(os.listdir(state)) == ['state.json'] and fg.load_state() == {'x': 1}
+
+def test_a_margin_stricter_than_any_default_is_a_setting_not_a_mistake(state):
+    """A value out of its range falls back to the default, which for a margin above 100 % of the need would be the
+    looser of the two: such a margin is taken as written. One below zero is not a margin."""
+    (state / 'config.json').write_text('{"margin_pct": 150}')
+    assert fg.load_config()['margin_pct'] == 150 and '_wrong' not in fg.load_config()
+    (state / 'config.json').write_text('{"margin_pct": -5}')
+    assert fg.load_config()['margin_pct'] == 10 and fg.load_config()['_wrong'] == ['margin_pct in config.json is -5, not a number from 0 to 1000: the default is in use']
