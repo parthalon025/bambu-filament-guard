@@ -206,12 +206,15 @@ def test_learned_says_what_was_learned_and_forget_empties_it(state, monkeypatch,
     fg.save_config(MEASURED)                                                                  # the measured reserve turned on: what it still needs is said
     assert fg.main(['learned']) == 0
     out = capsys.readouterr().out
-    assert out.startswith('Learning from prints is on\nSERIAL\n  reserve: the reserve is the fixed one: 8 more scored prints and 2 more readings at empty in a tray that has one measure it\n')
+    assert out.startswith('Learning from prints is on\nSERIAL\n  reserve: the fixed one; to be measured it still needs 8 more scored prints and 2 more readings at empty, of other spools, in a tray that already has one\n')
     assert '  C3: 1 print recorded, 1 sound, 1 scored; 1 run-dry\n    forecast of the fall, off by on average: learned 1.0 g, without learning 1.0 g\n' in out
     assert 'rate  1.000 g per sliced gram (its own 1.000 over 1 print)' in out and 'pre   1.0 g (its own 1.0 g over 1 print)' in out
     assert 'empty 20 g: the most it reads with its spool empty (from its own spools); seen: 20 g ran dry; 1 spool still feeding at 462 g or more' in out
     assert 'ran dry 19 Nov 14:00 at layer 9 of "Benchy", reading 20 g, 1.0 g still to go' in out and 'per gram printed / purged: not enough to tell' in out
-    assert 'margin not in use: 8 more scored prints on the printer, 2 more readings at empty in a tray that has one' in out
+    assert 'margin not in use: 8 more scored prints; 2 more readings at empty, of other spools, in a tray that already has one\n' in out
+    fg.save_config(CFG); assert fg.main(['learned']) == 0                                    # as the settings come: the measured reserve is off
+    out = capsys.readouterr().out
+    assert '\n  reserve: the fixed one (measuring it from past prints is experimental, and off)\n' in out and 'in a tray that already has one; the setting is off\n' in out
     assert fg.main(['learned', '--forget']) == 0 and gn.load() == {}
 
 def test_printed_and_purged_are_told_apart_only_when_the_jobs_differ_enough():
@@ -287,11 +290,11 @@ def test_the_reserve_is_measured_once_there_are_nine_scored_prints_and_repeated_
     running(monkeypatch, blue_reads(130)); res = fg.evaluate(BLUE, MEASURED, 'Benchy'); row = res['rows'][0]
     a = 20 + gs.t_quantile(0.9, 2) * 2 * (4 / 3) ** 0.5                                       # three readings at empty, 2 g apart: one more spool's bound
     assert row['status'] == 'OK' and row['measured'] and row['reserve'] == 5.0 and row['trays'][0]['grams'] == pytest.approx(130 - a)
-    assert res['printer']['reserve'] == 'the reserve is measured from 9 scored prints and 3 readings at empty' and row['need'] > 85.3 + 1.0
+    assert res['printer']['reserve'] == 'the reserve is measured from 9 scored prints and readings at empty of 3 spools' and row['need'] > 85.3 + 1.0
     assert "C3: its reading falls 1.002 g per sliced gram (9 of its prints, drawn to the printer's), which the need is counted by" in row['note']
     assert not fg.DEFAULTS['measured_reserve']
     off = fg.evaluate(BLUE, CFG, 'Benchy')                                                    # the setting off, as it is unless turned on: the fixed reserve, 30 g
-    assert off['rows'][0]['status'] == 'TIGHT' and not off['rows'][0]['measured'] and off['printer']['reserve'] == 'the reserve is the fixed one (measuring it is off)'
+    assert off['rows'][0]['status'] == 'TIGHT' and not off['rows'][0]['measured'] and off['printer']['reserve'] is None and "the AMS's figure can be 30 g out" in off['rows'][0]['note']
     gn.save({'SERIAL': {'C3': {'jobs': [scored(110.0 + e, at=float(i)) for i, e in enumerate(errors)], 'dry': [empty_at(r, 50.0 + i, f'S{i}') for i, r in enumerate((20.0, 22.0, 18.0))]}}})
     row = fg.evaluate(BLUE, MEASURED, 'Benchy')['rows'][0]                                     # forecasts that fell up to 12 g short of 100 g
     assert row['measured'] and row['reserve'] == pytest.approx(12 / 120 * (85.3 + gn.MARGIN_K))
@@ -301,6 +304,26 @@ def test_the_reserve_is_measured_once_there_are_nine_scored_prints_and_repeated_
     assert fg.evaluate(BLUE, MEASURED, 'Benchy')['rows'][0]['reserve'] == 5.0                # forecasts that fell long: never below the floor
     gn.save({'SERIAL': {'C3': {'jobs': [scored(101.0, at=float(i)) for i in range(9)]}, 'B1': {'dry': [empty_at(r, 50.0 + i, f'S{i}') for i, r in enumerate((20.0, 22.0, 18.0))]}}})
     assert not fg.evaluate(BLUE, MEASURED, 'Benchy')['rows'][0]['measured']                    # readings at empty of another tray only: the fixed reserve
+
+def test_the_card_names_the_reserve_its_rows_used_and_says_nothing_of_it_with_the_setting_off(state, monkeypatch):
+    """The review's case: nine scored prints on C3, run-dries only in B1. C3's row used the fixed reserve, and the card
+    said "the reserve is measured from 9 scored prints and 3 readings at empty"."""
+    dries = [empty_at(r, 50.0 + i, f'S{i}') for i, r in enumerate((20.0, 22.0, 18.0))]
+    gn.save({'SERIAL': {'C3': {'jobs': [scored(101.0, at=float(i)) for i in range(9)]}, 'B1': {'dry': dries}}})
+    running(monkeypatch, blue_reads(130)); res = fg.evaluate(BLUE, MEASURED, 'Benchy')
+    assert (res['rows'][0]['status'], res['rows'][0]['measured'], res['rows'][0]['reserve']) == ('TIGHT', False, 30.0)
+    assert res['printer']['reserve'] == 'the reserve is the fixed one; it is measured only for a tray that has a reading at empty of its own'
+    assert '; the reserve is the fixed one; it is measured only for a tray' in fg.report_text(res)
+    assert fg.evaluate(BLUE, CFG, 'Benchy')['printer']['reserve'] is None and 'reserve' not in fg.report_text(fg.evaluate(BLUE, CFG, 'Benchy'))   # off: nothing to say
+    gn.save({'SERIAL': {'C3': {'jobs': [scored(101.0, at=float(i)) for i in range(4)], 'dry': dries[:2]}}})
+    assert fg.evaluate(BLUE, MEASURED, 'Benchy')['printer']['reserve'] == 'the reserve is the fixed one; to be measured it still needs 5 more scored prints and 1 more reading at empty, of another spool, in a tray that already has one'
+    gn.save({'SERIAL': {'C3': {'jobs': [scored(101.0, at=float(i)) for i in range(8)]}}})
+    assert fg.evaluate(BLUE, MEASURED, 'Benchy')['printer']['reserve'] == 'the reserve is the fixed one; to be measured it still needs 1 more scored print and readings at empty of 3 spools in one tray, or of 2 in each of two'
+    measured, fixed, none = ({'reserve': 5.0, 'measured': True, 'trays': [{'label': 'C3'}]}, {'reserve': 30.0, 'measured': False, 'trays': [{'label': 'B1'}]}, {'trays': []})
+    earned = {'S': {'C3': {'jobs': [scored(101.0, at=float(i)) for i in range(9)], 'dry': dries}}}
+    assert gn.reserve_words('S', [measured, fixed, none], earned, MEASURED) == 'for C3 the reserve is measured from 9 scored prints and readings at empty of 3 spools; for the other filaments it is the fixed one'
+    assert gn.reserve_words('S', [measured, none], earned, MEASURED) == 'the reserve is measured from 9 scored prints and readings at empty of 3 spools'
+    assert gn.reserve_words('S', [none], earned, MEASURED) == '' and gn.reserve_words('S', [measured, fixed], earned, CFG) == '' and gn.reserve_words('S', [measured], earned) == ''
 
 def test_the_measured_reserve_is_used_only_when_it_is_turned_on(state, monkeypatch, capsys):
     """Experimental, and off unless turned on: with nine scored prints and three readings at empty, a check with the

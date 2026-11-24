@@ -37,7 +37,7 @@ The reserve is the fixed one (see [What the results mean](using.md#the-reserve))
 
 This is experimental, and off unless you turn it on: "Measure the reserve from past prints (experimental)" in the icon's settings (`measured_reserve`). 1.4.0 had it on.
 
-With it on, the reserve stays the fixed one until the printer has 9 scored prints and readings at empty of different spools that repeat within a tray (3 spools in one tray, or 2 in each of two: their spread from spool to spool is then known), and the tray judged has one of its own. Then it is the margin x (N + 20 g), never below 5 g or 2 % of the need, and the tray is counted by the model alone, without 1.3.0's rules. It can be smaller than the fixed one: a tray that proves accurate is no longer called "tight" on 3 % of its spool. The card says which reserve it used, and on what.
+With it on, the reserve stays the fixed one until the printer has 9 scored prints and readings at empty of different spools that repeat within a tray (3 spools in one tray, or 2 in each of two: their spread from spool to spool is then known), and the tray judged has one of its own. Then it is the margin x (N + 20 g), never below 5 g or 2 % of the need, and the tray is counted by the model alone, without 1.3.0's rules. It can be smaller than the fixed one: a tray that proves accurate is no longer called "tight" on 3 % of its spool. The card then names the reserve its rows used: the measured one and what it rests on, or the fixed one and what the measured one still lacks. With the setting off the card has no line about the reserve.
 
 ### What the measured reserve cannot see
 

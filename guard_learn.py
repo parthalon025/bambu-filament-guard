@@ -422,14 +422,28 @@ def a_words(t):
     whose = "spools in this printer's trays" if t['a_from'] == 'printer' else 'spools in it'
     return f"{whose} read up to {t['a']:.0f} g when empty" + (f' ({seen})' if seen else '')
 
-def reserve_words(serial, history=None, cfg=None):
-    """The reserve a check on this printer uses, in one short clause."""
+def lacking(p):
+    """What a printer (estimates' 'printer') still lacks before a reserve can be measured on it, in words; [] when nothing."""
+    more = SPREAD_DF - p['df']
+    return [x for x in (many(SCORED_MIN - p['scored'], 'more scored print') if p['scored'] < SCORED_MIN else '',
+                        '' if more <= 0 else 'readings at empty of 3 spools in one tray, or of 2 in each of two' if not p['spools'] else
+                        f"{many(more, 'more reading')} at empty, of {'another spool' if more == 1 else 'other spools'}, in a tray that already has one") if x]
+
+def reserve_words(serial, rows, history=None, cfg=None):
+    """The card's footnote on the reserve, in one clause: which reserve the rows of this check used, and what the measured
+    one still lacks. '' with the measured reserve off, as it is unless turned on: the reserve is then the fixed one,
+    and there is nothing to add to what the results say. '' also when no row came to a reserve (nothing loaded to
+    judge)."""
+    judged = [r for r in rows if r.get('reserve') is not None]
+    if not (cfg or {}).get('measured_reserve', False) or not judged: return ''
     p = estimates((load() if history is None else history).get(serial, {}))['printer']
-    if not (cfg or {}).get('measured_reserve', False): return 'the reserve is the fixed one (measuring it is off)'
-    if p['scored'] >= SCORED_MIN and p['df'] >= SPREAD_DF: return f"the reserve is measured from {p['scored']} scored prints and {p['spools']} readings at empty"
-    need = [x for x in (f"{SCORED_MIN - p['scored']} more scored prints" if p['scored'] < SCORED_MIN else '',
-                        f"{SPREAD_DF - p['df']} more readings at empty in a tray that has one" if p['df'] < SPREAD_DF else '') if x]
-    return 'the reserve is the fixed one: ' + ' and '.join(need) + ' measure it'
+    used = [r for r in judged if r.get('measured')]
+    if used:
+        measured = f"the reserve is measured from {many(p['scored'], 'scored print')} and readings at empty of {many(p['spools'], 'spool')}"
+        if len(used) == len(judged): return measured
+        return f"for {', '.join(sorted({r['trays'][0]['label'] for r in used}))} {measured}; for the other filaments it is the fixed one"
+    need = lacking(p)
+    return 'the reserve is the fixed one; ' + (f"to be measured it still needs {' and '.join(need)}" if need else 'it is measured only for a tray that has a reading at empty of its own')
 
 
 # ---------------------------------------------------------------- weigh-ins
@@ -671,7 +685,10 @@ def report(history, names=None, learning=True, cfg=None):
     for serial, by_tray in sorted(history.items()):
         est = estimates(by_tray); p = est['printer']
         lines.append(names.get(serial, serial))
-        lines.append(f"  reserve: {reserve_words(serial, history, cfg)}" + (f"; forecasts fell short by up to {p['q']:.3f} x (print + {MARGIN_K:.0f} g)" if p['q'] is not None else ''))
+        need = lacking(p)
+        lines.append('  reserve: ' + ('the fixed one (measuring it from past prints is experimental, and off)' if not on else
+                                      f"the fixed one; to be measured it still needs {' and '.join(need)}" if need else 'measured, for a tray that has a reading at empty of its own')
+                     + (f"; forecasts fell short by up to {p['q']:.3f} x (print + {MARGIN_K:.0f} g)" if p['q'] is not None else ''))
         if p['rho'] is not None:
             lines.append(f"  printer: readings fall {p['rho']:.3f} g per sliced gram over {many(p['ratios'], 'print')} (ratios clipped to {p['clip'][0]:.3f}..{p['clip'][1]:.3f}); "
                          + ('trays are drawn to it fully (they cannot be told apart)' if p['k_rho'] is None else f"a tray's own prints count against {p['k_rho']:.1f} of the printer's"))
@@ -703,10 +720,8 @@ def report(history, names=None, learning=True, cfg=None):
                              + (f", {d['needed']:.1f} g still to go" if d.get('needed') is not None else ''))
             if measured(est, t, on): lines.append(f"    margin {t['q']:.3f} x (print + {MARGIN_K:.0f} g): the measured reserve is in use")
             else:
-                why = [x for x in (f"{SCORED_MIN - p['scored']} more scored prints on the printer" if p['scored'] < SCORED_MIN else '',
-                                   f"{SPREAD_DF - p['df']} more readings at empty in a tray that has one" if p['df'] < SPREAD_DF else '',
-                                   'a reading at empty of its own' if len(t['spools']) < OWN_EXACT_MIN else '', 'the setting is off' if not on else '') if x]
-                lines.append('    margin not in use: ' + (', '.join(why) or 'no bound yet'))
+                why = need + [x for x in ('a reading at empty of its own' if len(t['spools']) < OWN_EXACT_MIN else '', 'the setting is off' if not on else '') if x]
+                lines.append('    margin not in use: ' + ('; '.join(why) or 'no bound yet'))
             split = printed_and_purged(jobs)
             lines.append('    per gram printed / purged: ' + (f'{split[0]:.3f} / {split[1]:.3f} g (a report only, not used)' if split else 'not enough to tell'))
     return lines

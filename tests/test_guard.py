@@ -215,7 +215,8 @@ def test_the_card_offers_a_weigh_in_records_it_and_checks_again(state, monkeypat
     running(monkeypatch, blue_reads(110))
     res = fg.evaluate(BLUE, CFG, 'Benchy')
     assert res['rows'][0]['status'] == 'TIGHT' and res['weigh']['label'] == 'C3' and res['weigh']['reading'] == 110
-    assert fg.evaluate(BLUE, MEASURED, 'Benchy')['printer']['reserve'] == 'the reserve is the fixed one: 9 more scored prints and 2 more readings at empty in a tray that has one measure it'
+    assert res['printer']['reserve'] is None                                                # the measured reserve is off: the card has nothing to say of the reserve
+    assert fg.evaluate(BLUE, MEASURED, 'Benchy')['printer']['reserve'] == 'the reserve is the fixed one; to be measured it still needs 9 more scored prints and readings at empty of 3 spools in one tray, or of 2 in each of two'
     guard, again = guard_with(), []
     monkeypatch.setattr(guard, 'recheck', lambda res, beside=None: again.append(res['title']))
     guard.act('asked', res, res['weigh'])

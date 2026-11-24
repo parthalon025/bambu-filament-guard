@@ -795,7 +795,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         share_spools(rows, plate['filaments'], trays, cfg, times)
         reserve = None
         if cfg.get('learn'):
-            reserve = guard_learn.reserve_words(printer['serial'], cfg=cfg)
+            reserve = guard_learn.reserve_words(printer['serial'], rows, cfg=cfg) or None
             offer = guard_learn.weigh_offer(printer['serial'], rows, cfg)
             if offer: res['weigh'] = offer
     except Exception as e:                   # a status the guard does not understand must end as a card that says so, not as a line in the log
