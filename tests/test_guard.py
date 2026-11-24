@@ -847,7 +847,7 @@ def test_forget_what_was_learned_is_among_the_settings_away_from_quit(state, mon
 def amount_asked(monkeypatch, tray, weigh=False, act=None, card=None, res=None):
     """The window guard_ui opens for a tray's amount, on the stand-in for tkinter, with its parts by name: the two
     fields (scale, spool), the labels of the result and of what is wrong, what Save does, every text in it (texts), the
-    buttons by their text, what it told the guard (acts) and whether it has closed. act: what telling the guard does;
+    buttons by their text, what it told the guard (acts), whether it has closed, and its widgets as made. act: what telling the guard does;
     card: the card it belongs to, else one that starts from an empty spool of 200 g."""
     import guard_ui, types
     made, w = tk_stand_in(monkeypatch), types.SimpleNamespace(acts=[])
@@ -861,6 +861,7 @@ def amount_asked(monkeypatch, tray, weigh=False, act=None, card=None, res=None):
     w.result, w.wrong = [x for x in made if type(x).__name__ == 'Label'][-2:]
     w.buttons = {x.k['text']: x.k['command'] for x in made if type(x).__name__ == 'Button'}
     w.save, w.texts, w.closed = w.buttons['Save'], lambda: [x.k['text'] for x in made if type(x).__name__ == 'Label'], lambda: bool(made[0].k.get('destroyed'))
+    w.made = made
     return w
 
 EXT = {'label': 'Ext', 'name': '', 'type': 'PETG', 'colour': '#101010', 'grams': None}
@@ -1200,3 +1201,14 @@ def test_the_footnote_says_whose_the_amounts_are_for_the_rows_shown(state, monke
     assert footnote(dict(spools((BLUE_PLA, 500)), vt_tray=black), both) == start + "; the amounts are the AMS's estimate, but for Ext: entered by hand, less the prints since."
     assert footnote(spools((BLUE_PLA, 500), (RED_PLA, 500)), gcode()) == start + "; the amounts are the AMS's estimate."            # as before, where it is true
     assert footnote({'gcode_state': 'IDLE', 'vt_tray': dict(black, remain_g=300)}, petg) == start + "; the amounts are the printer's estimate."   # a reading from no AMS
+
+@pytest.mark.windows
+def test_the_amount_windows_buttons_can_be_reached_and_pressed_from_the_keyboard(state, monkeypatch):
+    """Tab moved between the two fields only: "Forget this amount" had no way to it without the mouse. The window's
+    buttons take the focus, and Return presses the one that has it. The card's own buttons still never do."""
+    tray = dict(EXT, grams=300.0, entered=1e6); w = amount_asked(monkeypatch, tray)
+    save, forget = [x for x in w.made if type(x).__name__ == 'Button']
+    assert (save.k['text'], forget.k['text'], save.k['takefocus'], forget.k['takefocus']) == ('Save', 'Forget this amount', 1, 1)
+    forget.keys['<Return>'](None); assert w.acts == [('amount', (tray, None))] and w.closed()
+    running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 2))); res = fg.evaluate(fg.parse_plate(gcode()), CFG, 'Benchy')
+    assert {x.k['takefocus'] for x in card_widgets(monkeypatch, res) if type(x).__name__ == 'Button'} == {0}

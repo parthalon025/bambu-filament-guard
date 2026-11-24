@@ -203,11 +203,14 @@ class Card:
         l = tk.Label(parent, text=text, bg=parent['bg'], fg=self.t[colour], font=('Segoe UI', size, 'bold' if bold else 'normal'), justify='left', anchor='w', wraplength=wrap)
         l.grid(sticky='w', **grid); return l
 
-    def _button(self, parent, text, command, **grid):
+    def _button(self, parent, text, command, focus=False, **grid):
+        """focus: a button of a window that takes the keyboard (the amount window), reached by Tab and pressed by Return;
+        the card's own never take the focus."""
         import tkinter as tk
         t = self.t
         b = tk.Button(parent, text=text, command=command, bg=t['raised'], fg=t['text'], activebackground=t['border'], activeforeground=t['text'],
-                      disabledforeground=t['muted'], relief='flat', bd=0, font=('Segoe UI', 9), padx=2 * SPACE, pady=SPACE // 2, takefocus=0)
+                      disabledforeground=t['muted'], relief='flat', bd=0, font=('Segoe UI', 9), padx=2 * SPACE, pady=SPACE // 2, takefocus=1 if focus else 0)
+        if focus: b.bind('<Return>', lambda event: command())
         b.grid(**grid); return b
 
     def _place(self):
@@ -384,8 +387,8 @@ class Card:
             spool_g = tare()
             if done(grams) and spool_g: self.act('spool', res, spool_g)     # after the amount, which it must not cost: the next window starts with this spool's weight (not with 0)
         bar = tk.Frame(d, bg=t['surface']); bar.grid(row=6, column=0, columnspan=3, sticky='w', pady=(SPACE, 0))
-        self._button(bar, 'Save', accept, row=0, column=0)
-        if not weigh and (tray.get('entered') or tray.get('stale')): self._button(bar, 'Forget this amount', lambda: done(None), row=0, column=1, padx=(SPACE, 0))
+        self._button(bar, 'Save', accept, focus=True, row=0, column=0)
+        if not weigh and (tray.get('entered') or tray.get('stale')): self._button(bar, 'Forget this amount', lambda: done(None), focus=True, row=0, column=1, padx=(SPACE, 0))
         for e in (entry, empty): e.bind('<Return>', accept)
         d.bind('<Escape>', lambda e: d.destroy())
         d.update_idletasks()
