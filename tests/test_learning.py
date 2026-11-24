@@ -588,3 +588,37 @@ def test_learning_that_fails_costs_no_check_and_the_answer_says_so(state, monkey
     assert fg.main(['learned']) == 1 and capsys.readouterr().out == 'What was learned cannot be shown (ZeroDivisionError: division by zero). "learned --forget" starts again from nothing.\n'
     assert 'learned: ZeroDivisionError: division by zero' in (state / 'guard.log').read_text() and fg.main(['learned', '--forget']) == 0 and gn.load() == {}
 
+def test_no_weigh_in_is_offered_while_a_job_is_on_the_printer(state, monkeypatch):
+    """Its readings are moving: the review weighed a spool after the running print had taken 60 g of it, against the
+    reading the card had shown before."""
+    for busy in fg.BUSY:
+        running(monkeypatch, dict(blue_reads(110), gcode_state=busy)); res = fg.evaluate(BLUE, CFG, 'Benchy')
+        assert res['rows'][0]['status'] == 'TIGHT' and 'weigh' not in res
+    for at_rest in ('IDLE', 'FINISH', 'FAILED'):
+        running(monkeypatch, dict(blue_reads(110), gcode_state=at_rest)); assert fg.evaluate(BLUE, CFG, 'Benchy')['weigh']['label'] == 'C3'
+    row = fg.assess(fil(85.3), fg.credit([dict(tray('C3', 110, weight=1000), spool=TAG)], {}), CFG)
+    assert gn.weigh_offer('S', [row], CFG, now=1e6, busy=True) is None and gn.weigh_offer('S', [row], CFG, now=1e6)['label'] == 'C3'
+
+def test_a_mistaken_weigh_in_can_be_taken_back_and_the_rest_stays(state, monkeypatch, capsys):
+    """A wrong weight for a spool near empty is a reading at empty for good, and lowers every tray on the printer:
+    `learned --forget-weigh C3` takes the tray's latest weigh-in back, and nothing else."""
+    monkeypatch.setattr(fg, 'bs_conf', lambda: (_ for _ in ()).throw(OSError('no Bambu Studio here')))
+    spool = {'id': TAG, 'type': 'PLA', 'colour': '#0A2989', 'fid': 'GFA00', 'weight': 1000.0}
+    at = time.mktime((2026, 11, 19, 14, 0, 0, 0, 0, -1))
+    gn.keep('S1', 'C3', 'dry', empty_at(20.0)); gn.weigh('S1', 'C3', 110.0, 92.0, spool, now=at); gn.weigh('S1', 'C3', 110.0, 8.0, spool, now=at + 60)   # 8 typed for 86
+    b1 = lambda: gn.corrections('S1', [tray('B1', 300, weight=1000)], gn.load()).get('B1', {}).get('credited')
+    assert b1() == pytest.approx(300 - 102)                                                   # a tray that was never weighed, counted by the slip
+    assert fg.main(['learned', '--forget-weigh', 'C3']) == 0
+    assert capsys.readouterr().out == 'the weigh-in of C3 on S1 of 19 Nov, 8 g on a spool that read 110 g, is forgotten\n'
+    h = gn.load()['S1']['C3']
+    assert [w['weight'] for w in h['weighs']] == [92.0] and len(h['dry']) == 1 and b1() == pytest.approx(300 - 20)
+    assert 'the weigh-in of C3 on S1 of 19 Nov, 8 g on a spool that read 110 g, is forgotten' in (state / 'guard.log').read_text()
+    gn.weigh('S2', 'C3', 200.0, 180.0, spool, now=at)                                         # which printer's: as for --forget
+    assert fg.main(['learned', '--forget-weigh', 'C3']) == 1 and 'C3 is a tray of more than one printer: name one with --printer (S1, S2)' in capsys.readouterr().out
+    assert gn.forget_weigh('C3', 'Bambu Lab H2D', {'S2': 'Bambu Lab H2D'}).startswith('the weigh-in of C3 on Bambu Lab H2D of 19 Nov, 180 g')
+    assert fg.main(['learned', '--forget-weigh', 'C3', '--printer', 'S1']) == 0 and gn.load()['S1']['C3']['weighs'] == [] and gn.load()['S2']['C3']['weighs'] == []
+    for args, why in ((['C3'], 'no weigh-in of C3 is kept'), (['A1'], 'no weigh-in of A1 is kept'), (['C3', '--printer', 'S9'], 'no weigh-in of C3 is kept on S9')):
+        capsys.readouterr(); assert fg.main(['learned', '--forget-weigh'] + args) == 1 and capsys.readouterr().out == why + '\n'
+    with pytest.raises(SystemExit): fg.main(['learned', '--forget', '--forget-weigh', 'C3'])  # one or the other: never everything by a slip
+    assert len(gn.load()['S1']['C3']['dry']) == 1
+

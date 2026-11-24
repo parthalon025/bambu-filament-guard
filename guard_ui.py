@@ -312,15 +312,18 @@ class Card:
         entry, empty = field(2, 'On the scale, in grams', scale), field(3, 'Empty spool, in grams', spool)
         result = self._label(d, '', size=10, bold=True, row=4, column=0, columnspan=3)
         wrong = self._label(d, '', 'danger', 9, wrap=420, row=5, column=0, columnspan=3)
+        doubted = []                                                        # a weigh-in far from the reading has had its line shown: Save again saves it
         def show(*_):
             grams, _why = fg.filament_on(scale.get(), spool.get())
-            result.configure(text=f'{grams:.0f} g of filament' if grams is not None else ''); wrong.configure(text='')
+            result.configure(text=f'{grams:.0f} g of filament' if grams is not None else ''); wrong.configure(text=''); del doubted[:]   # a number changed: asked anew
         scale.trace_add('write', show); spool.trace_add('write', show); show()
         def done(grams):
             d.destroy(); self.act('weigh' if weigh else 'amount', res, (tray, grams))
         def accept(*_):
             grams, why = fg.filament_on(scale.get(), spool.get())
             if grams is None: wrong.configure(text=why); return
+            doubt = fg.weigh_doubt(grams, tray['reading']) if weigh else ''
+            if doubt and not doubted: doubted.append(grams); wrong.configure(text=doubt); return
             self.act('spool', res, fg.typed_grams(spool.get()) or 0)       # the next window starts with this spool's weight
             done(grams)
         bar = tk.Frame(d, bg=t['surface']); bar.grid(row=6, column=0, columnspan=3, sticky='w', pady=(SPACE, 0))

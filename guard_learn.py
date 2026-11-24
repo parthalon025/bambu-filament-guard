@@ -213,21 +213,41 @@ def keep(serial, label, kind, item, most=None):
     with fg.state_lock():
         history = load(); add(history, serial, label, kind, item); save(history)
 
+def whose(history, label, printer, names, kind=None):
+    """The serial of the printer whose tray `label` is meant (one with records of `kind`, when a kind is given): the one
+    `printer` names (its serial, or its model as names maps serials to models), or the only one there is. ValueError, in
+    words, when there is none, or more than one and none is named."""
+    mine = [s for s, trays in history.items() if (trays.get(label, {}).get(kind) if kind else label in trays) and (printer is None or printer in (s, names.get(s)))]
+    if not mine: raise ValueError((f'no weigh-in of {label} is kept' if kind == 'weighs' else f'nothing is learned of a tray {label}') + (f' on {printer}' if printer else ''))
+    if len(mine) > 1: raise ValueError(f"{label} is a tray of more than one printer: name one with --printer ({', '.join(names.get(s, s) for s in mine)})")
+    return mine[0]
+
 def forget(label=None, printer=None, names=None):
     """Empties the history, or one tray's: label, and printer (its serial, or its model as names maps serials to models)
     where more than one printer has such a tray. Returns what was forgotten, in words; ValueError when that cannot be
     told (no such tray, or which printer's)."""
     with fg.state_lock():
-        history = load()
+        history, names = load(), names or {}
         if label is None: what = 'everything learned'; history = {}
         else:
-            names = names or {}
-            mine = [s for s, trays in history.items() if label in trays and (printer is None or printer in (s, names.get(s)))]
-            if not mine: raise ValueError(f'nothing is learned of a tray {label}' + (f' on {printer}' if printer else ''))
-            if len(mine) > 1: raise ValueError(f"{label} is a tray of more than one printer: name one with --printer ({', '.join(names.get(s, s) for s in mine)})")
-            del history[mine[0]][label]
-            what = f'what was learned of {label} on {names.get(mine[0], mine[0])}'
+            serial = whose(history, label, printer, names)
+            del history[serial][label]
+            what = f'what was learned of {label} on {names.get(serial, serial)}'
         save(history)
+    fg.log(f'{what} is forgotten')
+    return what
+
+def forget_weigh(label, printer=None, names=None):
+    """Takes back the latest weigh-in of a tray, and leaves the rest of what was learned of it: a wrong weight (a slipped
+    key, another spool on the scale) is otherwise kept for as long as the tray's readings do not change, and counts
+    every tray of the printer lower. Which printer's tray: as for forget, among those that have a weigh-in of it.
+    Returns what was taken back, in words; ValueError when there is none, or it cannot be told which printer's."""
+    with fg.state_lock():
+        history, names = load(), names or {}
+        serial = whose(history, label, printer, names, 'weighs')
+        w = history[serial][label]['weighs'].pop()
+        save(history)
+    what = f"the weigh-in of {label} on {names.get(serial, serial)} of {day(w['at'])}, {w['weight']:.0f} g on a spool that read {w['reading']:.0f} g,"
     fg.log(f'{what} is forgotten')
     return what
 
@@ -514,12 +534,13 @@ def weigh(serial, label, reading, grams, spool, now=None):
     keep(serial, label, 'weighs', {'at': now, 'reading': reading, 'weight': float(grams), 'spool': spool})
     fg.log(f'{label}: weighed, {grams:.0f} g on a spool that read {reading:.0f} g')
 
-def weigh_offer(serial, rows, cfg, now=None, state=None):
+def weigh_offer(serial, rows, cfg, now=None, state=None, busy=False):
     """The tray whose weighing would settle a check, or None: a row the check finds short of enough (tight, two spools,
     not enough) that would be enough at the hopeful end of what is known (its reading taken as true, the sliced need,
     the reserve's floor), on a spool the printer measures; at most once a week per tray and once a day in all, never
-    for a quiet guard (no one-line cards) or with learning off."""
-    if not cfg.get('learn') or not cfg.get('ok_seconds'): return None
+    for a quiet guard (no one-line cards) or with learning off, and never while a job is on the printer (busy): its
+    readings are moving, and a spool weighed then is set against a reading it no longer has."""
+    if not cfg.get('learn') or not cfg.get('ok_seconds') or busy: return None
     now = time.time() if now is None else now
     asked = ((state if state is not None else fg.load_state()).get('weigh_asked') or {}).get(serial, {})
     if now - asked.get('', 0) < WEIGH_ANY: return None

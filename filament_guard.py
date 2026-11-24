@@ -14,7 +14,8 @@ short. The card comes back beside the "Send print job" dialog while a warning st
                                        Exit code 0 enough, 1 tight / unknown, 2 short, 3 not checked.
   filament_guard.py trays              the spools every known printer reports
   filament_guard.py learned [--forget [TRAY]] what was learned from previous prints, per tray (--forget: start again,
-                                       for one tray only when named; --printer names the printer where two have it)
+                                       for one tray only when named; --forget-weigh TRAY: take back that tray's latest
+                                       weigh-in; --printer names the printer where two have the tray)
   filament_guard.py selftest           can the guard read this Bambu Studio and reach the printers? Exit code 1 = no
   filament_guard.py watch              the guard itself (what the shortcut runs; --no-start-line: setup's card says it)
   filament_guard.py setup              install, and say so on a card (what Install.cmd of the packaged guard runs)
@@ -106,6 +107,16 @@ def filament_on(scale, spool):
     if gross <= tare: return None, 'The scale shows no more than the empty spool weighs: no filament would be left.'
     if gross - tare > 10000: return None, 'More than 10000 g of filament: not a spool.'
     return gross - tare, None
+
+def weigh_doubt(grams, reading):
+    """'' when a spool weighed at `grams` of filament is within what a gauge can be out of the printer's `reading`, either
+    way (guard_learn.DRY_MOST); else the line the weigh-in window shows in place of saving. A slipped key, another spool
+    on the scale or a reading that has moved on since would be kept as what the tray reads at empty, and count every
+    tray of the printer lower. Saving again takes the weight as right."""
+    import guard_learn
+    apart = abs(grams - reading)
+    if apart <= guard_learn.DRY_MOST: return ''
+    return f'{grams:.0f} g weighed, {reading:.0f} g read by the printer: {apart:.0f} g apart. Save again if the weight is right.'
 
 def save_config(cfg):
     """Only what differs from DEFAULTS goes into config.json: a full copy would pin today's defaults for good."""
@@ -799,7 +810,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         share_spools(rows, plate['filaments'], trays, cfg, times)
         if cfg.get('learn') and not unlearned:
             reserve = guard_learn.reserve_words(printer['serial'], rows, history, cfg) or None
-            offer = guard_learn.weigh_offer(printer['serial'], rows, cfg)
+            offer = guard_learn.weigh_offer(printer['serial'], rows, cfg, busy=status.get('gcode_state') in BUSY)
             if offer: res['weigh'] = offer
     except Exception as e:                   # a status the guard does not understand must end as a card that says so, not as a line in the log
         res['error'] = f"the {printer['model']}'s report could not be worked out ({e.__class__.__name__}: {e})"
@@ -1379,9 +1390,10 @@ def main(argv=None):
     c = sub.add_parser('check'); c.add_argument('file', nargs='?'); c.add_argument('--times', type=int, default=1)
     c.add_argument('--popup', action='store_true'); c.add_argument('--json', action='store_true')
     sub.add_parser('watch').add_argument('--no-start-line', action='store_true')
-    learned = sub.add_parser('learned')
-    learned.add_argument('--forget', nargs='?', const='', metavar='TRAY', help='forget what was learned: everything, or one tray (e.g. C3)')
-    learned.add_argument('--printer', help='with --forget TRAY: the printer, by serial or model, when more than one has that tray')
+    learned = sub.add_parser('learned'); forgets = learned.add_mutually_exclusive_group()
+    forgets.add_argument('--forget', nargs='?', const='', metavar='TRAY', help='forget what was learned: everything, or one tray (e.g. C3)')
+    forgets.add_argument('--forget-weigh', metavar='TRAY', help="take back that tray's latest weigh-in (e.g. C3): the rest of what was learned stays")
+    learned.add_argument('--printer', help='with --forget TRAY or --forget-weigh TRAY: the printer, by serial or model, when more than one has that tray')
     for name in ('install', 'uninstall', 'setup', 'status', 'stop', 'trays', 'selftest'): sub.add_parser(name)
     a = ap.parse_args(argv)
     if a.cmd == 'watch': return watch(start_line=not a.no_start_line)
@@ -1401,8 +1413,8 @@ def main(argv=None):
         import guard_learn
         try: names = {p['serial']: p['model'] for p in known_printers(bs_conf())}
         except (OSError, ValueError): names = {}
-        if a.forget is not None:
-            try: print(guard_learn.forget(a.forget or None, a.printer, names), 'is forgotten'); return 0
+        if a.forget is not None or a.forget_weigh:
+            try: print(guard_learn.forget_weigh(a.forget_weigh, a.printer, names) if a.forget_weigh else guard_learn.forget(a.forget or None, a.printer, names), 'is forgotten'); return 0
             except ValueError as e: print(e); return 1
         try: lines = guard_learn.report(guard_learn.load(), names, cfg.get('learn'), cfg)
         except Exception as e:               # a history that cannot be shown must still say so, and how to start again

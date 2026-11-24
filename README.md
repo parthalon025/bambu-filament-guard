@@ -116,7 +116,8 @@ python filament_guard.py status       # running? where is the log?
 python filament_guard.py check        # the newest slice of the running Bambu Studio, as text
 python filament_guard.py check FILE.gcode.3mf --times 9   # nine prints of a sliced file
 python filament_guard.py trays        # the spools each printer reports
-python filament_guard.py learned      # what was learned from previous prints, per tray; --forget [TRAY] starts again
+python filament_guard.py learned      # what was learned from previous prints, per tray; --forget [TRAY] starts again,
+                                      # --forget-weigh TRAY takes back that tray's latest weigh-in
 python filament_guard.py selftest     # can the guard read this Bambu Studio and reach the printers?
 python filament_guard.py uninstall    # remove the shortcut and stop
 ```

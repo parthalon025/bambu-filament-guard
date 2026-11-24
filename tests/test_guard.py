@@ -64,6 +64,18 @@ def card_shown(monkeypatch, res, brief=0):
     guard_ui.Card(None, act=lambda name, res, arg=None: order.append((name, arg))).show(res, brief)
     return [w.k['text'] for w in made if type(w).__name__ == 'Label'], [w.k['text'] for w in made if type(w).__name__ == 'Button'], order
 
+def amount_window(monkeypatch, tray, weigh=False):
+    """The window guard_ui opens for a tray's amount, on the stand-in for tkinter, starting from an empty spool of 200 g:
+    (the scale's field, the empty spool's, the label of the result, the label of what is wrong, what Save does, the
+    buttons' texts, what the window told the guard)."""
+    import guard_ui
+    made, acts = tk_stand_in(monkeypatch), []
+    card = guard_ui.Card(None, act=lambda name, res, arg=None: acts.append((name, arg))); card.t = guard_ui.THEMES['dark']; card.empty_spool = 200
+    card.ask_amount(None, tray, weigh)
+    scale, spool = [w.k['textvariable'] for w in made if type(w).__name__ == 'Entry']
+    result, wrong = [w for w in made if type(w).__name__ == 'Label'][-2:]
+    return scale, spool, result, wrong, next(w.k['command'] for w in made if w.k.get('text') == 'Save'), [w.k['text'] for w in made if type(w).__name__ == 'Button'], acts
+
 def slice_file(tmp_path, text):
     meta = tmp_path / 'bamboo_model' / 'Thu_Nov_19' / '01_02_03#1#9' / 'Metadata'; meta.mkdir(parents=True, exist_ok=True)
     (meta.parent / 'origin.txt').write_text(r'C:\prints\Benchy.3mf')
@@ -268,17 +280,8 @@ def test_the_empty_spool_typed_is_what_the_next_amount_window_starts_with(state)
 
 @pytest.mark.windows
 def test_the_amount_window_takes_the_scale_and_the_empty_spool(monkeypatch):
-    import guard_ui
-    made, acts = tk_stand_in(monkeypatch), []
-    card = guard_ui.Card(None, act=lambda name, res, arg=None: acts.append((name, arg))); card.t = guard_ui.THEMES['dark']; card.empty_spool = 200
-    def window(tray, weigh=False):
-        del made[:], acts[:]; card.ask_amount(None, tray, weigh)
-        scale, spool = [w.k['textvariable'] for w in made if type(w).__name__ == 'Entry']
-        result, wrong = [w for w in made if type(w).__name__ == 'Label'][-2:]
-        save = next(w.k['command'] for w in made if w.k.get('text') == 'Save')
-        return scale, spool, result, wrong, save, [w.k['text'] for w in made if type(w).__name__ == 'Button']
     tray = {'label': 'Ext', 'name': '', 'type': 'PETG', 'grams': None}
-    scale, spool, result, wrong, save, buttons = window(tray)
+    scale, spool, result, wrong, save, buttons, acts = amount_window(monkeypatch, tray)
     assert (scale.get(), spool.get(), result['text'], buttons) == ('', '200', '', ['Save'])        # nothing entered yet; the spool's weight of last time
     scale.set('950'); assert result['text'] == '750 g of filament'
     spool.set('1000'); save()
@@ -286,14 +289,36 @@ def test_the_amount_window_takes_the_scale_and_the_empty_spool(monkeypatch):
     spool.set('230'); assert wrong['text'] == '' and result['text'] == '720 g of filament'
     save(); assert acts == [('spool', 230.0), ('amount', (tray, 720.0))]
     entered = dict(tray, grams=412.4, entered=1e6)
-    scale, spool, result, wrong, save, buttons = window(entered)
+    scale, spool, result, wrong, save, buttons, acts = amount_window(monkeypatch, entered)
     assert (scale.get(), spool.get(), result['text'], buttons) == ('612', '200', '412 g of filament', ['Save', 'Forget this amount'])
     spool.set(''); scale.set('300'); save()                                                        # the filament weighed alone
     assert acts == [('spool', 0), ('amount', (entered, 300.0))]
     measured = dict(tray, label='C3', grams=110.0, reading=110.0)
-    scale, spool, result, wrong, save, buttons = window(measured, weigh=True)
+    scale, spool, result, wrong, save, buttons, acts = amount_window(monkeypatch, measured, weigh=True)
     assert (scale.get(), buttons) == ('', ['Save'])                                                # a weigh-in is never guessed from the reading
     scale.set('292'); save(); assert acts == [('spool', 200.0), ('weigh', (measured, 92.0))]
+
+@pytest.mark.windows
+def test_a_weigh_in_far_from_the_reading_is_saved_only_when_saved_again(monkeypatch):
+    """The review's slips: 8 typed for 86, another spool on the scale, a spool weighed after the running print had taken
+    60 g of it. Each was kept as what the tray reads at empty and counted every tray of the printer lower."""
+    c3 = {'label': 'C3', 'name': '', 'type': 'PLA', 'grams': 110.0, 'reading': 110.0}
+    scale, spool, result, wrong, save, buttons, acts = amount_window(monkeypatch, c3, weigh=True)
+    scale.set('208'); save()                                                                       # 8 g of filament, where 86 was meant
+    assert acts == [] and wrong['text'] == '8 g weighed, 110 g read by the printer: 102 g apart. Save again if the weight is right.'
+    scale.set('286'); assert wrong['text'] == '' and result['text'] == '86 g of filament'          # put right: the line goes
+    save(); assert acts == [('spool', 200.0), ('weigh', (c3, 86.0))]                               # 24 g apart: saved at the first Save
+    scale, spool, result, wrong, save, buttons, acts = amount_window(monkeypatch, c3, weigh=True)
+    scale.set('208'); save(); assert acts == []
+    save(); assert acts == [('spool', 200.0), ('weigh', (c3, 8.0))]                                # saved again with the same numbers: taken as right
+    scale, spool, result, wrong, save, buttons, acts = amount_window(monkeypatch, c3, weigh=True)
+    scale.set('208'); save(); spool.set('190'); save()                                             # a number changed in between: asked anew
+    assert acts == [] and wrong['text'].startswith('18 g weighed, 110 g read by the printer: 92 g apart')
+    scale.set('370'); save(); assert acts == [] and '180 g weighed' in wrong['text'] and '70 g apart' in wrong['text']   # more than it reads, too
+    scale.set('350'); save(); assert acts == [('spool', 190.0), ('weigh', (c3, 160.0))]            # 50 g apart is within what a gauge can be out
+    ext = {'label': 'Ext', 'name': '', 'type': 'PETG', 'grams': 400.0, 'entered': 1e6, 'reading': 400.0}
+    scale, spool, result, wrong, save, buttons, acts = amount_window(monkeypatch, ext)
+    scale.set('205'); save(); assert acts == [('spool', 200.0), ('amount', (ext, 5.0))]            # an amount entered for a spool the printer cannot measure has no reading to doubt it by
 
 @pytest.mark.windows
 def test_the_card_says_when_what_was_learned_could_not_be_used(state, monkeypatch):

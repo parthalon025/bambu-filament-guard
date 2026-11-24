@@ -95,3 +95,10 @@ def test_the_filament_is_what_the_scale_shows_less_the_empty_spool():
                                ('250', '250', 'no filament'), ('200', '250', 'no filament'), ('14000', '100', 'not a spool')):
         grams, why = fg.filament_on(scale, spool)
         assert grams is None and word in why, (scale, spool)
+
+def test_a_weight_far_from_the_printers_reading_is_doubted_either_way():
+    """More than 50 g apart is more than a gauge is out when a spool runs dry: a slipped key, or another spool."""
+    assert fg.weigh_doubt(92.0, 110.0) == '' and fg.weigh_doubt(60.0, 110.0) == '' and fg.weigh_doubt(160.0, 110.0) == ''      # up to 50 g, either way
+    assert fg.weigh_doubt(8.0, 110.0) == '8 g weighed, 110 g read by the printer: 102 g apart. Save again if the weight is right.'
+    assert fg.weigh_doubt(59.9, 110.0).startswith('60 g weighed, 110 g read by the printer: 50 g apart') and '51 g apart' in fg.weigh_doubt(161.0, 110.0)
+

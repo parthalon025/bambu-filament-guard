@@ -6,8 +6,14 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [1.5.0] - 2026-11-24
 
+### Added
+
+- A weigh-in more than 50 g from the printer's reading, either way, is not saved at the first Save. The window says both numbers and how far apart they are; Save again takes the weight as right. A slipped key or another spool on the scale was kept as what the tray reads at empty, and counted every tray of the printer lower.
+- `learned --forget-weigh TRAY` takes back that tray's latest weigh-in and leaves the rest of what was learned (`--printer` where two printers have the tray).
+
 ### Changed
 
+- No weigh-in is offered while a job is on the printer: the readings are moving then.
 - The measured reserve is off unless you turn it on: "Measure the reserve from past prints (experimental)" in the icon's settings (`measured_reserve`). 1.4.0 had it on. It loosens a check on evidence that cannot see a change in what spools read at empty: in an independent review's simulation, once spools read 25 g more at empty, 5 of the 31 answers it had loosened to "enough" ran dry, where 1.3.0's rules had no failure. Nothing of the learning has yet followed a real print. Off, the reserve is the fixed one and no answer is looser than 1.3.0's rules give. [Learning](docs/learning.md#what-the-measured-reserve-cannot-see) has the cases and the numbers.
 - The window for a spool's amount ("Amount in …", "Weigh C3…") takes what the scale shows and what the empty spool weighs, and takes one from the other: the filament shows as you type. It starts with the empty spool's weight entered last (`empty_spool_g`, 250 g at first); 0 there is the filament weighed alone, as before.
 - The reserve's share of a spool's full weight (3 %) is taken from the largest spool the filament could be printed from, not from the fullest one. With a 250 g and a 1 kg spool of one filament loaded, the reserve is 30 g whichever is the fullest, so a check can be "tight" where it was "enough".
