@@ -270,7 +270,7 @@ def test_the_card_offers_a_weigh_in_records_it_and_checks_again(state, monkeypat
     monkeypatch.setattr(guard, 'recheck', lambda res, beside=None: again.append(res['title']))
     guard.act('asked', res, res['weigh'])
     assert fg.load_state()['weigh_asked']['SERIAL']['C3'] == pytest.approx(time.time(), abs=60) and 'weigh' not in fg.evaluate(BLUE, CFG, 'Benchy')
-    guard.act('weigh', res, (res['weigh'], 92.0))
+    guard.act('weigh', res, (res['weigh'], 92.0)); guard.todo.get(timeout=5)()              # kept once the printer was asked again: see the weigh-in's own test
     [w] = gn.load()['SERIAL']['C3']['weighs']
     assert (w['reading'], w['weight'], w['spool']['type'], w['spool']['colour']) == (110, 92.0, 'PLA', '#0A2989') and again == ['Benchy']
     assert fg.evaluate(BLUE, CFG, 'Benchy')['rows'][0]['trays'][0]['grams'] == 92.0            # weighed near empty: 18 g the tray reads at empty, and the spool's own
@@ -1081,3 +1081,39 @@ def test_the_amount_window_starts_from_what_the_guard_counts_now_and_saved_untou
         monkeypatch.setattr(fg, 'load_state', nothing)                                       # no entry, or a state file that cannot be read: empty, not the card's old figure
         assert amount_asked(monkeypatch, row, res=res).scale.get() == ''
     assert amount_asked(monkeypatch, row).scale.get() == ''                                  # nor without a printer to look it up for
+
+def c3_reads(grams, tag='A' * 32, colour='0A2989', state='IDLE'):
+    """The H2D with one blue PLA spool in C3, tagged, at this reading; another tag or colour is another spool."""
+    tray = {'id': '2', 'tray_type': 'PLA', 'tray_color': colour + 'FF', 'tray_info_idx': 'GFA00', 'remain_g': grams, 'tray_weight': '1000', 'tray_uuid': tag}
+    return {'gcode_state': state, 'subtask_name': 'Benchy', 'layer_num': 3, 'total_layer_num': 27, 'ams': {'ams': [{'id': '2', 'tray': [tray]}]}}
+
+@pytest.mark.windows
+def test_a_weigh_in_is_kept_against_a_reading_asked_for_anew_or_not_at_all(state, monkeypatch):
+    """A weigh-in was set against the reading of the card it came from, however old. C3 read 105 g on the card; the
+    print ran; the spool, weighed at 20 g, was kept as one that reads 105 g with 20 g on it, and every tray of the
+    printer was counted 85 g lower from then on. The printer is asked again when a weigh-in is saved."""
+    now = [c3_reads(105)]
+    running(monkeypatch, None); monkeypatch.setattr(fg, 'read_status', lambda *a, **k: now[0] if isinstance(now[0], dict) else (_ for _ in ()).throw(now[0]))
+    res = fg.evaluate(BLUE, CFG, 'Benchy'); tray = res['weigh']
+    assert (res['rows'][0]['status'], tray['label'], tray['reading']) == ('TIGHT', 'C3', 105)
+    kept = lambda: gn.load().get('SERIAL', {}).get('C3', {}).get('weighs', [])
+    def saved(status, grams=20.0):
+        """Save in the weigh-in window, with the printer as it is by then: (the card's headline, what it says)."""
+        now[0] = status; guard = guard_with(); again = []
+        monkeypatch.setattr(guard, 'recheck', lambda res, beside=None: again.append(res['title']))
+        guard.act('weigh', res, (tray, grams)); guard.todo.get(timeout=5)()
+        assert bool(again) != bool(guard.card.shown) and list(getattr(guard.card, 'buttons', {'Check again': 1})) == ['Check again']   # a new check, or a card that offers one
+        return guard.card.shown[-1][1:] + tuple(guard.card.said) if guard.card.shown else again
+    after = ': weigh-in not saved. Check again, then weigh from the new card.'
+    assert saved(c3_reads(20)) == ('Weigh-in not saved', 'C3 read 105 g on that card and reads 20 g now' + after) and kept() == []
+    assert saved(c3_reads(108))[1] == 'C3 read 105 g on that card and reads 108 g now' + after and kept() == []
+    assert saved(c3_reads(105, state='RUNNING'))[1] == "The Bambu Lab H2D is printing, and C3's reading is moving" + after
+    assert saved(c3_reads(105, tag='B' * 32))[1] == 'C3 no longer holds the spool that card showed' + after
+    assert saved(c3_reads(105, colour='C12E1F'))[1] == 'C3 no longer holds the spool that card showed' + after
+    assert saved(fg.PrinterError('printer did not report its status'))[1] == 'The printer could not be asked what C3 reads now (printer did not report its status)' + after
+    assert kept() == [] and 'C3: weigh-in not saved: C3 read 105 g on that card and reads 20 g now' in (state / 'guard.log').read_text()
+    with monkeypatch.context() as m:
+        m.setattr(gn, 'weigh', lambda *a, **k: (_ for _ in ()).throw(fg.StateBusy('learned.json could not be written: another program holds it')))
+        assert saved(c3_reads(105))[1] == 'The weigh-in of C3 could not be written (StateBusy)' + after and kept() == []
+    assert saved(c3_reads(104), 86.0) == ['Benchy']                                          # within 2 g, the same spool, no job: kept, against what it reads now
+    [w] = kept(); assert (w['reading'], w['weight'], w['spool']['id'], w['spool']['colour']) == (104, 86.0, 'A' * 32, '#0A2989')

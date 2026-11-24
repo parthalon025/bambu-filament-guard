@@ -1080,6 +1080,7 @@ class Watcher:
 
 
 SEND_MOST = 30                                            # the plates of a project checked again when "Send print job" opens: the ones sliced last
+WEIGH_MOVED = 2.0                                         # grams a tray's reading may have moved since its card for a weigh-in to be kept against it
 IGNORE_DAYS, IGNORE_GROWTH = 7, 5.0                       # "Ignore for this project" ends after as many days, or with a filament as many grams further short
 UNSAVED = 'Unsaved project'                               # what project_title calls every project that was never saved
 
@@ -1249,16 +1250,40 @@ class Guard:
         elif name == 'amount':
             tray, grams = arg
             guard_ledger.enter(res['printer']['serial'], tray, grams); self.recheck(res, self.card.beside)
-        elif name in ('weigh', 'asked'):
-            import guard_learn
-            tray, grams = arg if name == 'weigh' else (arg, None)
-            if name == 'asked':                               # asked from within the card as it shows: a state file that cannot be written now must not
-                try: guard_learn.asked(res['printer']['serial'], tray['label'])   # cost the card. The offer then may come again.
-                except OSError as e: log(f"{tray['label']}: that a weigh-in was offered could not be noted ({e.__class__.__name__}: {e}): it may be offered again")
-                return
-            guard_learn.weigh(res['printer']['serial'], tray['label'], tray['reading'], grams,
-                              {'id': tray.get('spool'), 'type': tray['type'], 'colour': tray['colour'], 'fid': tray.get('fid'), 'weight': tray.get('weight')})
-            self.recheck(res, self.card.beside)
+        elif name == 'asked':                                 # asked from within the card as it shows: a state file that cannot be written now must not
+            import guard_learn                                # cost the card. The offer then may come again.
+            try: guard_learn.asked(res['printer']['serial'], arg['label'])
+            except OSError as e: log(f"{arg['label']}: that a weigh-in was offered could not be noted ({e.__class__.__name__}: {e}): it may be offered again")
+        elif name == 'weigh': self.weigh_in(res, *arg)
+
+    def weigh_in(self, res, tray, grams):
+        """A weigh-in saved in its window: kept only against a reading the printer gives now. It was set against the reading
+        of the card it came from, however old: C3 at 105 g on the card, a print, the spool weighed at 20 g, and the tray
+        was kept as one that reads 105 g with 20 g on it, which counted every tray of the printer 85 g lower. The printer
+        is asked again; the weigh-in is kept, against the reading it gives, when no job is on the printer and the tray
+        holds the same spool (tag, material, colour) at a reading within WEIGH_MOVED of the one the window showed.
+        Otherwise nothing is kept, and a card says why and offers the new check to weigh from."""
+        import guard_ui, guard_learn
+        label, beside = tray['label'], self.card.beside
+        where = lambda: beside if guard_ui.visible(beside) else None
+        def refuse(why):
+            self.card.note('Weigh-in not saved', [(False, f'{why}: weigh-in not saved. Check again, then weigh from the new card.')], 'warn', res.get('pid'), where(),
+                           buttons=[('Check again', lambda: self.recheck(res, where()))])
+            log(f'{label}: weigh-in not saved: {why}')
+        def then(new):
+            now = None if new['error'] else next((t for r in new['rows'] for t in r['trays'] if t['label'] == label), None)
+            if new['error']: why = f"The printer could not be asked what {label} reads now ({new['error']})"
+            elif new['printer']['state'] in BUSY: why = f"The {new['printer']['model']} is printing, and {label}'s reading is moving"
+            elif not now or now.get('reading') is None or (now.get('spool'), now['type'].upper(), now['colour']) != (tray.get('spool'), tray['type'].upper(), tray['colour']):
+                why = f'{label} no longer holds the spool that card showed'
+            elif abs(now['reading'] - tray['reading']) > WEIGH_MOVED: why = f"{label} read {tray['reading']:.0f} g on that card and reads {now['reading']:.0f} g now"
+            else:
+                try: guard_learn.weigh(res['printer']['serial'], label, now['reading'], grams,
+                                       {'id': now.get('spool'), 'type': now['type'], 'colour': now['colour'], 'fid': now.get('fid'), 'weight': now.get('weight')})
+                except OSError as e: why = f'The weigh-in of {label} could not be written ({e.__class__.__name__})'
+                else: return self.recheck(res, where())
+            refuse(why)
+        self.later(lambda: self.again(res), then, lambda: refuse(f'The printer could not be asked what {label} reads now'))
 
     def again(self, res):
         """The plate of an answer, checked again now: the new answer, with what tells its plate carried over."""

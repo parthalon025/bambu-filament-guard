@@ -50,6 +50,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - A warning found when "Send print job" opened was thrown away when the dialog had closed before the check ended, which a quick click on Send also looks like. It now shows as a card in the corner, as after a slice.
 - "Check newest slice now" while checks were paused turned the icon green, as if slices were being checked. Paused, the icon stays grey and its tooltip says "Checks are paused"; resumed, it takes the last result's colour again.
 - The window for a spool's amount opened with the amount on the card, which is as old as the card: a spool entered at 400 g and counted down to 280 g opened at 400 g, and Save as it stood, or Return to close the window, wrote 400 g back over the count. During a print that figure was then taken off a second time. The window opens with what the guard counts for the spool at that moment, and Save with both fields as they opened enters nothing.
+- A weigh-in was set against the reading on the card it came from, however old. A card from before a print: C3 read 105 g there, the spool weighed at 20 g afterwards was kept as one that reads 105 g with 20 g on it, and every tray of the printer was counted 85 g lower. When a weigh-in is saved the printer is now asked again: it is kept, against the reading the tray gives then, only when no job is on the printer and the tray holds the same spool within 2 g of the reading the window showed. Otherwise nothing is kept and a card says why.
 
 ## [1.4.0] - 2026-11-20
 
