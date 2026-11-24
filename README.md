@@ -117,7 +117,7 @@ When a filament falls short it is the full table, as in the picture at the top, 
 | Not enough | The matching spools together hold less than the need, or hold it only with a spool AMS auto refill does not go on to (another product or shade, the external spool): the note names those and their amounts. |
 | Not loaded | No spool of that material is loaded where the print's nozzle can reach it. |
 | Colour not loaded | The material is loaded, this colour of it is not. The nearest spool is named and counts for nothing. |
-| Unknown | The matching spool reports no remaining amount, or Bambu Studio gives no weight to the filament, or to one that can print from the same spool (a profile with density 0). Shown as one line, like "enough", unless "Warn when a spool's amount is unknown" is ticked in the icon's settings. |
+| Unknown | The matching spool reports no remaining amount, or a print the guard could not count is drawing on it, or Bambu Studio gives no weight to the filament, or to one that can print from the same spool (a profile with density 0). Shown as one line, like "enough", unless "Warn when a spool's amount is unknown" is ticked in the icon's settings. |
 
 The card's buttons, the icon's menu and settings, how spools are matched and how the reserve is set are in [Using the guard](docs/using.md).
 

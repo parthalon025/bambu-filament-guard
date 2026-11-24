@@ -1,11 +1,12 @@
 """Counting the print that is running before a new plate is checked (guard_ledger, filament_guard.evaluate)."""
 import os
+import time
 
 import pytest
 
 import filament_guard as fg
 import guard_ledger as gl
-from helpers import CFG, H2D_JOB, SLICE, kept, running, BLUE, BLUE_JOB
+from helpers import CFG, H2D_JOB, SLICE, gcode, kept, running, BLUE, BLUE_JOB, needing, part, printing, spool
 
 
 PETG_PLATE = {'printer_model': 'Bambu Lab H2D', 'time': '', 'layers': 3,
@@ -51,6 +52,7 @@ def test_the_running_print_is_taken_off_its_spool_first(state, monkeypatch):
     assert row['status'] == 'TIGHT' and 'reads' not in row['note'] and row['trays'][0]['grams'] == 105 and res['printer']['counted'] is None
     running(monkeypatch, dict(BLUE_JOB, subtask_name='Sent from the phone')); res = fg.evaluate(BLUE, CFG, 'Benchy')
     assert res['rows'][0]['status'] == 'TIGHT' and res['printer']['counted'] is False and 'the guard could not count that print' in fg.report_text(res)
+    assert res['rows'][0]['note'].endswith('; a print the guard could not count is drawing on C3')     # a warning stays the warning it is, and says so
 
 def test_the_job_is_named_without_a_figure_the_printer_does_not_give():
     p = {'state': 'RUNNING', 'job': 'Benchy', 'layer': None, 'layers': None, 'percent': None}
@@ -94,9 +96,9 @@ def test_an_amount_entered_during_a_print_has_the_rest_of_that_print_taken_off(s
     gl.enter('SERIAL', {'label': 'C3', 'type': 'PETG', 'colour': '#101010'}, None); gl.enter('SERIAL', {'label': 'C3', 'type': 'PETG', 'colour': '#101010'}, 150)
     phone = dict(job, subtask_name='Sent from the phone', task_id='12')                   # first entered during a print not sliced here: its rest is not known
     watch = gl.JobWatch('SERIAL', CFG); watch.look(phone)
-    assert fg.load_state()['spools']['SERIAL']['C3'] == dict(fg.load_state()['spools']['SERIAL']['C3'], grams=150.0, missed=['12', 'Sent from the phone'])
+    entry = fg.load_state()['spools']['SERIAL']['C3']; assert entry['stale'] and 'missed' not in entry      # so the amount is out of date
     running(monkeypatch, phone); res = fg.evaluate(PETG_PLATE, CFG, 'Next plate')
-    assert res['printer']['counted'] is False and 'could not count that print' in fg.report_text(res)
+    assert res['printer']['counted'] is False and res['rows'][0]['status'] == 'UNKNOWN' and 'could not count that print' in fg.report_text(res)
 
 def test_profiles_are_kept_beside_the_state_file_and_go_with_their_slice(state):
     plate = dict(SLICE, layers=3)
@@ -105,10 +107,10 @@ def test_profiles_are_kept_beside_the_state_file_and_go_with_their_slice(state):
     assert set(entry) == {'title', 'plate', 'layers', 'at', 'filaments', 'profile'} and os.listdir(state / 'profiles') == [entry['profile']]
     assert fg.load_profile(entry) == {1: [0.0, 40.0, 40.0, 40.0], 2: [0.0, 10.0, 10.0, 10.0]} and fg.load_profile(entry, 'purge') == {1: [0.0, 3.5, 0.0, 0.0], 2: [0.0] * 4}
     again = dict(plate, filaments=[{'slot': 1, 'grams': 110.0}, {'slot': 2, 'grams': 30.0}])
-    fg.remember_slice('Benchy', 1, again, kept({1: [0.0, 30.0, 40.0, 40.0], 2: [0.0, 10.0, 10.0, 10.0]}))   # the plate sliced again
-    slices = fg.load_state()['slices']
-    assert len(slices) == 1 and slices[0]['profile'] != entry['profile'] and os.listdir(state / 'profiles') == [slices[0]['profile']]
-    for n in range(30): fg.remember_slice(f'Other {n}', 1, plate)                         # thirty newer slices: this one drops out
+    for _ in range(2): fg.remember_slice('Benchy', 1, again, kept({1: [0.0, 30.0, 40.0, 40.0], 2: [0.0, 10.0, 10.0, 10.0]}))   # the plate sliced again, twice alike
+    slices = fg.load_state()['slices']                                                    # the earlier slice is kept: a job may be printing from it
+    assert len(slices) == 2 and slices[1]['profile'] == entry['profile'] != slices[0]['profile'] and sorted(os.listdir(state / 'profiles')) == sorted(s['profile'] for s in slices)
+    for n in range(30): fg.remember_slice(f'Other {n}', 1, plate)                         # thirty newer slices: these drop out
     assert os.listdir(state / 'profiles') == []
 
 def test_a_check_marks_the_printer_looked_at_only_when_that_changes_who_is_followed(state, monkeypatch):
@@ -132,3 +134,140 @@ def test_what_the_running_print_needs_beyond_its_tray_comes_off_the_next_spool_o
     running(monkeypatch, job); res = fg.evaluate(BLUE, CFG, 'Benchy')
     assert res['printer']['beyond'] == {'C3': pytest.approx(65.3)} and "it needs 65 g more of C3's filament than the loaded spools hold" in fg.report_text(res)
     assert 'C3 reads 20 g; the running print still needs 85 g: 65 g more than it holds, and no other spool of this filament is loaded' in res['rows'][0]['note']
+
+def test_a_plate_sliced_again_while_it_prints_is_counted_by_the_slice_that_needs_most(state, monkeypatch):
+    """A nine-up plate "Part" (225 g) prints at layer 10 of 100 from A1, which reads 300 g, and still needs 205 g. The
+    plate is sliced again with four copies (100 g, as many layers) for the next run. The job on the printer may be
+    either slice: it is counted by the one that needs most, and the four-up does not fit beside it."""
+    part(225.0); job = printing('RUNNING', [spool(0, 300)], layer=10, gcode_file='/data/Metadata/plate_1.gcode')
+    assert gl.owed(job, fg.load_state()['slices']) == ({'A1': pytest.approx(204.75)}, True)
+    part(100.0); slices = fg.load_state()['slices']
+    assert [s['filaments'][0]['grams'] for s in slices] == [100.0, 225.0] and len(os.listdir(state / 'profiles')) == 2
+    assert gl.owed(job, slices) == ({'A1': pytest.approx(204.75)}, True) and gl.draws(job, slices, ['A1']) == ({'A1': 225.0}, set())
+    running(monkeypatch, job); res = fg.evaluate(needing(100), CFG, 'Part'); row = res['rows'][0]
+    assert row['status'] == 'SHORT' and 'A1 reads 300 g, of which the running print still needs 205 g' in row['note'] and res['printer']['counted'] is True
+    part(100.0, layers=80)                                                               # sliced again at another layer height: not what the printer runs
+    assert gl.owed(job, fg.load_state()['slices']) == ({'A1': pytest.approx(204.75)}, True)
+
+def test_an_entered_amount_is_counted_down_by_the_slice_that_needs_most(state):
+    """The nine-up is sent; while the printer prepares it, the plate is sliced again with four copies. The entered
+    500 g are counted down by the 225 g the job may take, not by the 100 g of the newer slice."""
+    part(225.0); spools = [spool(2)]
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 500)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools, task='1')); watch.look(printing('PREPARE', spools, mapping=(2,)))
+    part(100.0); watch.look(printing('RUNNING', spools, mapping=(2,), layer=1))
+    assert fg.load_state()['spools']['SERIAL']['A3']['grams'] == 275
+
+def test_three_slices_of_a_plate_are_kept_and_none_that_the_job_on_the_printer_may_be(state, monkeypatch):
+    """Sliced again, a plate keeps its last three slices that differ, each with its profile; an unchanged re-slice
+    takes the place of its like. While the printer has a job on it that a slice fits, that slice is not let go: not
+    for a fourth slice of its plate, and not for thirty newer slices of other plates. Once the printer is seen without
+    the job, it goes like any other."""
+    grams = lambda title='Part': [s['filaments'][0]['grams'] for s in fg.load_state()['slices'] if s['title'] == title]
+    for g in (225.0, 100.0, 100.0, 125.0, 150.0): part(g)
+    assert grams() == [150.0, 125.0, 100.0] and len(os.listdir(state / 'profiles')) == 3
+    job = printing('RUNNING', [spool(0, 300)], layer=10, gcode_file='/data/Metadata/plate_1.gcode')
+    running(monkeypatch, job); fg.evaluate(needing(100), CFG, 'Part'); assert fg.load_state()['on']['SERIAL'] == {'name': 'Part', 'layers': 100, 'plate': 1}
+    part(175.0); part(200.0); assert grams() == [200.0, 175.0, 150.0, 125.0, 100.0]      # any of them may be on the printer
+    for n in range(30): part(10.0, title=f'Other {n}')
+    slices = fg.load_state()['slices']
+    assert len(slices) == 35 and grams() == [200.0, 175.0, 150.0, 125.0, 100.0] and gl.owed(job, slices) == ({'A1': pytest.approx(182.0)}, True)
+    running(monkeypatch, dict(job, gcode_state='FINISH')); fg.evaluate(needing(100), CFG, 'Part'); assert 'SERIAL' not in fg.load_state()['on']
+    part(10.0, title='One more'); assert grams() == [] and len(fg.load_state()['slices']) == 30 and len(os.listdir(state / 'profiles')) == 30
+
+def test_the_follower_notes_the_job_on_the_printer_too(state):
+    """A printer that is followed has its job noted at every look, also when no check reaches it."""
+    part(225.0); gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 500)
+    watch = gl.JobWatch('SERIAL', dict(CFG, learn=False)); watch.see(printing('RUNNING', [spool(2)], mapping=(2,), layer=1))
+    assert fg.load_state()['on'] == {'SERIAL': {'name': 'Part', 'layers': 100, 'plate': None}}
+    watch.see(printing('FINISH', [spool(2)], mapping=(2,), layer=100)); assert fg.load_state()['on'] == {}
+
+def test_a_job_is_matched_to_the_project_it_is_named_after(state):
+    """"Bracket_v2" (300 g) is sliced and sent; then the project "Bracket" (40 g, as many layers, plate 1) is sliced. The
+    job's name also starts with "Bracket_", as a plate of that project would be named, but it is the name of a project
+    that was sliced: the job is counted by that one, and an entered 500 g go down by 300 g, not by 40 g. When no slice
+    of the project a job is named after fits it, it is not counted by another project's."""
+    part(300.0, title='Bracket_v2'); part(40.0, title='Bracket'); slices = fg.load_state()['slices']
+    assert gl.match_slice('Bracket_v2', 100, slices, 1)['title'] == 'Bracket_v2' and gl.match_slice('Bracket_v2_lid', 100, slices, 1)['title'] == 'Bracket_v2'
+    assert gl.match_slice('Bracket_plate A', 100, slices, 1)['title'] == 'Bracket' and gl.match_slice('Bracket', 100, slices)['title'] == 'Bracket'
+    job = printing('RUNNING', [spool(0, 400), spool(2)], name='Bracket_v2', mapping=(0,), layer=1, gcode_file='/data/Metadata/plate_1.gcode')
+    assert gl.owed(job, slices) == ({'A1': 300.0}, True)
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 500)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(dict(job, gcode_state='IDLE', task_id='1')); watch.look(dict(job, mapping=[2]))
+    assert fg.load_state()['spools']['SERIAL']['A3']['grams'] == 200
+    part(40.0, title='Bracket', layers=50)                                               # "Bracket" at 50 layers: it fits a job of 50 layers, "Bracket_v2" does not
+    assert gl.match_slice('Bracket_v2', 50, fg.load_state()['slices'], 1) is None and gl.owed(dict(job, total_layer_num=50), fg.load_state()['slices']) == ({}, False)
+
+def test_a_print_the_guard_cannot_count_leaves_no_row_enough_that_rests_on_its_trays(state, monkeypatch):
+    """A 450 g job sent from elsewhere runs from A1, which reads 500 g; A2 holds red, which the job does not use. A
+    plate that needs 300 g of A1's filament and 50 g of red: after the job A1 holds about 50 g, and nobody can tell
+    the guard so. The red is enough; the other cannot be confirmed, and headline, 'worst' and exit code say that. A
+    row that warns already keeps its warning, with the reason added. Without a tray mapping the job may draw on any
+    spool."""
+    job = printing('RUNNING', [spool(0, 500, fid='GFA00'), spool(1, 400, colour='C12E1F', fid='GFA00')], name='Sent from the phone', layer=10)
+    both = lambda grams: dict(needing(grams), filaments=needing(grams)['filaments'] + [dict(needing(50, colour='#C12E1F')['filaments'][0], slot=2)])
+    running(monkeypatch, job); res = fg.evaluate(both(300), CFG, 'Next'); black, red = res['rows']
+    assert black['status'] == 'UNKNOWN' and black['note'] == 'a print the guard could not count is drawing on A1' and (red['status'], red['note']) == ('OK', '')
+    assert res['worst'] == 'UNKNOWN' and res['printer']['counted'] is False and fg.exit_code(res) == 1
+    assert fg.headline(res) == 'Enough filament could not be confirmed' and 'the guard could not count that print' in fg.report_text(res)
+    black, red = fg.evaluate(both(600), CFG, 'Next')['rows']
+    assert black['status'] == 'SHORT' and black['note'] == 'short by 100 g; a print the guard could not count is drawing on A1' and red['status'] == 'OK'
+    running(monkeypatch, dict(job, mapping=None))
+    assert [(r['status'], r['note']) for r in fg.evaluate(both(300), CFG, 'Next')['rows']] == [
+        ('UNKNOWN', 'a print the guard could not count is drawing on A1'), ('UNKNOWN', 'a print the guard could not count is drawing on A2')]
+    running(monkeypatch, dict(job, gcode_state='FINISH')); res = fg.evaluate(both(300), CFG, 'Next')
+    assert res['worst'] == 'OK' and res['printer']['counted'] is None                    # over: the amounts are the spools' own again
+
+BLACK = dict(type='PLA', colour='#101010', fid='GFA00', nozzle=None)                      # what a slice says of its filament
+
+def test_what_the_running_print_owes_a_tray_that_is_gone_is_taken_off_the_spools_of_its_filament(state, monkeypatch):
+    """A job mapped to A1 still needs 300 g. A1 has run out and its spool is taken out: the status lists the tray
+    without a material. The AMS goes on from A2, the same filament, which reads 400 g: the 300 g come off A2, as they
+    do while the empty spool is still in A1, and a 300 g plate does not fit. Named by the slice's filament, the print
+    is counted; when no loaded spool is that filament, or the slice does not say what it is, it is not counted, and
+    no spool is good for "enough"."""
+    part(300.0, **BLACK); a2, red = spool(1, 400, fid='GFA00'), spool(2, 500, colour='C12E1F', fid='GFA00')
+    def check(spools, grams=300, colour='#101010'):
+        running(monkeypatch, printing('RUNNING', spools, layer=1)); res = fg.evaluate(needing(grams, colour=colour), CFG, 'Next'); row = res['rows'][0]
+        return row['status'], {t['label']: t['grams'] for t in row['trays']}, res['printer']['counted'], row['note']
+    assert check([spool(0, 0, fid='GFA00'), a2])[:3] == ('SHORT', {'A2': 100, 'A1': 0}, True)     # the empty spool still in its tray
+    status, amounts, counted, note = check([{'id': '0'}, a2])                                      # taken out
+    assert (status, amounts, counted) == ('SHORT', {'A2': 100}, True) and 'A2 reads 400 g, of which the running print takes 300 g once A1 runs out' in note
+    running(monkeypatch, printing('RUNNING', [{'id': '0'}, spool(1, 100, fid='GFA00')], layer=1)); res = fg.evaluate(needing(50), CFG, 'Next')
+    assert res['printer']['beyond'] == {'A1': 200} and "it needs 200 g more of A1's filament than the loaded spools hold" in fg.report_text(res)
+    grey = check([{'id': '0'}, spool(1, 400, colour='202020', fid='GFA00')], 100, '#202020')      # no loaded spool is the job's filament: which one it goes on from cannot be told
+    assert grey == ('UNKNOWN', {'A2': 400}, False, 'a print the guard could not count is drawing on A2')
+    part(300.0)                                                                                    # a slice kept by an earlier guard: it does not say what the filament is
+    status, amounts, counted, note = check([{'id': '0'}, a2, red])
+    assert (status, amounts, counted, note) == ('UNKNOWN', {'A2': 400}, False, 'a print the guard could not count is drawing on A2')
+
+def test_what_the_running_print_owes_a_tray_of_unknown_amount_is_taken_off_the_spools_of_its_filament(state, monkeypatch):
+    """The job's tray, A1, has no tag and no entered amount; the print still needs 300 g of it. How much of that A1
+    holds cannot be told: all of it is taken off A2, the same filament, which the AMS goes on with. The card does not
+    say that the running print needs more than is loaded: nobody knows that."""
+    part(300.0, **BLACK); spools = [spool(0, fid='GFA00'), spool(1, 400, fid='GFA00')]
+    running(monkeypatch, printing('RUNNING', spools, layer=1)); res = fg.evaluate(needing(200), CFG, 'Next'); row = res['rows'][0]
+    assert row['status'] == 'SHORT' and {t['label']: t['grams'] for t in row['trays']} == {'A2': 100, 'A1': None} and res['printer']['counted'] is True
+    assert 'A2 reads 400 g, of which the running print takes 300 g once A1 runs out' in row['note'] and 'A1 holds an unknown amount more' in row['note']
+    running(monkeypatch, printing('RUNNING', [spool(0, fid='GFA00')], layer=1)); res = fg.evaluate(needing(200), CFG, 'Next')
+    assert res['printer']['beyond'] == {} and res['rows'][0]['status'] == 'UNKNOWN'
+
+def test_a_slice_is_remembered_with_what_it_says_of_its_filaments(state):
+    plate = fg.parse_plate(gcode())
+    fg.remember_slice('Benchy', 1, plate)
+    assert fg.load_state()['slices'][0]['filaments'] == [{'slot': 1, 'grams': 9.99, 'type': 'PLA', 'colour': '#0A2989', 'fid': 'GFA00', 'nozzle': None},
+                                                         {'slot': 3, 'grams': 10.87, 'type': 'PLA', 'colour': '#C12E1F', 'fid': 'GFA00', 'nozzle': None}]
+
+def test_a_job_counted_on_a_tray_that_is_gone_makes_the_entered_spools_of_its_filament_out_of_date(state):
+    """The guard starts while a job mapped to A1 runs on, A1 empty and taken out: the print has gone on from another
+    spool, and how much of it cannot be told. The amount entered for A2, the same filament, is out of date when the
+    job is counted; A3, another material, keeps its amount. When the slice does not say what the filament is, every
+    amount is out of date."""
+    spools = [{'id': '0'}, spool(1, fid='GFA00'), spool(2, typ='PETG')]; book = lambda: fg.load_state()['spools']['SERIAL']
+    def counted():
+        gl.enter('SERIAL', {'label': 'A2', 'type': 'PLA', 'colour': '#101010'}, 1000); gl.enter('SERIAL', {'label': 'A3', 'type': 'PETG', 'colour': '#101010'}, 400)
+        watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools, task='1')); watch.look(printing('RUNNING', spools, task=str(time.time()), layer=40))
+        return {label: bool(entry.get('stale')) for label, entry in book().items()}
+    part(300.0, **BLACK); assert counted() == {'A2': True, 'A3': False} and book()['A3']['grams'] == 400
+    assert "out of date: A2, which the print may go on from: A1's amount is not known" in (state / 'guard.log').read_text()
+    part(300.0); assert counted() == {'A2': True, 'A3': True}
