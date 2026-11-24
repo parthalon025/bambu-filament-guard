@@ -675,14 +675,23 @@ def trays_of(status):
     spool. weight is the full spool's filament in grams (tray_weight), None when the printer does not know it; spool the
     spool's tag (spool_id).
     label is the tray as Bambu Studio shows it (A1..D4, HT-A, Ext). nozzle is the one the tray's AMS feeds, where the
-    printer has two: the low half of the top byte of the AMS 'info' word, 1 = left, 0 = right (H2D, firmware 01.04);
-    the tray each nozzle has loaded confirms it. None = not known, and then the tray counts for either nozzle."""
+    printer has two; None = not known, and then the tray counts for either nozzle. It is read from the AMS's 'info'
+    word, hexadecimal text:
+      - bits 8-11, as Bambu Studio reads them (DevFilaSystem.cpp, ParseAmsInfo): the extruder the AMS is bound to, 0 =
+        the main one = right, 1 = the deputy = left, 0xE = bound to none;
+      - where those are neither 0 nor 1, bits 24-27, 1 = left, else right: an H2D on firmware 01.04 sends "51001E03" for
+        its two AMS on the left nozzle and "50001E03" for the one on the right, 0xE in bits 8-11.
+    The tray each nozzle has loaded confirms it. An 'info' that is not such text tells nothing. An external holder is
+    told by its id: 254 the left nozzle's (Bambu Studio's "Ext-L"), 255 the right's ("Ext-R"); the H2D lists them in
+    that order, so 'Ext' is its left one and 'Ext2' its right (amounts entered by hand are kept under these labels)."""
     extruders = status.get('device', {}).get('extruder', {}).get('info', []) or []
     two = len(extruders) > 1
     side = {}
     for a in status.get('ams', {}).get('ams', []) or []:
-        try: side[int(a['id'])] = 'left' if (int(a.get('info', ''), 16) >> 24) & 0xF == 1 else 'right'
-        except (ValueError, KeyError): pass
+        try: info, aid = int(a['info'], 16), int(a['id'])
+        except (ValueError, KeyError, TypeError): continue                # no 'info', or one that is not hexadecimal text (a number raises TypeError here)
+        bound = (info >> 8) & 0xF
+        side[aid] = ('right', 'left')[bound] if bound in (0, 1) else 'left' if (info >> 24) & 0xF == 1 else 'right'
     for e in extruders:
         for key in ('snow', 'spre'):
             v = e.get(key)
@@ -700,7 +709,7 @@ def trays_of(status):
             label = f'HT-{chr(65 + aid - 128)}' if aid >= 128 else f"{chr(65 + aid)}{int(t.get('id', 0)) + 1}"
             add(label, t, side.get(aid))
     external = status.get('vir_slot') or ([status['vt_tray']] if isinstance(status.get('vt_tray'), dict) else [])
-    for i, t in enumerate(external): add('Ext' if i == 0 else f'Ext{i + 1}', t, None)
+    for i, t in enumerate(external): add('Ext' if i == 0 else f'Ext{i + 1}', t, {'254': 'left', '255': 'right'}.get(str(t.get('id'))))
     return out, two
 
 
