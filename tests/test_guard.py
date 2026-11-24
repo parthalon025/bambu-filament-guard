@@ -691,3 +691,42 @@ def test_a_printer_that_is_not_heard_is_not_only_asked_whether_it_is_on(state, m
             'or give the printer\'s address in config.json: {"printers": {"<serial>": {"ip": "<address>"}}}')
     assert fg.evaluate(BLUE, CFG, 'Benchy')['error'] == f'the Bambu Lab H2D {said}'
     assert fg.main(['trays']) == 0 and f'Bambu Lab H2D: {said[3:]}' in capsys.readouterr().out
+
+def a_link(monkeypatch, heard):
+    """printer_link on a stand-in for paho-mqtt: the client it made, which keeps what it sent; `heard` gets every report."""
+    mods = {name: type(sys)(name) for name in ('paho', 'paho.mqtt', 'paho.mqtt.client')}
+    class Client:
+        def __init__(self, *a, **k): self.sent = []
+        def subscribe(self, topic): self.sent.append(('subscribe', topic))
+        def publish(self, topic, payload): self.sent.append(('publish', topic, payload))
+        def __getattr__(self, name): return lambda *a, **k: None
+    mods['paho'].mqtt, mods['paho.mqtt'].client, mods['paho.mqtt.client'].Client = mods['paho.mqtt'], mods['paho.mqtt.client'], Client
+    mods['paho.mqtt.client'].CallbackAPIVersion = type('CallbackAPIVersion', (), {'VERSION2': 2})
+    for name, mod in mods.items(): monkeypatch.setitem(sys.modules, name, mod)
+    return fg.printer_link('printer', 'SERIAL', 'code', 'a-test', heard.append)
+
+def test_a_message_that_is_json_but_no_object_does_not_end_the_link(monkeypatch):
+    """A payload such as [1, 2] raised AttributeError in the link's own thread, which ended it: the read then failed
+    with "did not report its status" although the whole report followed."""
+    heard = []; link = a_link(monkeypatch, heard); message = lambda payload: type('Message', (), {'payload': payload})()
+    for payload in (b'[1, 2]', b'null', b'7', b'"text"', b'not json', b'{"print": [1]}', b'{"info": {}}'): link.on_message(link, None, message(payload))
+    link.on_message(link, None, message(b'{"print": {"gcode_state": "IDLE"}}'))
+    assert heard == [{'gcode_state': 'IDLE'}]
+    link.on_connect(link, None, {}, 0)
+    assert link.sent == [('subscribe', 'device/SERIAL/report'), ('publish', 'device/SERIAL/request', '{"pushing": {"sequence_id": "0", "command": "pushall"}}')]   # and it sends the printer nothing else
+
+def refusing(monkeypatch, why):
+    """read_status against a printer that refuses the connection, for the reason paho names (paho 2) or numbers (paho 1)."""
+    def link(ip, serial, code, client_id, on_report, on_refused=None):
+        on_refused(why); return type('Client', (), {'loop_stop': lambda self: None, 'disconnect': lambda self: None})()
+    monkeypatch.setattr(fg, 'printer_link', link)
+    with pytest.raises(fg.PrinterError) as e: fg.read_status('printer', 'SERIAL', 'code')
+    return str(e.value)
+
+def test_a_refusal_that_is_not_about_the_access_code_is_not_called_one(monkeypatch):
+    """A printer that is still starting refuses with "server unavailable". Every refusal was reported as "refused the
+    access code Bambu Studio holds for it", which sends the user to an access code that is right."""
+    for why in ('Bad user name or password', 'Not authorized', '4', '5'):
+        assert refusing(monkeypatch, why) == 'printer refused the access code Bambu Studio holds for it'
+    assert refusing(monkeypatch, 'Server unavailable') == 'printer refused the connection (Server unavailable)'
+    assert refusing(monkeypatch, '3') == 'printer refused the connection (3)'

@@ -627,7 +627,7 @@ def printer_link(ip, serial, code, client_id, on_report, on_refused=None):
     def on_message(c, userdata, msg):
         try: d = json.loads(msg.payload)
         except ValueError: return
-        if isinstance(d.get('print'), dict): on_report(d['print'])
+        if isinstance(d, dict) and isinstance(d.get('print'), dict): on_report(d['print'])   # anything else is passed over: an error here ends the link's thread
     try: c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
     except AttributeError: c = mqtt.Client(client_id=client_id)
     c.username_pw_set('bblp', code)
@@ -644,6 +644,12 @@ def has_spools(status):
     printer with nothing loaded, and ended every amount entered for an AMS tray. Without the list nothing is judged."""
     return isinstance(status.get('ams'), dict) and isinstance(status['ams'].get('ams'), list)
 
+def code_refused(why):
+    """Is this refusal of a connection about the access code? why: the reason as the link gives it, paho 2's name for it
+    or paho 1's number (4 = bad user name or password, 5 = not authorised). Any other is not: a printer that is still
+    starting refuses with "Server unavailable", and the access code is right."""
+    return str(why).strip().lower() in ('4', '5', 'bad user name or password', 'not authorized')
+
 def read_status(ip, serial, code, wait=10.0):
     """The printer's full status, read once: waited for until it has its spools (has_spools), three seconds at most
     after its first piece, and returned as it then is. The caller asks has_spools before it judges by it."""
@@ -655,7 +661,7 @@ def read_status(ip, serial, code, wait=10.0):
     c = printer_link(ip, serial, code, f'bambu-filament-guard-{os.getpid()}-{next(LINK_NUMBER)}', on_report, lambda rc: (refused.append(rc), full.set()))
     try:
         if not full.wait(wait): raise PrinterError(f'{ip} did not report its status')
-        if refused: raise PrinterError(f'{ip} refused the access code Bambu Studio holds for it')
+        if refused: raise PrinterError(f'{ip} refused the access code Bambu Studio holds for it' if code_refused(refused[0]) else f'{ip} refused the connection ({refused[0]})')
         for tenth in range(30):                           # the H2D sends its report in pieces: a second at least, three at most, for the spools
             time.sleep(0.1)
             with lock:
@@ -1506,7 +1512,7 @@ def selftest(cfg):
             if not has_spools(status): raise PrinterError('it did not report its spools')
             trays, _ = trays_of(status); guard_ledger.apply(trays, p['serial'])
             out.append((True, f"{p['name']}: {len(trays)} spool(s), {sum(t['grams'] is not None for t in trays)} with a known amount"))
-        except PrinterError as e: out.append((False if 'refused' in str(e) else None, f"{p['name']}: {e}"))
+        except PrinterError as e: out.append((False if 'refused the access code' in str(e) else None, f"{p['name']}: {e}"))
     import guard_learn
     history = guard_learn.load()
     jobs = [j for trays in history.values() for h in trays.values() for j in h.get('jobs', [])]
