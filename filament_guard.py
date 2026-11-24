@@ -541,6 +541,8 @@ def project_title(gcode_path):
 
 class PrinterError(Exception): pass
 
+UNKNOWN_MODEL = 'unknown model'                         # of a printer whose serial Bambu Studio's list of printers does not name
+
 def bs_conf():
     s = open(os.path.join(BS_DATA, 'BambuStudio.conf'), encoding='utf-8', errors='replace').read()
     return json.loads(s[:s.rfind('}') + 1])                    # a checksum line follows the JSON
@@ -561,7 +563,7 @@ def known_printers(conf):
     models = model_by_serial_prefix()
     last = conf.get('app', {}).get('user_last_selected_machine')
     serials = sorted(conf.get('access_code', {}), key=lambda s: s != last)
-    out = [{'serial': s, 'model': models.get(s[:3], 'unknown model')} for s in serials]
+    out = [{'serial': s, 'model': models.get(s[:3], UNKNOWN_MODEL)} for s in serials]
     for p in out: p['name'] = p['model'] + (f" (…{p['serial'][-4:]})" if sum(o['model'] == p['model'] for o in out) > 1 else '')
     return out
 
@@ -905,10 +907,17 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
     seen: a dict that carries the printers' status from one call to the next, for several plates checked in one go."""
     res = {'title': title, 'model': plate['printer_model'], 'time': plate['time'], 'times': times, 'plate': plate, 'printer': None, 'rows': [], 'worst': 'OK', 'error': None}
     try:
-        conf = bs_conf()
-        printer = pick_printer(plate['printer_model'], known_printers(conf))
-        if not printer:                      # sliced for a printer that is not on this LAN (or not a Bambu printer): nothing to ask, so no card
-            res['quiet'] = True
+        conf = bs_conf(); printers = known_printers(conf)
+        printer = pick_printer(plate['printer_model'], printers)
+        if not printer:
+            sliced, odd = f"a {plate['printer_model']}" if plate['printer_model'] else 'another printer', [p['serial'][-4:] for p in printers if p['model'] == UNKNOWN_MODEL]
+            if odd:                          # it may be the very printer this plate is for: said on a card, where silence looked like "enough"
+                raise PrinterError(f"the guard cannot tell which model your printer …{' or …'.join(odd)} is (Bambu Studio's list of printers does not name its serial number), "
+                                   f"so this plate, sliced for {sliced}, was not checked")
+            res['quiet'] = True              # sliced for a printer that is not on this LAN (or not a Bambu printer): nothing to ask, so no card
+            if len(printers) == 1:           # but one line where the only printer known is of another model: the wrong preset, most likely
+                res['line'] = f"Not checked: sliced for {sliced}, your printer is a {printers[0]['model']}"
+                raise PrinterError(res['line'][:1].lower() + res['line'][1:])
             raise PrinterError(f"Bambu Studio holds no LAN access code for a {plate['printer_model'] or 'printer of this kind'}")
         status = (seen or {}).get(printer['serial'])
         if status is None:
@@ -1155,6 +1164,7 @@ class Guard:
         if self.tray: self.tray.set(guard_ui.tone_of(res), self.last_text()); self.tray.refresh()
         if res['error']:
             if full or not res.get('quiet'): self.card.show(res, beside=beside, hold=not full)
+            elif res.get('line') and not beside and self.cfg['ok_seconds']: self.card.line(res['line'], 'muted', self.cfg['ok_seconds'], res.get('pid'), hold=True)
             self.warning = None
             return
         res['ignored'] = self.ignored(res)
@@ -1480,6 +1490,9 @@ def selftest(cfg):
     printers = known_printers(conf)
     if not printers: out.append((False, 'Bambu Studio holds no LAN access code for a printer: open the printer once on its Device tab'))
     for p in printers:
+        if p['model'] == UNKNOWN_MODEL:
+            out.append((False, f"The printer …{p['serial'][-4:]}: the guard cannot tell which model it is (Bambu Studio's list of printers does not name its serial number): "
+                               'plates sliced for it are not checked')); continue
         try:
             ip = printer_ip(p['serial'], cfg)
             if not ip: raise PrinterError('it is not announcing itself on this network (is it on?)')

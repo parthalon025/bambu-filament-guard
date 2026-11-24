@@ -610,3 +610,50 @@ def test_the_card_names_the_printer_asked_where_two_are_of_one_model(state, monk
     assert card_shown(monkeypatch, res)[0][-1].startswith('Spools as the Bambu Lab P1S (…0002) reports them now;')
     busy = dict(ENOUGH, gcode_state='RUNNING', subtask_name='Cube'); three_printers(monkeypatch, 'P1S-TWO-0002', busy)
     assert 'Spools as the Bambu Lab P1S (…0002) reports them now' in card_shown(monkeypatch, fg.evaluate(P1S_PLATE, CFG, 'Vase'))[0][-1]
+
+def knows(monkeypatch, *serials):
+    """Bambu Studio holds an access code for these printers, and its list of printers names the P1S and the H2D."""
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {s: 'code' for s in serials}})
+    monkeypatch.setattr(fg, 'model_by_serial_prefix', lambda: {'P1S': 'Bambu Lab P1S', 'H2D': 'Bambu Lab H2D'})
+    monkeypatch.setattr(fg, 'printer_ip', lambda *a, **k: 'printer'); monkeypatch.setattr(fg, 'read_status', lambda *a, **k: ENOUGH)
+
+def test_a_printer_whose_model_cannot_be_told_is_a_fault_that_shows(state, monkeypatch):
+    """Bambu Studio's list of printers has no entry for the serial of the user's printer (a model newer than the list):
+    no plate matched it, every check ended quiet, with no card, and the log said, untruly, that Bambu Studio holds no
+    access code for the plate's model."""
+    knows(monkeypatch, 'NEW-ONE-0001'); res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert not res.get('quiet') and fg.headline(res) == 'Filament could not be checked'
+    assert res['error'] == ("the guard cannot tell which model your printer …0001 is (Bambu Studio's list of printers does not name its serial number), "
+                            "so this plate, sliced for a Bambu Lab H2D, was not checked")
+    knows(monkeypatch, 'NEW-ONE-0001', 'H2D-ONE-0003')
+    assert fg.evaluate(BLUE, CFG, 'Benchy')['printer']['name'] == 'Bambu Lab H2D'              # a printer of the plate's model is known: that one is asked
+
+def test_a_plate_sliced_for_another_model_than_the_one_printer_known_is_answered_in_one_line(state, monkeypatch):
+    """One printer, and a plate sliced with another model's preset: nothing showed at all, which is what "enough" with
+    the one line turned off looks like. With several printers known and none of the plate's model it stays quiet."""
+    knows(monkeypatch, 'P1S-ONE-0001'); res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['quiet'] and res['line'] == 'Not checked: sliced for a Bambu Lab H2D, your printer is a Bambu Lab P1S' and fg.exit_code(res) == 3
+    assert res['error'] == 'not checked: sliced for a Bambu Lab H2D, your printer is a Bambu Lab P1S'
+    knows(monkeypatch, 'P1S-ONE-0001', 'P1S-TWO-0002'); res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['quiet'] and 'line' not in res and res['error'] == 'Bambu Studio holds no LAN access code for a Bambu Lab H2D'
+    knows(monkeypatch); res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['quiet'] and 'line' not in res
+
+@pytest.mark.windows
+def test_the_one_line_for_a_plate_that_is_not_checked_shows_as_the_enough_line_does(state, tmp_path, monkeypatch):
+    f = slice_file(tmp_path, gcode()); plate = fg.parse_plate(f.read_text()); knows(monkeypatch, 'P1S-ONE-0001')
+    guard = guard_with(); guard.take_slice(str(f), plate); run_queued(guard)
+    assert guard.card.shown == [('line', 'Not checked: sliced for a Bambu Lab H2D, your printer is a Bambu Lab P1S', True)]
+    res = guard.last; guard = guard_with(); guard.deliver(res, beside=4321)
+    assert guard.card.shown == []                                                              # beside "Send print job" only a warning is worth a card
+    guard.deliver(res, full=True); assert guard.card.shown == [('show', 0)]                    # asked for: the card, with the reason
+    guard = guard_with(dict(CFG, ok_seconds=0)); guard.deliver(res)
+    assert guard.card.shown == []                                                              # quiet was asked for
+
+@pytest.mark.windows
+def test_the_self_test_fails_on_a_printer_whose_model_cannot_be_told(state, monkeypatch):
+    import guard_ui
+    knows(monkeypatch, 'NEW-ONE-0001', 'H2D-ONE-0003'); monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None); monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {})
+    lines = fg.selftest(CFG)
+    assert (False, "The printer …0001: the guard cannot tell which model it is (Bambu Studio's list of printers does not name its serial number): plates sliced for it are not checked") in lines
+    assert (True, 'Bambu Lab H2D: 2 spool(s), 2 with a known amount') in lines and not any('unknown model' in text for mark, text in lines)
