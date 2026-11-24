@@ -1260,3 +1260,10 @@ def test_the_icon_is_stopped_whatever_ends_the_cards_loop(state):
     guard.tray = type('Icon', (), {'stop': lambda self: stopped.append('icon')})(); guard.jobs['SERIAL'] = type('Job', (), {'stopped': threading.Event()})()
     with pytest.raises(RuntimeError): guard.loop()
     assert stopped == ['icon'] and guard.jobs['SERIAL'].stopped.is_set()
+
+def test_a_message_is_one_line_of_the_log_whatever_it_holds(state):
+    """A job's or a project's name comes from the printer or from a file and can hold a line break. Logged as it came, it
+    made a line of its own, with any time and text in it: in a log users are asked to paste into public reports."""
+    fg.log('job "Benchy\n2026-11-24 10:00:00 watching for sliced plates (forged)\r\nnext\x1b[2J end\x85" counted'); fg.log('the next line')
+    first, second = (state / 'guard.log').read_text(encoding='utf-8').splitlines()
+    assert first.endswith(' job "Benchy 2026-11-24 10:00:00 watching for sliced plates (forged)  next [2J end " counted') and second.endswith(' the next line')

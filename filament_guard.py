@@ -127,11 +127,13 @@ def save_config(cfg):
     json.dump({k: v for k, v in cfg.items() if DEFAULTS.get(k) != v}, open(CONFIG, 'w', encoding='utf-8'), indent=1)
 
 LOST = [0]                                                # the lines guard.log did not take since the last one it took
+CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f\u2028\u2029]')   # line breaks and the other control characters: none of them goes into the log
 
 def log(msg):
     """One line into guard.log, with its time. It raises nothing: a log that could not be written (the disk full, the file
     held by another program) once cost a warning its card, and ended the watcher and the card's loop for good. The lines
-    lost are counted, and the next line that is written says how many."""
+    lost are counted, and the next line that is written says how many. A message is one line whatever it holds: a job
+    or project name with a line break in it, from the printer or a file, forged lines of a log users paste into reports."""
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
         path, lost = os.path.join(STATE_DIR, 'guard.log'), LOST[0]
@@ -139,7 +141,7 @@ def log(msg):
             if os.path.getsize(path) > 1_000_000: os.replace(path, path + '.1')
         except OSError: pass
         with open(path, 'a', encoding='utf-8', errors='backslashreplace') as f:
-            f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + (f"({lost} line{'s' if lost != 1 else ''} before this one could not be written) " if lost else '') + f'{msg}\n')
+            f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + (f"({lost} line{'s' if lost != 1 else ''} before this one could not be written) " if lost else '') + CONTROL.sub(' ', f'{msg}') + '\n')
         LOST[0] -= lost
     except (OSError, ValueError): LOST[0] += 1
 
