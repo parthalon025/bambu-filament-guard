@@ -100,9 +100,10 @@ def printing(state, spools, name='Part', task='2', mapping=(0,), layer=0, layers
     return dict({'gcode_state': state, 'subtask_name': name, 'task_id': task, 'layer_num': layer, 'total_layer_num': layers, 'mapping': list(mapping),
                  'ams': {'ams': [{'id': '0', 'tray': spools}]}}, **more)
 
-def part(grams=300.0, title='Part', layers=100):
-    """The slice a job named Part is printed from: one filament, the same grams in each of its 100 layers."""
-    fg.remember_slice(title, 1, {'layers': layers, 'filaments': [{'slot': 1, 'grams': grams}]}, kept({1: [0.0] + [grams / layers] * layers}))
+def part(grams=300.0, title='Part', layers=100, **filament):
+    """The slice a job named Part is printed from: one filament, the same grams in each of its 100 layers. filament: what
+    else the slice says of it (type, colour, fid, nozzle)."""
+    fg.remember_slice(title, 1, {'layers': layers, 'filaments': [dict({'slot': 1, 'grams': grams}, **filament)]}, kept({1: [0.0] + [grams / layers] * layers}))
 
 def needing(grams, typ='PLA', colour='#101010'):
     """A plate for the H2D that needs this much of one filament."""

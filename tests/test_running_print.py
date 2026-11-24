@@ -1,11 +1,12 @@
 """Counting the print that is running before a new plate is checked (guard_ledger, filament_guard.evaluate)."""
 import os
+import time
 
 import pytest
 
 import filament_guard as fg
 import guard_ledger as gl
-from helpers import CFG, H2D_JOB, SLICE, kept, running, BLUE, BLUE_JOB, needing, part, printing, spool
+from helpers import CFG, H2D_JOB, SLICE, gcode, kept, running, BLUE, BLUE_JOB, needing, part, printing, spool
 
 
 PETG_PLATE = {'printer_model': 'Bambu Lab H2D', 'time': '', 'layers': 3,
@@ -216,3 +217,57 @@ def test_a_print_the_guard_cannot_count_leaves_no_row_enough_that_rests_on_its_t
         ('UNKNOWN', 'a print the guard could not count is drawing on A1'), ('UNKNOWN', 'a print the guard could not count is drawing on A2')]
     running(monkeypatch, dict(job, gcode_state='FINISH')); res = fg.evaluate(both(300), CFG, 'Next')
     assert res['worst'] == 'OK' and res['printer']['counted'] is None                    # over: the amounts are the spools' own again
+
+BLACK = dict(type='PLA', colour='#101010', fid='GFA00', nozzle=None)                      # what a slice says of its filament
+
+def test_what_the_running_print_owes_a_tray_that_is_gone_is_taken_off_the_spools_of_its_filament(state, monkeypatch):
+    """A job mapped to A1 still needs 300 g. A1 has run out and its spool is taken out: the status lists the tray
+    without a material. The AMS goes on from A2, the same filament, which reads 400 g: the 300 g come off A2, as they
+    do while the empty spool is still in A1, and a 300 g plate does not fit. Named by the slice's filament, the print
+    is counted; when no loaded spool is that filament, or the slice does not say what it is, it is not counted, and
+    no spool is good for "enough"."""
+    part(300.0, **BLACK); a2, red = spool(1, 400, fid='GFA00'), spool(2, 500, colour='C12E1F', fid='GFA00')
+    def check(spools, grams=300, colour='#101010'):
+        running(monkeypatch, printing('RUNNING', spools, layer=1)); res = fg.evaluate(needing(grams, colour=colour), CFG, 'Next'); row = res['rows'][0]
+        return row['status'], {t['label']: t['grams'] for t in row['trays']}, res['printer']['counted'], row['note']
+    assert check([spool(0, 0, fid='GFA00'), a2])[:3] == ('SHORT', {'A2': 100, 'A1': 0}, True)     # the empty spool still in its tray
+    status, amounts, counted, note = check([{'id': '0'}, a2])                                      # taken out
+    assert (status, amounts, counted) == ('SHORT', {'A2': 100}, True) and 'A2 reads 400 g, of which the running print takes 300 g once A1 runs out' in note
+    running(monkeypatch, printing('RUNNING', [{'id': '0'}, spool(1, 100, fid='GFA00')], layer=1)); res = fg.evaluate(needing(50), CFG, 'Next')
+    assert res['printer']['beyond'] == {'A1': 200} and "it needs 200 g more of A1's filament than the loaded spools hold" in fg.report_text(res)
+    grey = check([{'id': '0'}, spool(1, 400, colour='202020', fid='GFA00')], 100, '#202020')      # no loaded spool is the job's filament: which one it goes on from cannot be told
+    assert grey == ('UNKNOWN', {'A2': 400}, False, 'a print the guard could not count is drawing on A2')
+    part(300.0)                                                                                    # a slice kept by an earlier guard: it does not say what the filament is
+    status, amounts, counted, note = check([{'id': '0'}, a2, red])
+    assert (status, amounts, counted, note) == ('UNKNOWN', {'A2': 400}, False, 'a print the guard could not count is drawing on A2')
+
+def test_what_the_running_print_owes_a_tray_of_unknown_amount_is_taken_off_the_spools_of_its_filament(state, monkeypatch):
+    """The job's tray, A1, has no tag and no entered amount; the print still needs 300 g of it. How much of that A1
+    holds cannot be told: all of it is taken off A2, the same filament, which the AMS goes on with. The card does not
+    say that the running print needs more than is loaded: nobody knows that."""
+    part(300.0, **BLACK); spools = [spool(0, fid='GFA00'), spool(1, 400, fid='GFA00')]
+    running(monkeypatch, printing('RUNNING', spools, layer=1)); res = fg.evaluate(needing(200), CFG, 'Next'); row = res['rows'][0]
+    assert row['status'] == 'SHORT' and {t['label']: t['grams'] for t in row['trays']} == {'A2': 100, 'A1': None} and res['printer']['counted'] is True
+    assert 'A2 reads 400 g, of which the running print takes 300 g once A1 runs out' in row['note'] and 'A1 holds an unknown amount more' in row['note']
+    running(monkeypatch, printing('RUNNING', [spool(0, fid='GFA00')], layer=1)); res = fg.evaluate(needing(200), CFG, 'Next')
+    assert res['printer']['beyond'] == {} and res['rows'][0]['status'] == 'UNKNOWN'
+
+def test_a_slice_is_remembered_with_what_it_says_of_its_filaments(state):
+    plate = fg.parse_plate(gcode())
+    fg.remember_slice('Benchy', 1, plate)
+    assert fg.load_state()['slices'][0]['filaments'] == [{'slot': 1, 'grams': 9.99, 'type': 'PLA', 'colour': '#0A2989', 'fid': 'GFA00', 'nozzle': None},
+                                                         {'slot': 3, 'grams': 10.87, 'type': 'PLA', 'colour': '#C12E1F', 'fid': 'GFA00', 'nozzle': None}]
+
+def test_a_job_counted_on_a_tray_that_is_gone_makes_the_entered_spools_of_its_filament_out_of_date(state):
+    """The guard starts while a job mapped to A1 runs on, A1 empty and taken out: the print has gone on from another
+    spool, and how much of it cannot be told. The amount entered for A2, the same filament, is out of date when the
+    job is counted; A3, another material, keeps its amount. When the slice does not say what the filament is, every
+    amount is out of date."""
+    spools = [{'id': '0'}, spool(1, fid='GFA00'), spool(2, typ='PETG')]; book = lambda: fg.load_state()['spools']['SERIAL']
+    def counted():
+        gl.enter('SERIAL', {'label': 'A2', 'type': 'PLA', 'colour': '#101010'}, 1000); gl.enter('SERIAL', {'label': 'A3', 'type': 'PETG', 'colour': '#101010'}, 400)
+        watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools, task='1')); watch.look(printing('RUNNING', spools, task=str(time.time()), layer=40))
+        return {label: bool(entry.get('stale')) for label, entry in book().items()}
+    part(300.0, **BLACK); assert counted() == {'A2': True, 'A3': False} and book()['A3']['grams'] == 400
+    assert "out of date: A2, which the print may go on from: A1's amount is not known" in (state / 'guard.log').read_text()
+    part(300.0); assert counted() == {'A2': True, 'A3': True}

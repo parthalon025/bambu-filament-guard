@@ -703,7 +703,7 @@ def same_filament(a, b):
     return (a['label'] != b['label'] and a['type'].upper() == b['type'].upper() and a['colour'] == b['colour']
             and (not a['fid'] or not b['fid'] or a['fid'] == b['fid']) and (a.get('nozzle') is None or b.get('nozzle') is None or a['nozzle'] == b['nozzle']))
 
-def credit(trays, owed, learned=None, running=None, order=None, taken=True):
+def credit(trays, owed, learned=None, running=None, order=None, taken=True, gone=()):
     """What each tray is counted with, for the moment the checked print could start: its reading, corrected by what was
     learned of it (learned: guard_learn.corrections; only ever lower, and never an amount entered by hand), less what the
     print running now still needs of it (owed).
@@ -717,13 +717,17 @@ def credit(trays, owed, learned=None, running=None, order=None, taken=True):
       - What the running print needs beyond a tray's amount comes, with AMS auto refill, from the loaded spools of the
         same filament (same_filament), the fullest first: it is taken off them ('taken' on the tray, 'refills' on
         theirs); what none of them holds is 'beyond' (assess and the card say so).
+      - What the print needs of a tray whose amount is not known (no tag and no entry, or an entry out of date), or of
+        one that is no longer loaded (gone: such trays as the slice names their filament, with what they are owed), is
+        all taken as beyond it: once it vanished there, and the spool the AMS had gone on with read "enough". For a
+        tray that is gone, what no loaded spool holds is its 'beyond'; of a tray of unknown amount nobody knows that.
     Keeps the amount before any of this ('reads') whenever something was corrected or taken off. The spools a print
     goes on with are taken in the order they would be without learning (`order`), so that no tray is ever counted
     higher for what was learned of another."""
     if learned: order = {t['label']: t.get('left', t['grams']) for t in credit([dict(t) for t in trays], owed, None, running, taken=taken)}
-    counted = set()                                              # the entered trays guard_ledger has taken the running print off
+    counted, blind = set(), {}                                   # the entered trays guard_ledger has taken the running print off; what is owed to trays of unknown amount
     for t in trays:
-        if t['grams'] is None or t.get('stale'): continue
+        if t['grams'] is None or t.get('stale'): blind[t['label']] = owed.get(t['label'], 0.0); continue
         raw, share, fix, over = t['grams'], owed.get(t['label'], 0.0), {}, 0.0
         if not t.get('entered'): fix = (learned or {}).get(t['label'], {})
         elif not running: share = 0.0
@@ -738,8 +742,8 @@ def credit(trays, owed, learned=None, running=None, order=None, taken=True):
         if over: t['owes'] = over
         t['grams'] = t['left'] = base - t.get('reserved', 0.0)
     order = order or {t['label']: t['left'] for t in trays if 'left' in t}
-    for t in trays:
-        excess = (t.get('owes') or 0.0) - (t.get('reserved') or 0.0)
+    for t in trays + list(gone):
+        excess = blind.get(t['label'], 0.0) + (t.get('owes') or 0.0) - (t.get('reserved') or 0.0)
         if excess <= 1e-6: continue
         for o in trays:
             g = min(excess, (o.get('gave') or {}).get(t['label'], 0.0)) if o['label'] in counted else 0.0
@@ -751,7 +755,7 @@ def credit(trays, owed, learned=None, running=None, order=None, taken=True):
             o['grams'] -= g; excess -= g
             o.setdefault('refills', []).append((t['label'], g)); t.setdefault('taken', []).append((o['label'], g))
             if excess <= 1e-6: break
-        if excess > 1e-6: t['beyond'] = excess
+        if excess > 1e-6 and t['label'] not in blind: t['beyond'] = excess
     return trays
 
 def pick_printer(model, printers):
@@ -825,6 +829,12 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         # it (see credit: an entered amount the ledger has not yet taken it off included).
         state = load_state(); guard_ledger.note_job(printer['serial'], status, state)
         owed, counted = guard_ledger.owed(status, state.get('slices', []))
+        # What is owed to a tray that is no longer loaded: the print has gone on from another spool, of the filament the
+        # slice names for that tray. Where it names none, or no loaded spool is of it, the print is not counted.
+        absent = [l for l in owed if owed[l] and not any(t['label'] == l for t in trays)]
+        fils = guard_ledger.filaments_of(status, state.get('slices', [])) if absent else {}
+        gone = [dict(fils[l], owes=owed[l]) for l in absent if l in fils and any(t['grams'] is not None and same_filament(fils[l], t) for t in trays)]
+        if len(gone) < len(absent): owed, counted, gone = {}, False, []
         running = guard_ledger.job_key(status) if status.get('gcode_state') in BUSY else None
         learned = reserve = unlearned = None
         if cfg.get('learn'):
@@ -833,7 +843,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
             except Exception as e:           # what was learned may make a check stricter, never cost it: the check goes on as with learning off, and says so
                 unlearned = f'what was learned from previous prints could not be used ({e.__class__.__name__}): this check is as without it'
                 log(f'learning: {e.__class__.__name__}: {e}: this check is as with learning off')
-        credit(trays, owed, learned, running, taken=guard_ledger.taken_off(status, state, printer['serial']))
+        credit(trays, owed, learned, running, taken=guard_ledger.taken_off(status, state, printer['serial']), gone=gone)
         rows = [assess(f, trays, cfg, times) for f in plate['filaments']]
         share_spools(rows, plate['filaments'], trays, cfg, times)
         if counted is False: uncounted(rows, guard_ledger.drawn_on(status))
@@ -846,7 +856,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         return res
     res['printer'] = {'model': printer['model'], 'serial': printer['serial'], 'state': status.get('gcode_state', '?'), 'job': status.get('subtask_name', ''),
                       'percent': status.get('mc_percent'), 'layer': status.get('layer_num'), 'layers': status.get('total_layer_num'), 'counted': counted,
-                      'beyond': {t['label']: t['beyond'] for t in trays if round(t.get('beyond') or 0)}, 'reserve': reserve, 'unlearned': unlearned}
+                      'beyond': {t['label']: t['beyond'] for t in trays + gone if round(t.get('beyond') or 0)}, 'reserve': reserve, 'unlearned': unlearned}
     res['rows'] = rows
     res['worst'] = max((r['status'] for r in rows), key=SEVERITY.get, default='OK')
     return res
@@ -952,7 +962,8 @@ def load_profile(entry, part='layers'):
 
 def remember_slice(title, plate_no, plate, profile=None):
     """Notes a slice that was read: which Bambu Studio version wrote it (the self-test reports that), what it needs
-    (guard_ledger counts a print down from it when the printer starts a job of that name) and, when given, its per-layer
+    of which filament (guard_ledger counts a print down from it when the printer starts a job of that name, and tells
+    by the filament which spools a print has gone on from when its own tray is empty) and, when given, its per-layer
     profile (what a print of it still needs while it runs). A profile is a file of its own in profiles/, because the
     state file is read and written whole at every change: its parts as layer_profile gives them, by slot and layer.
     Kept are the 30 newest slices, each with its profile. A plate sliced again keeps its 3 newest slices that differ
@@ -973,7 +984,7 @@ def remember_slice(title, plate_no, plate, profile=None):
         def change(st):
             st['verified'] = {'version': version, 'at': time.time()}
             mine = {'title': title, 'plate': plate_no, 'layers': plate.get('layers'), 'at': time.time(),
-                    'filaments': [{'slot': f['slot'], 'grams': f['grams']} for f in plate['filaments']]}
+                    'filaments': [{k: f[k] for k in ('slot', 'grams', 'type', 'colour', 'fid', 'nozzle') if k in f} for f in plate['filaments']]}
             if name: mine['profile'] = name
             same = lambda s: (s['title'], s.get('plate')) == (title, plate_no)
             held = lambda s: any(guard_ledger.fits(s, job.get('name') or '', job.get('layers'), job.get('plate')) for job in st.get('on', {}).values())
