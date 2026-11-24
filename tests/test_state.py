@@ -129,3 +129,56 @@ def test_a_guard_ended_while_it_saves_a_setting_leaves_the_file_as_it_was(state,
     fg.save_config(cfg, 'spool_reserve_pct')
     assert steps == ['flushed to the disk', 'put in place'] and json.load(open(fg.CONFIG)) == {'learn': False, 'margin_pct': 25, 'spool_reserve_pct': 5}
     assert sorted(os.listdir(state)) == ['config.json']                                  # and no temp file stays
+
+def test_a_state_file_is_flushed_to_the_disk_before_it_takes_the_old_ones_place(state, monkeypatch):
+    """NTFS journals a rename and not the new file's data: a power cut seconds after a write left state.json as zeros,
+    which the next start set aside as damaged, and every entered amount with it. The new file is flushed first, and the
+    file it replaces stays beside it as state.json.bak (a rename, not a copy)."""
+    steps, sync, replace = [], os.fsync, os.replace
+    monkeypatch.setattr(fg.os, 'fsync', lambda fd: (steps.append('flushed to the disk'), sync(fd))[1])
+    monkeypatch.setattr(fg.os, 'replace', lambda a, b: (steps.append(f'{os.path.basename(a)} -> {os.path.basename(b)}'), replace(a, b))[1])
+    fg.update_state(lambda st: st.__setitem__('spools', {'S': {'A1': {'grams': 400.0}}}))
+    assert steps[0] == 'flushed to the disk' and steps[1].endswith('.new -> state.json') and len(steps) == 2
+    del steps[:]; fg.update_state(lambda st: st.__setitem__('followed', {'S': 1.0}))
+    assert steps[:2] == ['flushed to the disk', 'state.json -> state.json.bak'] and steps[2].endswith('.new -> state.json') and len(steps) == 3
+    assert json.load(open(state / 'state.json.bak')) == {'spools': {'S': {'A1': {'grams': 400.0}}}} and sorted(os.listdir(state)) == ['state.json', 'state.json.bak']
+
+def test_a_state_file_lost_to_a_power_cut_is_read_from_its_last_good_copy(state):
+    """state.json as zeros (what a power cut leaves of a file whose data was not yet on the disk), cut short, or gone
+    between the two steps of a write: the copy of one write earlier is taken, not an empty state, and the log says so.
+    Only with no good copy does the guard start empty."""
+    entered = {'spools': {'S': {'A1': {'grams': 400.0}}}}
+    fg.update_state(lambda st: st.update(entered)); fg.update_state(lambda st: st.__setitem__('followed', {'S': 1.0}))
+    (state / 'state.json').write_bytes(b'\0' * 64)
+    assert fg.load_state() == entered and (state / 'state.json.damaged').read_bytes() == b'\0' * 64
+    assert 'state.json was damaged: set aside as state.json.damaged: its last good copy, state.json.bak, is used' in (state / 'guard.log').read_text()
+    assert fg.load_state() == entered and (state / 'guard.log').read_text().count('last good copy') == 1    # it is the state file again: said once
+    fg.update_state(lambda st: st.__setitem__('followed', {'S': 2.0})); (state / 'state.json').unlink()   # the guard ended between the two steps of a write
+    assert fg.load_state() == entered and 'state.json was gone: its last good copy, state.json.bak, is used' in (state / 'guard.log').read_text()
+    fg.update_state(lambda st: st.__setitem__('followed', {'S': 3.0}))
+    (state / 'state.json').write_text('{"spools": {"S"'); (state / 'state.json.bak').write_text('{"spools": ')    # neither can be read
+    assert fg.load_state() == {} and 'state.json was damaged: set aside as state.json.damaged, and its last good copy cannot be read either: starting empty' in (state / 'guard.log').read_text()
+    assert fg.load_state() == {} and fg.update_state(lambda st: st.setdefault('x', 1)) == 1 and fg.load_state() == {'x': 1}
+
+def test_a_state_file_that_holds_no_object_is_set_aside_like_a_damaged_one(state):
+    """state.json or learned.json holding null, a list or a number is JSON, so it was not set aside: every change of the
+    state then raised AttributeError, for good."""
+    import guard_learn as gn
+    for text in ('null', '[1]', '5'):
+        (state / 'state.json').write_text(text)
+        assert fg.update_state(lambda st: st.setdefault('x', 1)) == 1 and (state / 'state.json.damaged').read_text() == text
+        (state / 'state.json').unlink(); (state / 'state.json.bak').unlink(missing_ok=True)
+        (state / 'learned.json').write_text(text)
+        assert gn.load() == {} and (state / 'learned.json.damaged').read_text() == text and not (state / 'learned.json').exists()
+
+def test_only_the_files_that_cannot_be_had_again_keep_a_last_good_copy(state):
+    """A per-layer profile is read again from its slice, and goes when its slice does: a copy of each beside it would
+    stay for good. What was learned keeps one, and forgetting it takes the copy too: it still held what was forgotten."""
+    import guard_learn as gn
+    plate = {'layers': 2, 'filaments': [{'slot': 1, 'grams': 3.0}]}
+    for _ in range(2): fg.remember_slice('Benchy', 1, plate, {'layers': {1: [1.0, 1.0, 1.0]}, 'purge': {1: [0.0] * 3}, 'pushed': {1: [0.0] * 3}})
+    assert [name for name in os.listdir(state / 'profiles') if not name.endswith('.json')] == [] and (state / 'state.json.bak').exists()
+    gn.save({'SERIAL': {'C3': {'jobs': []}}}); gn.save({'SERIAL': {'C3': {'jobs': []}, 'A1': {'jobs': []}}})
+    assert json.load(open(state / 'learned.json.bak')) == {'SERIAL': {'C3': {'jobs': []}}}
+    gn.forget()
+    assert gn.load() == {} and not (state / 'learned.json.bak').exists()

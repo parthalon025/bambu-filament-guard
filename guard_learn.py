@@ -234,6 +234,7 @@ def forget(label=None, printer=None, names=None):
             del history[serial][label]
             what = f'what was learned of {label} on {names.get(serial, serial)}'
         save(history)
+        with fg.contextlib.suppress(OSError): fg.os.remove(path() + '.bak')      # the copy write_json keeps of the file it replaced still held what is forgotten
     fg.log(f'{what} is forgotten')
     return what
 

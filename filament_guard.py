@@ -234,32 +234,57 @@ def state_lock(wait=10.0):
     try: yield
     finally: k32.ReleaseMutex(handle)
 
+KEPT = ('state.json', 'learned.json')                    # the files whose last good copy is kept beside them (<name>.bak): what they hold cannot be had
+                                                          # again. A per-layer profile can, from its slice, and goes with it: it keeps none.
+
+def held_json(path, empty):
+    """What a JSON file holds, when that is of the kind of `empty` (an object); ValueError as for a file that is no JSON
+    when it is not (null, a list): the guard wrote no such file, and every change of it would raise."""
+    with open(path, encoding='utf-8') as f: data = json.load(f)
+    if type(data) is not type(empty): raise ValueError(f'it holds a {type(data).__name__}')
+    return data
+
 def read_json(path, empty):
     """A JSON file of the state folder, read under state_lock: `empty` when there is none. A program outside the guard
-    holding it is waited for, then StateBusy. A damaged file is set aside (and logged), and `empty` is returned: kept
-    in place, it would make every later read fail."""
+    holding it is waited for, then StateBusy. A damaged file (cut short, zeros after a power cut, JSON that is no
+    object) is set aside as <name>.damaged: kept in place, it would make every later read fail. In its place, or in
+    place of a file that is gone (a guard ended between the two steps of a write), its last good copy is taken,
+    <name>.bak (write_json): the file as it was one write earlier, where `empty` would lose every entered amount. That
+    copy then is the file. Only without one is `empty` returned. The log says which."""
+    name, bak = os.path.basename(path), path + '.bak'
     with state_lock():
         for attempt in range(40):
-            try:
-                with open(path, encoding='utf-8') as f: return json.load(f)
-            except FileNotFoundError: return empty
-            except PermissionError: time.sleep(0.05)
+            try: return held_json(path, empty)
+            except FileNotFoundError:
+                if not os.path.exists(bak): return empty
+                lost = f'{name} was gone'
+            except PermissionError: time.sleep(0.05); continue
             except ValueError:
-                try: os.replace(path, path + '.damaged')
-                except OSError: pass
-                log(f'{os.path.basename(path)} was damaged: set aside as {os.path.basename(path)}.damaged, starting empty')
-                return empty
-        raise StateBusy(f'{os.path.basename(path)} is held by another program')
+                with contextlib.suppress(OSError): os.replace(path, path + '.damaged')
+                lost = f'{name} was damaged: set aside as {name}.damaged'
+            try: data = held_json(bak, empty); os.replace(bak, path)
+            except PermissionError: time.sleep(0.05); continue
+            except FileNotFoundError: log(f'{lost}, starting empty'); return empty
+            except ValueError:
+                with contextlib.suppress(OSError): os.replace(bak, bak + '.damaged')
+                log(f'{lost}, and its last good copy cannot be read either: starting empty'); return empty
+            log(f'{lost}: its last good copy, {name}.bak, is used'); return data
+        raise StateBusy(f'{name} is held by another program')
 
 def write_json(path, data, **how):
     """Writes a JSON file of the state folder whole (call under state_lock): to a temp file of this process and thread,
-    put in place by a replace, which a reader never sees half done. Windows refuses the replace while a program outside
-    the guard holds the file: it is tried again for two seconds, then StateBusy, and the file is as it was."""
+    flushed to the disk, then put in place by a replace, which a reader never sees half done. Flushed first: NTFS
+    journals the rename and not the file's data, and a power cut seconds later left the new name on a file of zeros.
+    The file a KEPT one replaces stays beside it as <name>.bak (a rename, not a copy), for read_json to fall back on.
+    Windows refuses a replace while a program outside the guard holds the file: it is tried again for two seconds,
+    then StateBusy, and the file is as it was (or is its .bak, which the next read puts back)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temp = f'{path}.{os.getpid()}.{threading.get_ident()}.new'
-    with open(temp, 'w', encoding='utf-8') as f: json.dump(data, f, **how)
+    with open(temp, 'w', encoding='utf-8') as f: json.dump(data, f, **how); f.flush(); os.fsync(f.fileno())
     for attempt in range(40):
-        try: os.replace(temp, path); return
+        try:
+            if os.path.basename(path) in KEPT and os.path.exists(path): os.replace(path, path + '.bak')
+            os.replace(temp, path); return
         except PermissionError: time.sleep(0.05)
     try: os.remove(temp)
     except OSError: pass
