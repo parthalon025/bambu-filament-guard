@@ -48,6 +48,12 @@ def counted_now(res, tray):
     grams = entry.get('grams') if isinstance(entry, dict) and not entry.get('stale') else None
     return grams if isinstance(grams, (int, float)) and not isinstance(grams, bool) else None
 
+def swatch(colour, t):
+    """The colour of the square before a row: the filament's own when it is '#RRGGBB', else the theme's neutral one. The
+    G-code's text was passed on as it came, and one Tk refuses (five digits, a name it does not know) raised inside
+    show(), after the window was made: that warning never showed."""
+    return colour if isinstance(colour, str) and len(colour) == 7 and colour[0] == '#' and all(c in '0123456789abcdefABCDEF' for c in colour[1:]) else t['raised']
+
 def tone_of(res):
     return 'muted' if res['error'] else {0: 'ok', 1: 'muted', 2: 'warn', 3: 'warn', 4: 'danger'}[fg.SEVERITY[res['worst']]]
 
@@ -256,7 +262,7 @@ class Card:
             for col, head_text in enumerate(('', 'Filament', 'Needs', 'Spool', 'Has', 'Result')):
                 self._label(table, head_text, 'muted', 9, row=0, column=col, padx=(0, 3 * SPACE), pady=(0, SPACE))
             for i, r in enumerate(res['rows'], start=1):
-                tk.Frame(table, bg=r['colour'], width=18, height=18, highlightthickness=1, highlightbackground=t['border']).grid(row=2 * i, column=0, padx=(0, 2 * SPACE), pady=SPACE // 2)
+                tk.Frame(table, bg=swatch(r['colour'], t), width=18, height=18, highlightthickness=1, highlightbackground=t['border']).grid(row=2 * i, column=0, padx=(0, 2 * SPACE), pady=SPACE // 2)
                 name = f"{r['slot']}  {r['name'] or r['type']}" + (f"  ({r['nozzle']} nozzle)" if r['nozzle'] else '')
                 word, colour = STATUS_LOOK[r['status']]
                 for col, (text, c, bold) in enumerate(((name, 'text', False), (fg.need_text(r), 'text', False), (fg.tray_text(r), 'text', False),

@@ -1152,3 +1152,24 @@ def test_asking_for_a_screens_work_area_makes_no_new_type_each_time():
     guard_ui.work_area(1); before = structures()
     for _ in range(20): guard_ui.work_area(1)
     assert structures() == before == 1
+
+def card_widgets(monkeypatch, res, brief=0, theme='dark'):
+    """The widgets of the card guard_ui makes for an answer, on the stand-in for tkinter, in the order they were made."""
+    import guard_ui
+    made = tk_stand_in(monkeypatch)
+    def opened(card, pid=None, beside=None, hold=False):
+        card.win, card.t, card.owner, card.beside, card.held, card.closes_after = sys.modules['tkinter'].Toplevel(), guard_ui.THEMES[theme], None, None, False, 0
+        return card.win
+    monkeypatch.setattr(guard_ui.Card, '_open', opened); monkeypatch.setattr(guard_ui.Card, '_place', lambda card: None)
+    guard_ui.Card(None).show(res, brief)
+    return made
+
+@pytest.mark.windows
+def test_a_colour_tk_cannot_take_gives_a_neutral_swatch(state, monkeypatch):
+    """The square before a row took the G-code's colour text as it came. One Tk refuses (five digits from a hand-made
+    project, a name it does not know) raised inside show(), after the window was made: that warning never showed."""
+    import guard_ui
+    running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 2)))
+    for colours, squares in (('#0A2989;#FFFFFF;#C12E1F', ['#0A2989', '#C12E1F']), ('#12345;#FFFFFF;sunset', [guard_ui.THEMES['light']['raised']] * 2), (';;#C12E1FFF', [guard_ui.THEMES['light']['raised'], '#C12E1F'])):
+        res = fg.evaluate(fg.parse_plate(gcode(colours=colours)), CFG, 'Benchy')
+        assert [w.k['bg'] for w in card_widgets(monkeypatch, res, theme='light') if type(w).__name__ == 'Frame' and w.k.get('width') == 18] == squares, colours
