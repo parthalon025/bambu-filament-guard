@@ -1481,12 +1481,19 @@ STOP_WORDS = {'not running': 'was not running', 'stopped': 'stopped', 'still run
 
 def selftest(cfg):
     """[(True = works, False = does not, None = cannot be told now, text)]: can the guard read this Bambu Studio and
-    reach its printers? Run it after a Bambu Studio update."""
-    import guard_ui, guard_ledger
+    reach its printers? Run it after a Bambu Studio update. It fails when no known printer answered. Whatever it meets,
+    it ends in lines: from the icon it runs without a console, and an error it let through showed nothing at all."""
     out = [(False, line) for line in cfg.get('_wrong') or []]
+    try: selftest_lines(cfg, out)
+    except Exception as e:
+        log(f'self-test: {e.__class__.__name__}: {e}'); out.append((False, f'The self-test could not finish ({e.__class__.__name__}: {e})'))
+    return out
+
+def selftest_lines(cfg, out):
+    import guard_ui, guard_ledger
     try: conf = bs_conf()
     except (OSError, ValueError) as e:
-        return out + [(False, f"Bambu Studio's configuration cannot be read ({e.__class__.__name__}): is Bambu Studio installed for this Windows user?")]
+        out.append((False, f"Bambu Studio's configuration cannot be read ({e.__class__.__name__}): is Bambu Studio installed for this Windows user?")); return
     version = str(conf.get('app', {}).get('version', '?'))
     out.append((True, f'Bambu Studio {version}: its configuration is readable'))
     verified, newest = load_state().get('verified') or {}, newest_gcode()
@@ -1499,7 +1506,7 @@ def selftest(cfg):
     elif verified.get('version') == version:
         out.append((True, f"Slices of this version have been read, last on {time.strftime('%d %b %Y', time.localtime(verified['at']))}"))
     else: out.append((None, 'No slice of this Bambu Studio version has been read yet: slice any plate to test it'))
-    printers = known_printers(conf)
+    printers, answered = known_printers(conf), 0
     if not printers: out.append((False, 'Bambu Studio holds no LAN access code for a printer: open the printer once on its Device tab'))
     for p in printers:
         if p['model'] == UNKNOWN_MODEL:
@@ -1511,8 +1518,10 @@ def selftest(cfg):
             status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
             if not has_spools(status): raise PrinterError('it did not report its spools')
             trays, _ = trays_of(status); guard_ledger.apply(trays, p['serial'])
-            out.append((True, f"{p['name']}: {len(trays)} spool(s), {sum(t['grams'] is not None for t in trays)} with a known amount"))
+            out.append((True, f"{p['name']}: {len(trays)} spool(s), {sum(t['grams'] is not None for t in trays)} with a known amount")); answered += 1
         except PrinterError as e: out.append((False if 'refused the access code' in str(e) else None, f"{p['name']}: {e}"))
+        except Exception as e: out.append((False, f"{p['name']}: {e.__class__.__name__}: {e}"))     # one printer's error does not cost the others their line
+    if printers and not answered: out.append((False, 'No known printer answered: a plate cannot be checked until one does'))
     import guard_learn
     history = guard_learn.load()
     jobs = [j for trays in history.values() for h in trays.values() for j in h.get('jobs', [])]
@@ -1521,7 +1530,6 @@ def selftest(cfg):
     out.append((True, 'Bambu Studio is running: the card shows in its window') if guard_ui.studio_windows() else (None, 'Bambu Studio is not running: the card shows when it is'))
     out.append((True, 'The guard is running') if is_running() else (False, 'The guard is not running: "install" starts it'))
     out.append((True, 'It starts automatically') if os.path.exists(STARTUP_LNK) else (None, 'It does not start automatically'))
-    return out
 
 
 # ---------------------------------------------------------------- installing
@@ -1675,15 +1683,18 @@ def main(argv=None):
         print('\n'.join(lines)); return 0
     if a.cmd == 'trays':
         import guard_ledger
-        conf = bs_conf()
-        for p in known_printers(conf):
-            ip = printer_ip(p['serial'], cfg)
+        try: conf = bs_conf(); printers = known_printers(conf)
+        except Exception as e: print(f"Bambu Studio's configuration cannot be read ({e.__class__.__name__}): is Bambu Studio installed for this Windows user?"); return 1
+        if not printers: print('Bambu Studio holds no LAN access code for a printer: open the printer once on its Device tab'); return 1
+        for p in printers:
             try:
+                ip = printer_ip(p['serial'], cfg)
                 if not ip: raise PrinterError(NOT_ANNOUNCED)
                 status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
                 if not has_spools(status): raise PrinterError('did not report its spools')
+                trays, two = trays_of(status); guard_ledger.apply(trays, p['serial'])
             except PrinterError as e: print(f"{p['name']}: {e}"); continue
-            trays, two = trays_of(status); guard_ledger.apply(trays, p['serial'])
+            except Exception as e: print(f"{p['name']}: {e.__class__.__name__}: {e}"); continue      # one printer's error does not cost the others their answer
             print(f"{p['name']} ({ip}), {status.get('gcode_state')}")
             for t in trays:
                 amount = 'entered amount out of date' if t.get('stale') else 'amount unknown' if t['grams'] is None else f"{t['grams']:.0f} g" + (' (entered by hand)' if t.get('entered') else '')

@@ -730,3 +730,39 @@ def test_a_refusal_that_is_not_about_the_access_code_is_not_called_one(monkeypat
         assert refusing(monkeypatch, why) == 'printer refused the access code Bambu Studio holds for it'
     assert refusing(monkeypatch, 'Server unavailable') == 'printer refused the connection (Server unavailable)'
     assert refusing(monkeypatch, '3') == 'printer refused the connection (3)'
+
+def test_trays_ends_in_words_whatever_it_meets(state, monkeypatch, capsys):
+    """"trays" where Bambu Studio was never installed ended in a FileNotFoundError traceback; with no access code in its
+    configuration it printed nothing at all; and one printer's error cost the printers after it their answer."""
+    monkeypatch.setattr(fg, 'bs_conf', no_studio)
+    assert fg.main(['trays']) == 1 and capsys.readouterr().out == "Bambu Studio's configuration cannot be read (FileNotFoundError): is Bambu Studio installed for this Windows user?\n"
+    knows(monkeypatch)
+    assert fg.main(['trays']) == 1 and capsys.readouterr().out == 'Bambu Studio holds no LAN access code for a printer: open the printer once on its Device tab\n'
+    knows(monkeypatch, 'P1S-ONE-0001', 'H2D-ONE-0003')
+    def read(ip, serial, code):
+        if serial.startswith('P1S'): raise RuntimeError('a report the guard did not foresee')
+        return ENOUGH
+    monkeypatch.setattr(fg, 'read_status', read)
+    assert fg.main(['trays']) == 0
+    out = capsys.readouterr().out
+    assert 'Bambu Lab P1S: RuntimeError: a report the guard did not foresee\n' in out and 'Bambu Lab H2D (printer), IDLE\n  A1 ' in out
+
+@pytest.mark.windows
+def test_the_self_test_ends_in_lines_whatever_it_meets_and_fails_when_no_printer_answered(state, monkeypatch, capsys):
+    """The self-test from the icon runs without a console: an error it did not expect of one printer showed nothing at
+    all. And with no printer reached it said "the guard works" and exited 0, against "Exit code 1 = no"."""
+    import guard_ui
+    monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None); monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {})
+    knows(monkeypatch, 'P1S-ONE-0001', 'H2D-ONE-0003')
+    def read(ip, serial, code):
+        if serial.startswith('P1S'): raise RuntimeError('a report the guard did not foresee')
+        return ENOUGH
+    monkeypatch.setattr(fg, 'read_status', read); lines = fg.selftest(CFG)
+    assert (False, 'Bambu Lab P1S: RuntimeError: a report the guard did not foresee') in lines and (True, 'Bambu Lab H2D: 2 spool(s), 2 with a known amount') in lines
+    assert not any('No known printer answered' in text for mark, text in lines) and lines[-1][1].startswith('It ')        # one answered; and the self-test went on to its end
+    monkeypatch.setattr(fg, 'printer_ip', lambda *a, **k: None); lines = fg.selftest(CFG)                                     # both are off
+    assert [mark for mark, text in lines if 'not announcing itself' in text] == [None, None]
+    assert (False, 'No known printer answered: a plate cannot be checked until one does') in lines and fg.main(['selftest']) == 1
+    assert '[!!] No known printer answered' in capsys.readouterr().out
+    monkeypatch.setattr(fg, 'load_state', lambda: 1 / 0); lines = fg.selftest(CFG)
+    assert lines[-1] == (False, 'The self-test could not finish (ZeroDivisionError: division by zero)') and lines[0][0] is True
