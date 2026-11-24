@@ -409,7 +409,7 @@ def test_a_name_in_popup_on_the_guard_does_not_know_is_said_once_and_the_menu_st
     guard = guard_with(dict(CFG, popup_on=['short', 'TIGTH', 'colour']))
     for _ in range(3): guard.deliver(fg.evaluate(fg.parse_plate(gcode()), guard.cfg, 'Benchy'))
     log = (state / 'guard.log').read_text()
-    assert log.count('TIGTH') == 1 and 'popup_on in config.json names "TIGTH", which is no result of a check' in log
+    assert log.count('TIGTH') == 1 and 'popup_on in config.json names "TIGTH", which is no result to warn of' in log
     assert guard.card.shown == [('show', CFG['ok_seconds'])] * 3                           # the tight row is not warned of: one line
     assert guard.popup_on() == ['SHORT', 'TIGTH', 'COLOUR']
     guard.toggle_warning('COLOUR'); assert guard.cfg['popup_on'] == ['SHORT', 'TIGTH'] and fg.load_config()['popup_on'] == ['SHORT', 'TIGTH']
@@ -971,3 +971,13 @@ def test_the_icon_stays_grey_and_says_paused_while_checks_are_paused(state):
     assert guard.tray.was[-1] == ('ok', 'Enough filament for this print · Bracket, plate 2')
     fresh = guard_with(); fresh.tray = Icon(); fresh.toggle_pause(); fresh.toggle_pause()
     assert fresh.tray.was == [('muted', 'Checks are paused'), ('muted', 'No slice checked yet')]
+
+@pytest.mark.windows
+def test_popup_on_decides_for_no_result_but_the_four_it_is_for(state):
+    """"OK" in popup_on opened the full card for every plate that was fine. Such a card would now stand as a warning does
+    and hold back every other plate's answer: enough is not a result to warn of, and the log says so, once."""
+    cfg = dict(CFG, popup_on=['OK', 'SHORT', 'ok'])
+    shown, icon, guard = warned(answer(1, 'OK'), answer(2, 'OK'), answer(3, 'TIGHT'), answer(4, 'UNKNOWN'), cfg=cfg)
+    assert guard.card.shown == [('show', CFG['ok_seconds'])] * 4 and guard.last['plate_no'] == 4   # a line each, none standing in another's way
+    assert guard.opening(answer(1, 'OK')) == [] and guard.rank(answer(1, 'OK')) == (0, 0)
+    assert (state / 'guard.log').read_text().count('popup_on in config.json names "OK", which is no result to warn of (UNKNOWN, TIGHT, SPLIT, SHORT, MISSING, COLOUR)') == 1

@@ -1062,10 +1062,10 @@ class Guard:
 
     def popup_on(self):
         """The results popup_on names, in capitals: as the guard reads the list, and as the menu ticks it. A name that is
-        no result of a check is said in the log, once in a run; so is a value that is no list, read as the default."""
-        on = self.cfg.get('popup_on')
+        no result to warn of is said in the log, once in a run; so is a value that is no list, read as the default."""
+        on, known = self.cfg.get('popup_on'), [s for s in SEVERITY if s != 'OK']
         names = [str(s).upper() for s in on] if isinstance(on, list) else list(DEFAULTS['popup_on'])
-        odd = ([f'names "{s}", which is no result of a check ({", ".join(SEVERITY)})' for s in names if s not in SEVERITY] if isinstance(on, list)
+        odd = ([f'names "{s}", which is no result to warn of ({", ".join(known)})' for s in names if s not in known] if isinstance(on, list)
                else ['is not a list of results: the default is used'])
         for what in odd:
             if what not in self.told: self.told.add(what); log(f'popup_on in config.json {what}')
@@ -1074,9 +1074,10 @@ class Guard:
     def opening(self, res):
         """The results among an answer's rows that open the full card. SHORT and MISSING do whatever popup_on holds: a list
         written by hand to add UNKNOWN replaced the whole default, and turned the "not enough" card off. The others do
-        when popup_on names them. Any such row opens the card, not the worst row alone: COLOUR ranks with SHORT, and a
-        COLOUR row that was not to be warned of hid the SHORT row after it."""
-        on = set(self.popup_on()) | {'SHORT', 'MISSING'}
+        when popup_on names them; OK never does (its card would stand like a warning's, in every other answer's way).
+        Any such row opens the card, not the worst row alone: COLOUR ranks with SHORT, and a COLOUR row that was not to
+        be warned of hid the SHORT row after it."""
+        on = (set(self.popup_on()) | {'SHORT', 'MISSING'}) - {'OK'}
         return [r['status'] for r in res['rows'] if r['status'] in on]
 
     def rank(self, res):
