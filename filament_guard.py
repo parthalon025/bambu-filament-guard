@@ -213,11 +213,13 @@ def save_config(cfg, key=None):
         with contextlib.suppress(OSError): os.remove(temp)
 
 LOST = [0]                                                # the lines guard.log did not take since the last one it took
+CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f\u2028\u2029]')   # line breaks and the other control characters: none of them goes into the log
 
 def log(msg):
     """One line into guard.log, with its time. It raises nothing: a log that could not be written (the disk full, the file
     held by another program) once cost a warning its card, and ended the watcher and the card's loop for good. The lines
-    lost are counted, and the next line that is written says how many."""
+    lost are counted, and the next line that is written says how many. A message is one line whatever it holds: a job
+    or project name with a line break in it, from the printer or a file, forged lines of a log users paste into reports."""
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
         path, lost = os.path.join(STATE_DIR, 'guard.log'), LOST[0]
@@ -225,9 +227,18 @@ def log(msg):
             if os.path.getsize(path) > 1_000_000: os.replace(path, path + '.1')
         except OSError: pass
         with open(path, 'a', encoding='utf-8', errors='backslashreplace') as f:
-            f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + (f"({lost} line{'s' if lost != 1 else ''} before this one could not be written) " if lost else '') + f'{msg}\n')
+            f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + (f"({lost} line{'s' if lost != 1 else ''} before this one could not be written) " if lost else '') + CONTROL.sub(' ', f'{msg}') + '\n')
         LOST[0] -= lost
     except (OSError, ValueError): LOST[0] += 1
+
+def packaged():
+    """Whether this is the packaged guard: build.py puts the scripts in app/, beside a Python and a Tcl/Tk of their own."""
+    return os.path.basename(HERE) == 'app'
+
+def missing(package):
+    """What to say of a Python package the guard cannot import. Run from source: how to install it. The packaged guard
+    has no pip and a Python of its own: there its folder is incomplete, and unzipping it again is what helps."""
+    return f"the guard's folder is incomplete ({package} is missing): unzip the guard again" if packaged() else f'the Python package {package} is missing (pip install {package})'
 
 class StateBusy(OSError):
     """The state folder's files could not be had: another holder kept them past the wait, or a program outside the guard
@@ -684,7 +695,7 @@ def printer_link(ip, serial, code, client_id, on_report, on_refused=None):
     on_report gets the "print" part of every report, on the link's own thread. Returns the client; loop_stop() and
     disconnect() end it."""
     try: import paho.mqtt.client as mqtt
-    except ImportError: raise PrinterError('the Python package paho-mqtt is missing (pip install paho-mqtt)')
+    except ImportError: raise PrinterError(missing('paho-mqtt'))
     def on_connect(c, userdata, flags, rc, *rest):
         if rc.is_failure if hasattr(rc, 'is_failure') else rc != 0:
             if on_refused: on_refused(str(rc))
@@ -1297,8 +1308,13 @@ class Watcher:
 
 
 SEND_MOST = 30                                            # the plates of a project checked again when "Send print job" opens: the ones sliced last
+WEIGH_MOVED = 2.0                                         # grams a tray's reading may have moved since its card for a weigh-in to be kept against it
 IGNORE_DAYS, IGNORE_GROWTH = 7, 5.0                       # "Ignore for this project" ends after as many days, or with a filament as many grams further short
 UNSAVED = 'Unsaved project'                               # what project_title calls every project that was never saved
+
+def plate_key(res):
+    """The plate an answer is for: Bambu Studio's process, the project's title, the plate's number."""
+    return (res.get('pid'), res['title'], res.get('plate_no'))
 
 def written(path):
     """When a file was last written; 0 for one that has gone meanwhile."""
@@ -1341,6 +1357,8 @@ class Guard:
         self.todo, self.stopping = queue.Queue(), threading.Event()
         self.last, self.paused, self.ticks, self.sending, self.jobs = None, False, 0, set(), {}
         self.warning = None                                   # the warning on the full card, while it stands: see standing_warning
+        self.held, self.icon_shows = {}, None                 # the warnings that wait for that card to go, by plate (hold); what the icon was last given
+        self.blind = None                                     # what the icon says while slices cannot be read (not_checking)
         self.busy, self.greeted = {}, False                   # the checks someone waits for, by what started them: (their line, its text)
         self.told = set()                                     # what was said in the log once, and is not said again in this run
         self.watcher = None                                   # the thread that watches for slices, once it runs (watch_slices)
@@ -1390,21 +1408,64 @@ class Guard:
         opening = [] if res.get('ignored') else self.opening(res)
         return (2, max(SEVERITY[s] for s in opening)) if opening else (0, SEVERITY[res['worst']])
 
+    def on_icon(self):
+        """The answer the icon stands for: the last one shown, or a warning that still waits to be shown (held) when that
+        is the worse. So the icon is green only when no plate that was checked has a warning that was neither shown nor
+        ignored."""
+        waits = max(list(self.held.values()), key=self.rank, default=None)   # a list: the icon's menu asks from a thread of its own
+        return waits if waits and (not self.last or self.rank(waits) > self.rank(self.last)) else self.last
+
     def last_text(self):
-        if self.paused: return 'Checks are paused'
-        if not self.last: return 'No slice checked yet'
-        return f"{headline(self.last)} · {self.last['title']}" + (f", plate {self.last['plate_no']}" if self.last.get('plate_no') else '')
+        res = self.on_icon()
+        if self.paused or self.blind: return 'Checks are paused' if self.paused else self.blind
+        if not res: return 'No slice checked yet'
+        return f"{headline(res)} · {res['title']}" + (f", plate {res['plate_no']}" if res.get('plate_no') else '')
 
     def show_icon(self):
-        """The icon's colour and tooltip: the last answer's; grey, and saying so, while checks are paused (an answer asked
-        for from the icon then turned it green, as if slices were being checked)."""
+        """The icon's colour and tooltip: those of the answer it stands for (on_icon); grey, and saying so, while checks
+        are paused (an answer asked for from the icon then turned it green, as if slices were being checked) and while
+        slices cannot be read (not_checking)."""
         import guard_ui
-        if self.tray: self.tray.set('muted' if self.paused or not self.last else guard_ui.tone_of(self.last), self.last_text()); self.tray.refresh()
+        res = self.on_icon(); now = ('muted' if self.paused or self.blind or not res else guard_ui.tone_of(res), self.last_text())
+        if self.tray and now != self.icon_shows: self.icon_shows = now; self.tray.set(*now)
+        if self.tray: self.tray.refresh()
+
+    def not_checking(self, lines=None, pid=None):
+        """Bambu Studio wrote a slice the guard cannot read: the icon goes grey and says "Filament is not being checked",
+        until a slice reads again (take_slice). It kept the colour and tooltip of the last answer, green as may be,
+        while no slice was checked. lines: the card that says why, shown once for a Bambu Studio version."""
+        self.blind = 'Filament is not being checked'; self.show_icon()
+        if lines: self.say(self.blind, lines, 'danger', pid)
 
     def standing_warning(self):
         """The warning whose card still stands: (its plate: Bambu Studio's process, the project, the plate number; its
-        rank; its card's window), or None."""
+        rank; its card's window; the answer), or None."""
         return self.warning if self.warning and self.card.is_open() and self.card.win is self.warning[2] else None
+
+    def say(self, headline, lines, tone='muted', pid=None, beside=None, buttons=()):
+        """A card of the guard's own, which is no answer (guard_ui's note). There is one card at a time: a warning whose
+        place it takes is not ended by it, but waits (held) and shows again when this card has gone. "Filament is not
+        being checked" or "This setting was not kept" once took a "Not enough" for good."""
+        stands = self.standing_warning()
+        if stands: self.held[stands[0]] = stands[3]
+        self.card.note(headline, lines, tone, pid, beside, buttons)
+
+    def hold(self, res):
+        """An answer that may not take a standing warning's place. A warning is kept, the latest of its plate, and shows
+        when that card has gone (next_held): held back and dropped, it was never shown at all. A fine answer ends what
+        was kept of its plate."""
+        if self.rank(res)[0]: self.held[plate_key(res)] = res
+        else: self.held.pop(plate_key(res), None)
+        self.show_icon()
+
+    def next_held(self):
+        """Shows the worst of the warnings that waited, as the answer it is; its card says how old it is."""
+        return self.deliver(self.held.pop(max(self.held, key=lambda plate: self.rank(self.held[plate]))))
+
+    def show_held(self):
+        """Every 0.4 s on the Tk thread: with no card in the way (the standing one closed by the user) and no check under
+        way, the next warning that waited shows."""
+        if self.held and not self.card.is_open() and not self.busy: self.next_held()
 
     def deliver(self, res, full=False, beside=None):
         """One answer: the full card for a warning (and whenever it is asked for), one line that goes away otherwise.
@@ -1413,17 +1474,19 @@ class Guard:
         own plate of its own Bambu Studio, to a worse answer, to a warning beside "Send print job" (every plate was
         checked again for it) and to what the user asks for; to nothing else. Another plate's fine answer, or another
         Bambu Studio's, once put a line that went after 8 seconds in its place and turned the icon green: now it does
-        not show, and the icon keeps the warning's colour."""
-        res.setdefault('at', time.time())                     # when its check was made: a card that shows it again later says so
+        not show, and the icon keeps the warning's colour. Another plate's warning that may not take its place waits
+        (hold), and shows when the standing card has gone."""
+        res.setdefault('at', time.time())                     # when it was checked, where the check did not say (`check --popup`): a card that shows it later says so
         if not res['error']: res['ignored'] = self.ignored(res)
-        rank, plate, stands = self.rank(res), (res.get('pid'), res['title'], res.get('plate_no')), self.standing_warning()
+        rank, plate, stands = self.rank(res), plate_key(res), self.standing_warning()
         own = bool(stands) and stands[0] == plate
-        if stands and not full and not own and (not rank[0] if beside else rank <= stands[1]): return
-        self.last = res; self.show_icon()
+        if stands and not full and not own and (not rank[0] if beside else rank <= stands[1]): return self.hold(res)
+        self.held.pop(plate, None); self.last = res; self.show_icon()
         if full or rank[0]:
             self.card.show(res, beside=beside, hold=not full)
-            self.warning = (plate, rank, self.card.win) if rank[0] else None
+            self.warning = (plate, rank, self.card.win, res) if rank[0] else None
             return True
+        if own and self.held: self.card.close(); return self.next_held()   # its plate is fine now: the worst that waited behind it shows, not this plate's line
         if not beside and self.cfg['ok_seconds'] and not res['error']: self.card.show(res, brief=self.cfg['ok_seconds'], hold=True)
         elif res.get('line') and not beside and self.cfg['ok_seconds']: self.card.line(res['line'], 'muted', self.cfg['ok_seconds'], res.get('pid'), hold=True)   # a plate that is not checked, and why (evaluate)
         elif own: self.card.close()                           # its plate is fine now and no line takes the card's place: it must not go on saying otherwise
@@ -1462,32 +1525,68 @@ class Guard:
             if not arg or arg <= 0: return                    # 0 is the filament weighed alone, not a spool: as the next window's start it put 250 g too much on the next spool
             self.card.empty_spool = arg
             if arg != self.cfg.get('empty_spool_g'):
-                try: self.set_option('empty_spool_g', arg)    # the amount is stored by now, and a folder that cannot be written must not cost it
+                try: self.keep('empty_spool_g', arg)          # the amount is stored by now, and a folder that cannot be written must not cost it
                 except OSError as e: log(f"the empty spool's weight, {arg:g} g, could not be kept in config.json ({e.__class__.__name__}): it is used until the guard stops")
         elif name == 'amount':
             tray, grams = arg
             guard_ledger.enter(res['printer']['serial'], tray, grams); self.recheck(res, self.card.beside)
-        elif name in ('weigh', 'asked'):
-            import guard_learn
-            tray, grams = arg if name == 'weigh' else (arg, None)
-            if name == 'asked':                               # asked from within the card as it shows: a state file that cannot be written now must not
-                try: guard_learn.asked(res['printer']['serial'], tray['label'])   # cost the card. The offer then may come again.
-                except OSError as e: log(f"{tray['label']}: that a weigh-in was offered could not be noted ({e.__class__.__name__}: {e}): it may be offered again")
-                return
-            guard_learn.weigh(res['printer']['serial'], tray['label'], tray['reading'], grams,
-                              {'id': tray.get('spool'), 'type': tray['type'], 'colour': tray['colour'], 'fid': tray.get('fid'), 'weight': tray.get('weight')})
-            self.recheck(res, self.card.beside)
+        elif name == 'asked':                                 # asked from within the card as it shows: a state file that cannot be written now must not
+            import guard_learn                                # cost the card. The offer then may come again.
+            try: guard_learn.asked(res['printer']['serial'], arg['label'])
+            except OSError as e: log(f"{arg['label']}: that a weigh-in was offered could not be noted ({e.__class__.__name__}: {e}): it may be offered again")
+        elif name == 'weigh': self.weigh_in(res, *arg)
+
+    def weigh_in(self, res, tray, grams):
+        """A weigh-in saved in its window: kept only against a reading the printer gives now. It was set against the reading
+        of the card it came from, however old: C3 at 105 g on the card, a print, the spool weighed at 20 g, and the tray
+        was kept as one that reads 105 g with 20 g on it, which counted every tray of the printer 85 g lower. The printer
+        is asked again; the weigh-in is kept, against the reading it gives, when no job is on the printer and the tray
+        holds the same spool (tag, material, colour) at a reading within WEIGH_MOVED of the one the window showed.
+        Otherwise nothing is kept, and a card says why and offers the new check to weigh from."""
+        import guard_ui, guard_learn
+        label, beside = tray['label'], self.card.beside
+        where = lambda: beside if guard_ui.visible(beside) else None
+        def refuse(why):
+            self.say('Weigh-in not saved', [(False, f'{why}: weigh-in not saved. Check again, then weigh from the new card.')], 'warn', res.get('pid'), where(),
+                     buttons=[('Check again', lambda: self.recheck(res, where()))])
+            log(f'{label}: weigh-in not saved: {why}')
+        def then(new):
+            now = None if new['error'] else next((t for r in new['rows'] for t in r['trays'] if t['label'] == label), None)
+            if new['error']: why = f"The printer could not be asked what {label} reads now ({new['error']})"
+            elif new['printer']['state'] in BUSY: why = f"The {new['printer']['model']} is printing, and {label}'s reading is moving"
+            elif not now or now.get('reading') is None or (now.get('spool'), now['type'].upper(), now['colour']) != (tray.get('spool'), tray['type'].upper(), tray['colour']):
+                why = f'{label} no longer holds the spool that card showed'
+            elif abs(now['reading'] - tray['reading']) > WEIGH_MOVED: why = f"{label} read {tray['reading']:.0f} g on that card and reads {now['reading']:.0f} g now"
+            else:
+                try: guard_learn.weigh(res['printer']['serial'], label, now['reading'], grams,
+                                       {'id': now.get('spool'), 'type': now['type'], 'colour': now['colour'], 'fid': now.get('fid'), 'weight': now.get('weight')})
+                except OSError as e: why = f'The weigh-in of {label} could not be written ({e.__class__.__name__})'
+                else: return self.recheck(res, where())
+            refuse(why)
+        self.later(lambda: self.again(res), then, lambda: refuse(f'The printer could not be asked what {label} reads now'))
+
+    def again(self, res):
+        """The plate of an answer, checked again now: the new answer, with what tells its plate carried over. An answer
+        for a G-code that could not be read (not_read) has no plate: the file is read again, and the answer stands
+        while it still cannot be."""
+        plate = res['plate'] or (plate_at(res['gcode']) if res.get('gcode') else None)
+        new = evaluate(plate, self.cfg, res['title'], res['times']) if plate else dict(res)
+        new.update(pid=res.get('pid'), plate_no=res.get('plate_no'), gcode=res.get('gcode'), at=time.time()); return new
+
+    @staticmethod
+    def not_read(path, why):
+        """The answer for a sliced plate whose G-code could not be read: one that could not be checked, which is not a
+        fine one (rank), with nothing of the plate in it but where it is."""
+        return {'title': project_title(path), 'model': '', 'time': '', 'times': 1, 'plate': None, 'printer': None, 'rows': [], 'worst': 'OK', 'error': why,
+                'pid': studio_pid(path), 'plate_no': plate_number(path), 'gcode': path, 'at': time.time()}
 
     def recheck(self, res, beside=None):
         import guard_ui
         where = lambda: beside if guard_ui.visible(beside) else None
-        def work():
-            new = evaluate(res['plate'], self.cfg, res['title'], res['times']); new['pid'], new['plate_no'], new['gcode'] = res.get('pid'), res.get('plate_no'), res.get('gcode')
-            return new
         def then(new):                                        # the card first, here as after a slice: nothing of the log may hold back an answer
             try: self.deliver(new, full=True, beside=where())
             finally: log('checked again: ' + report_text(new).replace('\n', ' | '))
-        self.later(work, then, lambda: self.deliver(res, full=True, beside=where()))
+        self.later(lambda: self.again(res), then, lambda: self.deliver(res, full=True, beside=where()))
 
     def check_newest(self, pid=None, beside=None):
         """From the icon: the newest slice, as a full card. At "Send print job" (beside): every plate of the project the
@@ -1500,7 +1599,7 @@ class Guard:
         if key in self.busy: self.checking(key, self.busy[key][1]); return     # asked again while its check runs: it says so, and starts nothing
         newest = newest_gcode(pid)
         if not newest:
-            if not beside: self.card.note('No sliced plate found', [(None, 'Slice a plate in Bambu Studio first.')])
+            if not beside: self.say('No sliced plate found', [(None, 'Slice a plate in Bambu Studio first.')])
             return
         folder = os.path.dirname(newest)
         plates = sorted((p for p in temp_gcodes() if os.path.dirname(p) == folder), key=written, reverse=True) if beside else [newest]
@@ -1512,8 +1611,13 @@ class Guard:
                 try:
                     with open(path, 'rb') as f: plate = parse_plate(read_head(f))
                 except (OSError, ValueError) as e:                       # one plate that cannot be read does not cost the others their check
-                    log(f'cannot read the slice {path}: {e.__class__.__name__}: {e}'); unread.append(f'it cannot be read ({e})'); continue
-                if plate is None: unread.append('Bambu Studio is still writing it'); continue
+                    log(f'cannot read the slice {path}: {e.__class__.__name__}: {e}'); unread.append(f'it cannot be read ({e})')
+                    if beside: out.append(self.not_read(path, f'the G-code of plate {plate_number(path)} cannot be read ({e})'))   # at the dialog it is a plate that was not checked,
+                    continue                                                                                                      # and shows as one: silence there means every plate is fine
+                if plate is None:
+                    unread.append('Bambu Studio is still writing it')
+                    if beside: out.append(self.not_read(path, f'Bambu Studio is still writing the G-code of plate {plate_number(path)}'))
+                    continue
                 if not plate['filaments']: continue
                 title, model = project_title(path), plate['printer_model']
                 # A check that fails is tried once more: one reading that timed out once dropped the plate being sent. A
@@ -1523,26 +1627,28 @@ class Guard:
                 if res['error'] and not res.get('quiet') and model not in failed:
                     res = evaluate(plate, self.cfg, title, seen=seen)
                     if res['error'] and not seen: failed[model] = res
-                res['pid'], res['plate_no'], res['gcode'] = studio_pid(path), plate_number(path), path
+                res['pid'], res['plate_no'], res['gcode'], res['at'] = studio_pid(path), plate_number(path), path, time.time()
                 if not res['error']: res['ignored'] = self.ignored(res)
                 out.append(res)
             return (max(out, key=self.rank) if out else None), unread, out        # the newest of those that most ask to be seen
         def then(found):
             res, unread, out = found
             try:
+                for r in out:                                                     # what waited of these plates is as old as their last slice: this is their answer now
+                    if plate_key(r) in self.held: self.hold(r)
                 if res is not None and older:
                     res['unchecked'] = older; log(f"{res['title']}: {len(plates)} sliced plates, of which the {older} sliced first were not checked when \"Send print job\" opened")
                 if beside and not guard_ui.visible(beside):                       # the dialog has closed meanwhile, as after a quick click on Send:
                     if res is not None and self.rank(res)[0]: self.deliver(res)   # a warning found is still one, and shows as after a slice
                 elif res is not None and self.deliver(res, full=not beside, beside=beside): pass
                 elif res is not None and older and not self.standing_warning():   # nothing to warn of among those checked, and no warning standing: the rest still has to be said
-                    self.card.note('Not every plate was checked', [
+                    self.say('Not every plate was checked', [
                         (None, f"{res['title']} has {len(plates)} sliced plates. The {SEND_MOST} sliced last were checked now, with nothing to warn of; "
                                f"the {older} sliced before them {'were' if older != 1 else 'was'} not checked."),
                         (None, 'Slice a plate again to have it checked.')], 'warn', studio_pid(newest), beside)
                 elif res is None and unread and not beside:                       # asked for from the icon: an answer, not a line that goes
-                    self.card.note('Filament could not be checked', [(False, f'The newest slice ({project_title(newest)}): {unread[0]}.'),
-                                                                     (None, 'Slice it again, or check again in a moment. The log has the file.')], 'danger', studio_pid(newest))
+                    self.say('Filament could not be checked', [(False, f'The newest slice ({project_title(newest)}): {unread[0]}.'),
+                                                               (None, 'Slice it again, or check again in a moment. The log has the file.')], 'danger', studio_pid(newest))
             finally:
                 self.checked(key)
                 for r in out: log(('at "Send print job": ' if beside else 'checked on request: ') + report_text(r).replace('\n', ' | '))
@@ -1579,7 +1685,7 @@ class Guard:
         where guard_learn.forget has kept the history as it was."""
         import guard_learn
         if not sure:
-            self.card.note('Forget what was learned?', [
+            self.say('Forget what was learned?', [
                 (None, 'What the guard learned of every tray, from the prints it followed, is set aside, and it starts again from nothing.'),
                 (None, 'Until it has learned again, a tray whose reading runs high is counted as it reads.')],
                 buttons=[('Forget', lambda: self.forget_learned(True)), ('Keep', self.card.close)])
@@ -1588,23 +1694,45 @@ class Guard:
         try: kept = aside in guard_learn.forget()
         except OSError as e:
             log(f'what was learned could not be forgotten: {e.__class__.__name__}: {e}')
-            self.card.note('What was learned could not be forgotten',
-                           [(False, f'Its file could not be written ({e.__class__.__name__}): nothing was changed. Try again in a moment.')], 'danger'); return
-        self.card.note('What was learned is forgotten', [(None, 'The guard learns again from the next prints it follows.')]
-                       + ([(None, f'What it had learned is kept as {aside}: one copy, until something is forgotten again.')] if kept else []))
+            self.say('What was learned could not be forgotten',
+                     [(False, f'Its file could not be written ({e.__class__.__name__}): nothing was changed. Try again in a moment.')], 'danger'); return
+        self.say('What was learned is forgotten', [(None, 'The guard learns again from the next prints it follows.')]
+                 + ([(None, f'What it had learned is kept as {aside}: one copy, until something is forgotten again.')] if kept else []))
 
-    def show_last(self):
-        if self.last: self.deliver(self.last, full=True)
-        else: self.check_newest()
+    def check_last(self):
+        """The icon's click: the plate the icon names (on_icon) is checked again, and the fresh answer shows. The answer
+        as it was is not shown again: hours old, after a print that had taken 120 g, its card read "Enough", "as the
+        printer reports them now". A click while the check runs says so again and starts no second one; with no answer
+        yet, the newest slice is checked."""
+        res = self.on_icon()
+        if not res or not res.get('plate'): self.check_newest(); return
+        if 'icon' in self.busy: self.checking('icon', self.busy['icon'][1]); return
+        self.checking('icon', checking_text(printer_for(res['plate'])), res.get('pid'))
+        def then(new):
+            try: self.deliver(new, full=True)
+            finally: self.checked('icon'); log('checked again: ' + report_text(new).replace('\n', ' | '))
+        self.later(lambda: self.again(res), then, lambda: self.checked('icon'))
 
     def run_selftest(self):
         def then(lines):
             bad = any(mark is False for mark, _ in lines)
-            self.card.note('Self-test found a problem' if bad else 'Self-test: the guard works', lines, 'danger' if bad else 'ok')
+            self.say('Self-test found a problem' if bad else 'Self-test: the guard works', lines, 'danger' if bad else 'ok')
         self.later(lambda: selftest(self.cfg), then)
 
-    def set_option(self, key, value):
+    def keep(self, key, value):
+        """Puts a setting in force and writes config.json. OSError when that cannot be written: the setting is in force all
+        the same, until the guard stops."""
         self.cfg[key] = value; save_config(self.cfg, key); log(f'setting {key} = {value}')
+
+    def set_option(self, key, value):
+        """A setting changed from the icon's menu. With config.json not writable (the guard's folder read-only, the file
+        held elsewhere) it raised out of the menu: a line in the log, and nothing to say that the next start forgets it.
+        Nothing is raised; the log and a card say that it was not kept."""
+        try: self.keep(key, value)
+        except OSError as e:
+            log(f'setting {key} = {value}: not kept, config.json could not be written ({e.__class__.__name__}): in force until the guard stops')
+            self.say('This setting was not kept', [(False, f'config.json could not be written ({e.__class__.__name__}): is the folder the guard runs from read-only?'),
+                                                   (None, 'The setting is in force until the guard stops; at its next start it is as config.json has it.')], 'warn')
         if self.tray: self.tray.refresh()
 
     def toggle_warning(self, status):
@@ -1631,12 +1759,13 @@ class Guard:
         from the same file. The check comes first: the card does not wait for the profile, and a re-slice of the plate
         that is printing would otherwise replace the slice, and the profile, that the running print is counted from."""
         title, plate_no, profile, waiting = project_title(path), plate_number(path), None, False
+        if self.blind: self.blind = None; self.todo.put(self.show_icon)          # a slice that reads: slices are being checked again
         try:
             if not self.paused and plate['filaments']:
                 printer = printer_for(plate)
                 if printer and self.cfg['ok_seconds']:                          # no line for a check that ends in silence (a printer not on this LAN), nor for a quiet guard
                     waiting = True; self.todo.put(lambda: self.checking('slice', checking_text(printer), studio_pid(path), asked=False))
-                res = evaluate(plate, self.cfg, title); res['pid'], res['plate_no'], res['gcode'] = studio_pid(path), plate_no, path
+                res = evaluate(plate, self.cfg, title); res['pid'], res['plate_no'], res['gcode'], res['at'] = studio_pid(path), plate_no, path, time.time()
                 self.todo.put(lambda: self.deliver(res))
                 log(report_text(res).replace('\n', ' | '))
         finally:                                                                 # the slice is remembered whatever became of the check: guard_ledger counts from it
@@ -1668,15 +1797,15 @@ class Guard:
                     if os.path.exists(stop_flag): self.stopping.set(); break
                     watcher = watcher or Watcher()
                     for path, plate in watcher.new_plates():
+                        if os.path.exists(stop_flag): self.stopping.set(); break  # between plates too: "slice all" is a check of seconds for each, and a stop waits 10 s
                         try: self.take_slice(path, plate)
                         except Exception as e: log(f'error: {e.__class__.__name__}: {e}')   # one plate that fails does not cost the others of this round their check
                     for path, why in watcher.problems:
                         version = studio_version(); log(f'cannot read the slice {path} of Bambu Studio {version}: {why}')
-                        if version not in told:                                  # said once for each Bambu Studio version, logged every time
-                            told.add(version)
-                            lines = [(False, f'Bambu Studio {version} wrote a slice the guard cannot read: {why}.'),
-                                     (None, 'Its prints are not checked until the guard is updated. The log has the file.')]
-                            self.todo.put(lambda lines=lines, pid=studio_pid(path): self.card.note('Filament is not being checked', lines, 'danger', pid))
+                        lines = None if version in told else [(False, f'Bambu Studio {version} wrote a slice the guard cannot read: {why}.'),
+                                                              (None, 'Its prints are not checked until the guard is updated. The log has the file.')]
+                        told.add(version)                                        # the card once for each Bambu Studio version; the log and the icon every time
+                        self.todo.put(lambda lines=lines, pid=studio_pid(path): self.not_checking(lines, pid))
                     watcher.problems.clear()
                 finally: self.stopping.wait(self.poll_seconds())                 # after a round that failed too (no loop without a pause); at once when stopping
             except Exception as e:                                               # the watcher outlives any one bad file or network hiccup
@@ -1706,7 +1835,7 @@ class Guard:
                 except queue.Empty: break
                 try: job()
                 except Exception as e: log(f'error: {e.__class__.__name__}: {e}')    # one failing request does not end the guard
-            for step in (self.card.follow, self.look_around if self.standing else None):
+            for step in (self.card.follow, self.show_held, self.look_around if self.standing else None):
                 try: step and step()
                 except Exception as e:                                           # nor does one failing step stop the other; said once a minute at most
                     if self.ticks % 150 == 1: log(f'error: {e.__class__.__name__}: {e}')
@@ -1715,9 +1844,10 @@ class Guard:
         finally: self.root.after(400, self.pump)                                 # whatever happened above: without the next round there is no card, no menu and no Quit
 
     def loop(self):
-        self.root.after(400, self.pump); self.root.mainloop()
-        if self.tray: self.tray.stop()
-        for job in self.jobs.values(): job.stopped.set()
+        try: self.root.after(400, self.pump); self.root.mainloop()
+        finally:                                              # whatever ended the loop: the icon's thread is no daemon, and left running it kept a dead guard looking alive
+            if self.tray: self.tray.stop()
+            for job in self.jobs.values(): job.stopped.set()
 
 
 def sole_guard():

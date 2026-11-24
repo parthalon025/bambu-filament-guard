@@ -36,14 +36,21 @@ ENOUGH = {'gcode_state': 'IDLE', 'ams': {'ams': [{'id': '0', 'tray': [{'id': '0'
 
 def tk_stand_in(monkeypatch):
     """Puts a stand-in in tkinter's place (there is none where no screen is) and returns the widgets made on it, in
-    order: each keeps what it was made and configured with (k) and the keys bound to it (keys)."""
+    order: each keeps what it was made and configured with (k) and the keys bound to it (keys). A window is 300 by
+    100 pixels on a screen at 100 %, and keeps where it was put (k['geometry'])."""
     made = []
     class Widget:
         def __init__(self, *a, **k): self.k, self.keys = dict(k), {}; made.append(self)
         def configure(self, **k): self.k.update(k)
         def bind(self, key, then): self.keys[key] = then
         def destroy(self): self.k['destroyed'] = True
+        def winfo_exists(self): return not self.k.get('destroyed')
+        def lift(self): self.k['lifted'] = self.k.get('lifted', 0) + 1
+        def geometry(self, where=None): self.k['geometry'] = where
         def winfo_reqheight(self): return 100
+        def winfo_reqwidth(self): return 300
+        def winfo_fpixels(self, what): return 96.0
+        def wm_frame(self): return '0x1'
         def __getitem__(self, key): return self.k.get(key, '')
         def __getattr__(self, name): return lambda *a, **k: None
     class Var:
@@ -221,7 +228,8 @@ def test_a_plate_that_cannot_be_read_at_send_print_job_leaves_the_others_checked
     monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True); running(monkeypatch, ENOUGH)
     guard = guard_with(); guard.check_newest(1, beside=4321); guard.todo.get(timeout=5)()
     log = (state / 'guard.log').read_text()
-    assert guard.last['plate_no'] == 1 and log.count('at "Send print job"') == 1 and f'cannot read the slice {bad}: ValueError' in log
+    assert log.count('at "Send print job": Enough filament for this print') == 1 and f'cannot read the slice {bad}: ValueError' in log
+    assert guard.last['plate_no'] == 2 and guard.last['error']                              # and the plate that was not read is what shows: it was not checked
 
 @pytest.mark.windows
 def test_a_plate_that_fails_does_not_cost_the_others_their_check(state, monkeypatch):
@@ -270,7 +278,7 @@ def test_the_card_offers_a_weigh_in_records_it_and_checks_again(state, monkeypat
     monkeypatch.setattr(guard, 'recheck', lambda res, beside=None: again.append(res['title']))
     guard.act('asked', res, res['weigh'])
     assert fg.load_state()['weigh_asked']['SERIAL']['C3'] == pytest.approx(time.time(), abs=60) and 'weigh' not in fg.evaluate(BLUE, CFG, 'Benchy')
-    guard.act('weigh', res, (res['weigh'], 92.0))
+    guard.act('weigh', res, (res['weigh'], 92.0)); guard.todo.get(timeout=5)()              # kept once the printer was asked again: see the weigh-in's own test
     [w] = gn.load()['SERIAL']['C3']['weighs']
     assert (w['reading'], w['weight'], w['spool']['type'], w['spool']['colour']) == (110, 92.0, 'PLA', '#0A2989') and again == ['Benchy']
     assert fg.evaluate(BLUE, CFG, 'Benchy')['rows'][0]['trays'][0]['grams'] == 92.0            # weighed near empty: 18 g the tray reads at empty, and the spool's own
@@ -294,7 +302,7 @@ def test_the_amount_window_takes_the_scale_and_the_empty_spool(monkeypatch):
     save(); assert acts == [('amount', (tray, 720.0)), ('spool', 230.0)]                            # the amount first, then the spool's weight for next time
     entered = dict(tray, grams=412.4, entered=1e6)
     scale, spool, result, wrong, save, buttons, acts = amount_window(monkeypatch, entered)
-    assert (scale.get(), spool.get(), result['text'], buttons) == ('612', '200', '412 g of filament', ['Save', 'Forget this amount'])
+    assert (scale.get(), spool.get(), result['text'], buttons) == ('', '200', '', ['Save', 'Forget this amount'])   # the row's own figure is not where the window starts: see the ledger's test
     spool.set(''); scale.set('300'); save()                                                        # the filament weighed alone: no spool's weight to remember
     assert acts == [('amount', (entered, 300.0))]
     measured = dict(tray, label='C3', grams=110.0, reading=110.0)
@@ -614,7 +622,7 @@ class Icon:
 
 def answer(plate_no, status, title='Bracket', pid=1, error=None, **more):
     """An answer as evaluate gives it, cut down to what the guard reads to show it: one filament with this result."""
-    return dict({'title': title, 'plate_no': plate_no, 'pid': pid, 'error': error, 'worst': status, 'rows': [{'slot': 1, 'status': status}],
+    return dict({'title': title, 'plate_no': plate_no, 'pid': pid, 'error': error, 'worst': status, 'times': 1, 'rows': [{'slot': 1, 'status': status}],
                  'printer': {'model': 'Bambu Lab H2D', 'state': 'IDLE'}}, **more)
 
 def warned(first, *then, cfg=CFG, **how):
@@ -842,7 +850,7 @@ def test_forget_what_was_learned_is_among_the_settings_away_from_quit(state, mon
 def amount_asked(monkeypatch, tray, weigh=False, act=None, card=None, res=None):
     """The window guard_ui opens for a tray's amount, on the stand-in for tkinter, with its parts by name: the two
     fields (scale, spool), the labels of the result and of what is wrong, what Save does, every text in it (texts), the
-    buttons by their text, what it told the guard (acts) and whether it has closed. act: what telling the guard does;
+    buttons by their text, what it told the guard (acts), whether it has closed, and its widgets as made. act: what telling the guard does;
     card: the card it belongs to, else one that starts from an empty spool of 200 g."""
     import guard_ui, types
     made, w = tk_stand_in(monkeypatch), types.SimpleNamespace(acts=[])
@@ -856,6 +864,7 @@ def amount_asked(monkeypatch, tray, weigh=False, act=None, card=None, res=None):
     w.result, w.wrong = [x for x in made if type(x).__name__ == 'Label'][-2:]
     w.buttons = {x.k['text']: x.k['command'] for x in made if type(x).__name__ == 'Button'}
     w.save, w.texts, w.closed = w.buttons['Save'], lambda: [x.k['text'] for x in made if type(x).__name__ == 'Label'], lambda: bool(made[0].k.get('destroyed'))
+    w.made = made
     return w
 
 EXT = {'label': 'Ext', 'name': '', 'type': 'PETG', 'colour': '#101010', 'grams': None}
@@ -941,22 +950,33 @@ def test_a_warning_shows_though_the_state_file_cannot_be_read_for_what_is_ignore
     guard = guard_with(); guard.deliver(res); assert guard.card.shown == [('show', 0)]
 
 @pytest.mark.windows
-def test_a_result_shown_again_says_when_its_check_was_made(state, monkeypatch):
-    """"Show last result", the icon's own click, showed an answer that could be hours old under "Spools as the Bambu Lab
-    H2D reports them now", with nothing to tell it from a new one."""
+def test_a_card_made_from_an_old_answer_says_when_it_was_checked_not_now(state, monkeypatch):
+    """A full card read "Spools as the Bambu Lab H2D reports them now" whatever the age of its answer: after "Stop
+    ignoring", a check that failed, or a warning that had to wait for another to go. An answer more than a minute
+    old says when the printer reported its spools, and what ran then, in the past."""
     running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 2))); res = fg.evaluate(fg.parse_plate(gcode()), CFG, 'Benchy')
     guard = guard_with(); guard.deliver(res)
-    assert res['at'] == pytest.approx(time.time(), abs=60) and 'This answer is from' not in card_shown(monkeypatch, res)[0][-1]   # as it comes: nothing to say
-    def said(ago):
-        res['at'] = at = time.time() - ago; guard.show_last()
-        assert guard.card.shown[-1] == ('show', 0) and guard.card.res is res and res['at'] == at                 # shown again, its time as it was
-        when = time.localtime(at); day = '' if when[:3] == time.localtime()[:3] else time.strftime('%d %b, ', when)
-        return f' This answer is from {day}{time.strftime("%H:%M", when)}: "Check again" asks the printer now.'
+    assert res['at'] == pytest.approx(time.time(), abs=60)                                   # stamped where the check did not say
+    assert card_shown(monkeypatch, res)[0][-1] == "Spools as the Bambu Lab H2D reports them now; the amounts are the AMS's estimate."
+    def when(ago):
+        res['at'] = time.time() - ago; at = time.localtime(res['at'])
+        return time.strftime('at %H:%M' if at[:3] == time.localtime()[:3] else 'on %d %b at %H:%M', at)
     for ago in (90, 3 * 86400):
-        text = said(ago); assert card_shown(monkeypatch, res)[0][-1].endswith("the amounts are the AMS's estimate." + text)
+        then = when(ago)
+        assert card_shown(monkeypatch, res)[0][-1] == f"Spools as the Bambu Lab H2D reported them {then}; the amounts are the AMS's estimate. \"Check again\" asks the printer now."
+    then = when(3 * 86400); assert then.startswith('on ')
+    res['printer'].update(state='RUNNING', job='Benchy', layer=11, layers=27, counted=True, beyond={'A2': 40.0})
+    assert card_shown(monkeypatch, res)[0][-1] == (f"Spools as the Bambu Lab H2D reported them {then}, less what the print running there then (Benchy, layer 11 of 27) still needed; "
+        "the amounts are the AMS's estimate. The print running then needed 40 g more of A2's filament than the loaded spools held. \"Check again\" asks the printer now.")
+    res['printer'].update(counted=False, beyond={})
+    assert card_shown(monkeypatch, res)[0][-1] == (f"Spools as the Bambu Lab H2D reported them {then}; the amounts are the AMS's estimate. It was printing then (Benchy, layer 11 of 27): "
+        "that job was still drawing from these spools, and the guard could not count what it still needed. \"Check again\" asks the printer now.")
+    res['at'] = time.time()                                                                  # and as it comes, in the present
+    assert card_shown(monkeypatch, res)[0][-1] == ("Spools as the Bambu Lab H2D reports them now; the amounts are the AMS's estimate. It is printing now (Benchy, layer 11 of 27): "
+        "that job is still drawing from these spools, and the guard could not count what it still needs.")
     failed = answer(1, 'OK', error='the Bambu Lab H2D did not report its status', at=time.time() - 3 * 86400, times=1, model='Bambu Lab H2D', time='')
-    labels = card_shown(monkeypatch, failed)[0]
-    assert labels[-2:] == ['The Bambu Lab H2D did not report its status.', time.strftime('This answer is from %d %b, %H:%M: "Check again" asks the printer now.', time.localtime(failed['at']))]
+    assert card_shown(monkeypatch, failed)[0][-2:] == ['The Bambu Lab H2D did not report its status.',
+                                                       time.strftime('Checked on %d %b at %H:%M. "Check again" asks the printer now.', time.localtime(failed['at']))]
 
 @pytest.mark.windows
 def test_a_warning_found_for_send_print_job_shows_though_the_dialog_has_closed(state, tmp_path, monkeypatch):
@@ -1425,3 +1445,428 @@ def test_install_starts_the_guard_whatever_becomes_of_its_list_of_printers(state
     done = install_on(monkeypatch); monkeypatch.setattr(fg, 'bs_conf', lambda: ['not', 'a', 'configuration'])
     assert fg.install() == (True, []) and done[-1] == 'start'
     assert 'the printers could not be listed (AttributeError)' in capsys.readouterr().out
+
+def icon_menu(monkeypatch, guard):
+    """The icon's menu as guard_ui builds it for a guard, on a stand-in for pystray: each item keeps its text, its
+    action and how it was made (how); a submenu is the action of its item."""
+    import guard_ui
+    class Item:
+        def __init__(self, text, action=None, **how): self.text, self.action, self.how = text, action, how
+    class Menu:
+        SEPARATOR = Item('-')
+        def __init__(self, *items): self.items = items
+    pystray = type(sys)('pystray'); pystray.MenuItem, pystray.Menu = Item, Menu
+    pystray.Icon = type('Icon', (), {'__init__': lambda self, name, image, title, menu: setattr(self, 'menu', menu), 'run_detached': lambda self: None})
+    monkeypatch.setitem(sys.modules, 'pystray', pystray); monkeypatch.setattr(guard_ui, 'icon_image', lambda tone: None)
+    return guard_ui.Tray(guard).icon.menu
+
+def click(guard, menu):
+    """A click on the icon: the menu's default item, done as the guard does what its menu asks. Returns the item's text."""
+    item = next(i for i in menu.items if i.how.get('default')); item.action(None, item); guard.todo.get_nowait()()
+    return item.text
+
+@pytest.mark.windows
+def test_the_icons_click_checks_the_last_plate_again(state, monkeypatch):
+    """"Show last result", the icon's own click, put the last answer on a full card as it was. A print had taken 120 g
+    since: the card still read "Enough filament for this print", "as the Bambu Lab H2D reports them now". The click
+    asks the printer again: one check however often it is clicked, the newest slice when nothing was checked yet."""
+    reads, asked = [400], []
+    running(monkeypatch, None); monkeypatch.setattr(fg, 'read_status', lambda *a, **k: (asked.append(1), spools((BLUE_PLA, reads[0])))[1])
+    guard = guard_with(); menu = icon_menu(monkeypatch, guard)
+    old = fg.evaluate(fg.parse_plate(gcode(weights='300', used='1')), CFG, 'Vase'); old['pid'], old['plate_no'], old['gcode'] = 1, 2, 'a slice'
+    guard.deliver(old); assert old['worst'] == 'OK' and guard.card.shown == [('show', CFG['ok_seconds'])]
+    reads[0] = 280; del asked[:]                                                             # a print started at the printer has taken 120 g
+    assert click(guard, menu) == 'Check last plate again'; guard.todo.get(timeout=5)()
+    assert guard.card.shown[1:] == [('line', 'Checking the spools on the Bambu Lab H2D…', False), ('show', 0)] and len(asked) == 1 and not guard.busy
+    new = guard.card.res
+    assert new is not old and new['worst'] == 'SHORT' and (new['pid'], new['plate_no'], new['gcode'], new['title']) == (1, 2, 'a slice', 'Vase') and guard.last is new
+    assert new['at'] == pytest.approx(time.time(), abs=60)
+    release, check = threading.Event(), fg.evaluate                                          # the printer takes its time, and the icon is clicked five times
+    monkeypatch.setattr(fg, 'evaluate', lambda *a, **k: (release.wait(5), check(*a, **k))[1])
+    del asked[:]; shown = len(guard.card.shown)
+    for _ in range(5): click(guard, menu)
+    release.set(); guard.todo.get(timeout=5)()
+    assert len(asked) == 1 and guard.card.shown[shown:] == [('line', 'Checking the spools on the Bambu Lab H2D…', False), ('show', 0)] and not guard.busy
+    fresh, newest = guard_with(), []                                                         # nothing checked yet: the newest slice
+    monkeypatch.setattr(fresh, 'check_newest', lambda *a, **k: newest.append(a)); click(fresh, icon_menu(monkeypatch, fresh))
+    assert newest == [()]
+
+@pytest.mark.windows
+def test_the_amount_window_starts_from_what_the_guard_counts_now_and_saved_untouched_changes_nothing(state, monkeypatch):
+    """The window started with the amount of the card's own row. C3 was entered at 400 g and a counted print took 120 g:
+    from a card made before that print the window opened at 400 g, and Save as it stood wrote 400 g back over the
+    count. It starts from the ledger's entry, read as it opens, and Save with both fields as they opened enters nothing."""
+    import guard_ledger as gl
+    from helpers import H2D_JOB, SLICE
+    c3 = dict(EXT, label='C3'); res = {'printer': {'serial': 'SERIAL'}}
+    gl.enter('SERIAL', c3, 400); row = dict(c3, grams=400.0, entered=time.time())           # the row of a card made now
+    fg.remember_slice('Benchy', 1, SLICE); watch = gl.JobWatch('SERIAL', CFG)               # then a print runs and is counted: 120 g of C3
+    watch.look(dict(H2D_JOB, gcode_state='FINISH', task_id='10')); watch.look(dict(H2D_JOB, gcode_state='PREPARE')); watch.look(H2D_JOB)
+    counted = lambda: fg.load_state()['spools']['SERIAL']['C3']['grams']
+    assert counted() == 280.0
+    w = amount_asked(monkeypatch, row, res=res)
+    assert (w.scale.get(), w.spool.get(), w.result['text']) == ('480', '200', '280 g of filament')
+    w.save(); assert w.acts == [] and w.closed() and counted() == 280.0                      # as it opened: closed, and nothing entered
+    watch.look(dict(H2D_JOB, layer_num=120)); assert counted() == 280.0                      # nor is the running print taken off a second time
+    w = amount_asked(monkeypatch, row, res=res); w.spool.set('250'); w.save()               # one field changed: that is an amount
+    assert w.acts == [('amount', (row, 230.0)), ('spool', 250.0)] and w.closed()
+    w = amount_asked(monkeypatch, row, res=res); w.scale.set('481'); w.scale.set('480'); w.save()
+    assert w.acts == [] and w.closed()                                                       # changed and put back is untouched too
+    fg.update_state(lambda st: st['spools']['SERIAL']['C3'].__setitem__('stale', True))      # out of date: no figure to start from, and nothing to save unseen
+    w = amount_asked(monkeypatch, dict(row, grams=None, stale=1e6), res=res)
+    assert (w.scale.get(), w.result['text']) == ('', '') and list(w.buttons) == ['Save', 'Forget this amount']
+    w.save(); assert not w.closed() and w.acts == [] and w.wrong['text'].startswith('The weight on the scale')
+    for nothing in (lambda: {}, lambda: (_ for _ in ()).throw(fg.StateBusy('the state folder was held elsewhere for more than 10 s'))):
+        monkeypatch.setattr(fg, 'load_state', nothing)                                       # no entry, or a state file that cannot be read: empty, not the card's old figure
+        assert amount_asked(monkeypatch, row, res=res).scale.get() == ''
+    assert amount_asked(monkeypatch, row).scale.get() == ''                                  # nor without a printer to look it up for
+
+def c3_reads(grams, tag='A' * 32, colour='0A2989', state='IDLE'):
+    """The H2D with one blue PLA spool in C3, tagged, at this reading; another tag or colour is another spool."""
+    tray = {'id': '2', 'tray_type': 'PLA', 'tray_color': colour + 'FF', 'tray_info_idx': 'GFA00', 'remain_g': grams, 'tray_weight': '1000', 'tray_uuid': tag}
+    return {'gcode_state': state, 'subtask_name': 'Benchy', 'layer_num': 3, 'total_layer_num': 27, 'ams': {'ams': [{'id': '2', 'tray': [tray]}]}}
+
+@pytest.mark.windows
+def test_a_weigh_in_is_kept_against_a_reading_asked_for_anew_or_not_at_all(state, monkeypatch):
+    """A weigh-in was set against the reading of the card it came from, however old. C3 read 105 g on the card; the
+    print ran; the spool, weighed at 20 g, was kept as one that reads 105 g with 20 g on it, and every tray of the
+    printer was counted 85 g lower from then on. The printer is asked again when a weigh-in is saved."""
+    now = [c3_reads(105)]
+    running(monkeypatch, None); monkeypatch.setattr(fg, 'read_status', lambda *a, **k: now[0] if isinstance(now[0], dict) else (_ for _ in ()).throw(now[0]))
+    res = fg.evaluate(BLUE, CFG, 'Benchy'); tray = res['weigh']
+    assert (res['rows'][0]['status'], tray['label'], tray['reading']) == ('TIGHT', 'C3', 105)
+    kept = lambda: gn.load().get('SERIAL', {}).get('C3', {}).get('weighs', [])
+    def saved(status, grams=20.0):
+        """Save in the weigh-in window, with the printer as it is by then: (the card's headline, what it says)."""
+        now[0] = status; guard = guard_with(); again = []
+        monkeypatch.setattr(guard, 'recheck', lambda res, beside=None: again.append(res['title']))
+        guard.act('weigh', res, (tray, grams)); guard.todo.get(timeout=5)()
+        assert bool(again) != bool(guard.card.shown) and list(getattr(guard.card, 'buttons', {'Check again': 1})) == ['Check again']   # a new check, or a card that offers one
+        return guard.card.shown[-1][1:] + tuple(guard.card.said) if guard.card.shown else again
+    after = ': weigh-in not saved. Check again, then weigh from the new card.'
+    assert saved(c3_reads(20)) == ('Weigh-in not saved', 'C3 read 105 g on that card and reads 20 g now' + after) and kept() == []
+    assert saved(c3_reads(108))[1] == 'C3 read 105 g on that card and reads 108 g now' + after and kept() == []
+    assert saved(c3_reads(105, state='RUNNING'))[1] == "The Bambu Lab H2D is printing, and C3's reading is moving" + after
+    assert saved(c3_reads(105, tag='B' * 32))[1] == 'C3 no longer holds the spool that card showed' + after
+    assert saved(c3_reads(105, colour='C12E1F'))[1] == 'C3 no longer holds the spool that card showed' + after
+    assert saved(fg.PrinterError('printer did not report its status'))[1] == 'The printer could not be asked what C3 reads now (printer did not report its status)' + after
+    assert kept() == [] and 'C3: weigh-in not saved: C3 read 105 g on that card and reads 20 g now' in (state / 'guard.log').read_text()
+    with monkeypatch.context() as m:
+        m.setattr(gn, 'weigh', lambda *a, **k: (_ for _ in ()).throw(fg.StateBusy('learned.json could not be written: another program holds it')))
+        assert saved(c3_reads(105))[1] == 'The weigh-in of C3 could not be written (StateBusy)' + after and kept() == []
+    assert saved(c3_reads(104), 86.0) == ['Benchy']                                          # within 2 g, the same spool, no job: kept, against what it reads now
+    [w] = kept(); assert (w['reading'], w['weight'], w['spool']['id'], w['spool']['colour']) == (104, 86.0, 'A' * 32, '#0A2989')
+
+@pytest.mark.windows
+def test_the_amount_window_opens_on_the_screen_its_card_is_on(monkeypatch):
+    """The window was held to x and y of 0 or more: with Bambu Studio on a screen left of the primary one, or above it,
+    it opened at the edge of the primary screen, a screen away from the card that was clicked. It is held to the work
+    area of the monitor the card is on, 48 pixels above the card's corner at 100 %."""
+    import guard_ui, types
+    asked = []
+    def placed(spot, area, scale=1.0, owner=77):
+        monkeypatch.setattr(guard_ui, 'work_area', lambda hwnd: (asked.append(hwnd), types.SimpleNamespace(left=area[0], top=area[1], right=area[2], bottom=area[3]))[1])
+        made = tk_stand_in(monkeypatch); monkeypatch.setattr(sys.modules['tkinter'].Toplevel, 'winfo_fpixels', lambda self, what: 96.0 * scale, raising=False)
+        card = guard_ui.Card(None); card.t, card.spot, card.owner = guard_ui.THEMES['dark'], spot, owner
+        card.ask_amount(None, EXT)
+        return made[0].k['geometry']
+    assert placed((1160, 440), (0, 0, 1920, 1040)) == '+1160+292' and asked == [77]           # on the primary screen: above the card, the monitor asked for by the card's owner
+    assert placed((-760, 440), (-1920, 0, 0, 1040)) == '+-760+292'                           # Bambu Studio on a screen left of the primary one
+    assert placed((1160, -640), (0, -1080, 1920, -40)) == '+1160+-788'                       # and on one above it
+    assert placed((1800, 60), (0, 0, 1920, 1040)) == '+1620+0'                               # held inside that screen: its right edge, its top
+    assert placed((1160, 440), (0, 0, 1920, 1040), scale=1.5) == '+1160+268'                 # the gap grows with the screen's scaling: 72 pixels at 150 %
+    del asked[:]; assert placed((1160, 440), (0, 0, 1920, 1040), owner=None) == '+1160+292' and asked == [1]   # a card with no window of Bambu Studio's: by a window of its own
+
+@pytest.mark.windows
+def test_asking_for_a_screens_work_area_makes_no_new_type_each_time():
+    """work_area defined its MONITORINFO structure inside the function: a class for every call, and ctypes keeps the
+    pointer type of each for good. 6 kB a call, 2.5 calls a second while a card stands beside a dialog."""
+    import ctypes, gc, guard_ui
+    structures = lambda: (gc.collect(), sum(1 for c in ctypes.Structure.__subclasses__() if (c.__module__, c.__name__) == ('guard_ui', 'MONITORINFO')))[1]   # guard_ui's own: another package may have one of that name
+    guard_ui.work_area(1); before = structures()
+    for _ in range(20): guard_ui.work_area(1)
+    assert structures() == before == 1
+
+def card_widgets(monkeypatch, res, brief=0, theme='dark'):
+    """The widgets of the card guard_ui makes for an answer, on the stand-in for tkinter, in the order they were made."""
+    import guard_ui
+    made = tk_stand_in(monkeypatch)
+    def opened(card, pid=None, beside=None, hold=False):
+        card.win, card.t, card.owner, card.beside, card.held, card.closes_after = sys.modules['tkinter'].Toplevel(), guard_ui.THEMES[theme], None, None, False, 0
+        return card.win
+    monkeypatch.setattr(guard_ui.Card, '_open', opened); monkeypatch.setattr(guard_ui.Card, '_place', lambda card: None)
+    guard_ui.Card(None).show(res, brief)
+    return made
+
+@pytest.mark.windows
+def test_a_colour_tk_cannot_take_gives_a_neutral_swatch(state, monkeypatch):
+    """The square before a row took the G-code's colour text as it came. One Tk refuses (five digits from a hand-made
+    project, a name it does not know) raised inside show(), after the window was made: that warning never showed."""
+    import guard_ui
+    running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 2)))
+    for colours, squares in (('#0A2989;#FFFFFF;#C12E1F', ['#0A2989', '#C12E1F']), ('#12345;#FFFFFF;sunset', [guard_ui.THEMES['light']['raised']] * 2), (';;#C12E1FFF', [guard_ui.THEMES['light']['raised'], '#C12E1F'])):
+        res = fg.evaluate(fg.parse_plate(gcode(colours=colours)), CFG, 'Benchy')
+        assert [w.k['bg'] for w in card_widgets(monkeypatch, res, theme='light') if type(w).__name__ == 'Frame' and w.k.get('width') == 18] == squares, colours
+
+@pytest.mark.windows
+def test_the_one_line_cards_text_wraps_like_the_others(state, monkeypatch):
+    """With a print running the line under "Enough filament for this print" is some 190 characters, about 1100 pixels at
+    100 %: wider than a small Bambu Studio window, so its left part was off the screen."""
+    running(monkeypatch, dict(spools((BLUE_PLA, 500), (RED_PLA, 500)), gcode_state='RUNNING', subtask_name='Benchy'))
+    res = fg.evaluate(fg.parse_plate(gcode()), CFG, 'Benchy')
+    text = next(w for w in card_widgets(monkeypatch, res, brief=8) if type(w).__name__ == 'Label' and 'against the spools' in w.k['text'])
+    assert text.k['text'].endswith('which is printing a job the guard could not count') and text.k['wraplength'] == 520
+
+@pytest.mark.windows
+def test_the_footnote_says_whose_the_amounts_are_for_the_rows_shown(state, monkeypatch):
+    """"The amounts are the AMS's estimate" stood under every table: also under an amount entered by hand, and for a
+    printer that has no AMS."""
+    import guard_ledger as gl
+    black = {'tray_type': 'PETG', 'tray_color': '101010FF', 'remain': -1}                    # the external spool: PETG, no reading
+    petg, both = gcode(weights='10', used='2', colours='#0A2989;#101010;#C12E1F'), gcode(weights='9.99,10', used='1,2', colours='#0A2989;#101010;#C12E1F')
+    def footnote(status, text):
+        running(monkeypatch, status); res = fg.evaluate(fg.parse_plate(text), CFG, 'Benchy')
+        return card_shown(monkeypatch, res)[0][-1]
+    start = 'Spools as the Bambu Lab H2D reports them now'
+    assert footnote({'gcode_state': 'IDLE', 'ams': {'ams': []}, 'vt_tray': black}, petg) == start + '.'                                                # no amount at all: nothing to say of amounts
+    gl.enter('SERIAL', {'label': 'Ext', 'type': 'PETG', 'colour': '#101010'}, 400)
+    assert footnote({'gcode_state': 'IDLE', 'ams': {'ams': []}, 'vt_tray': black}, petg) == start + '; the amounts are the ones entered by hand, less the prints since.'
+    assert footnote(dict(spools((BLUE_PLA, 500)), vt_tray=black), both) == start + "; the amounts are the AMS's estimate, but for Ext: entered by hand, less the prints since."
+    assert footnote(spools((BLUE_PLA, 500), (RED_PLA, 500)), gcode()) == start + "; the amounts are the AMS's estimate."            # as before, where it is true
+    assert footnote({'gcode_state': 'IDLE', 'ams': {'ams': []}, 'vt_tray': dict(black, remain_g=300)}, petg) == start + "; the amounts are the printer's estimate."   # a reading from no AMS
+
+@pytest.mark.windows
+def test_the_amount_windows_buttons_can_be_reached_and_pressed_from_the_keyboard(state, monkeypatch):
+    """Tab moved between the two fields only: "Forget this amount" had no way to it without the mouse. The window's
+    buttons take the focus, and Return presses the one that has it. The card's own buttons still never do."""
+    tray = dict(EXT, grams=300.0, entered=1e6); w = amount_asked(monkeypatch, tray)
+    save, forget = [x for x in w.made if type(x).__name__ == 'Button']
+    assert (save.k['text'], forget.k['text'], save.k['takefocus'], forget.k['takefocus']) == ('Save', 'Forget this amount', 1, 1)
+    forget.keys['<Return>'](None); assert w.acts == [('amount', (tray, None))] and w.closed()
+    running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 2))); res = fg.evaluate(fg.parse_plate(gcode()), CFG, 'Benchy')
+    assert {x.k['takefocus'] for x in card_widgets(monkeypatch, res) if type(x).__name__ == 'Button'} == {0}
+
+@pytest.mark.windows
+def test_one_amount_window_at_a_time_and_it_goes_with_its_card(state, monkeypatch):
+    """The amount window belonged to nothing: every click on "Amount in Ext…" opened another, and each stayed topmost
+    over every program after the card and Bambu Studio had gone."""
+    import guard_ui
+    monkeypatch.setattr(guard_ui, 'theme', lambda: guard_ui.THEMES['dark']); monkeypatch.setattr(guard_ui, 'studio_window', lambda pid=None: None)
+    monkeypatch.setattr(guard_ui.Card, '_place', lambda card: None)
+    card = guard_ui.Card(None); w = amount_asked(monkeypatch, EXT, card=card); window, made = w.made[0], len(w.made)
+    w.scale.set('640'); card.ask_amount(None, EXT)                                           # the button again: the window that is open, brought forward
+    assert len(w.made) == made and window.k.get('lifted') == 1 and w.scale.get() == '640' and not w.closed()
+    card.close(); assert w.closed()                                                          # the card closed: its window goes with it
+    w = amount_asked(monkeypatch, EXT, card=card); assert not w.closed()                     # and a new one can be opened
+    card.note('Self-test: the guard works', []); assert w.closed()                           # another card in its place: the same
+    w = amount_asked(monkeypatch, EXT, card=card); w.scale.set('640'); w.save()              # saved and closed by itself: the next click opens one
+    again = amount_asked(monkeypatch, EXT, card=card); assert w.closed() and not again.closed() and again.made[0] is not w.made[0]
+
+@pytest.mark.windows
+def test_an_ampersand_in_a_projects_title_shows_as_one_in_the_icons_menu(state, monkeypatch):
+    """A Windows menu takes "&" as "underline the next letter": "Black & White" showed as "Black _White"."""
+    guard = guard_with(); menu = icon_menu(monkeypatch, guard); guard.deliver(answer(1, 'OK', 'Black & White'))
+    line = next(i for i in menu.items if callable(i.text))
+    assert line.text(line) == 'Enough filament for this print · Black && White, plate 1' and guard.last_text() == 'Enough filament for this print · Black & White, plate 1'
+
+@pytest.mark.windows
+def test_buttons_have_a_border_from_the_theme(state, monkeypatch):
+    """In the light theme a button's background is 1.11 to 1 against the card's surface (1.21 to 1 in the dark one), and
+    buttons had no border: they read as plain text. One pixel of the theme's own border colour, in both themes."""
+    import guard_ui
+    running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 2))); res = fg.evaluate(fg.parse_plate(gcode()), CFG, 'Benchy')
+    for theme in ('light', 'dark'):
+        buttons = [w for w in card_widgets(monkeypatch, res, theme=theme) if type(w).__name__ == 'Button']
+        assert [w.k['text'] for w in buttons] == ['Check again', 'Ignore for this project']
+        assert {(w.k.get('highlightthickness'), w.k.get('highlightbackground')) for w in buttons} == {(1, guard_ui.THEMES[theme]['border'])}
+    assert {(w.k.get('highlightthickness'), w.k.get('highlightbackground')) for w in amount_asked(monkeypatch, EXT).made if type(w).__name__ == 'Button'} == {(1, guard_ui.THEMES['dark']['border'])}
+
+@pytest.mark.windows
+def test_the_icon_is_stopped_whatever_ends_the_cards_loop(state):
+    """The icon runs on a thread of pystray's that is no daemon: when the Tk loop ended by an exception, the icon was not
+    stopped, the process stayed, and a dead guard looked alive (its icon there, "status" saying it runs)."""
+    def broken(): raise RuntimeError('the Tk loop has ended')
+    guard, stopped = guard_with(), []
+    guard.root = type('Root', (), {'after': lambda self, ms, then: None, 'mainloop': lambda self: broken()})()
+    guard.tray = type('Icon', (), {'stop': lambda self: stopped.append('icon')})(); guard.jobs['SERIAL'] = type('Job', (), {'stopped': threading.Event()})()
+    with pytest.raises(RuntimeError): guard.loop()
+    assert stopped == ['icon'] and guard.jobs['SERIAL'].stopped.is_set()
+
+def test_a_message_is_one_line_of_the_log_whatever_it_holds(state):
+    """A job's or a project's name comes from the printer or from a file and can hold a line break. Logged as it came, it
+    made a line of its own, with any time and text in it: in a log users are asked to paste into public reports."""
+    fg.log('job "Benchy\n2026-11-24 10:00:00 watching for sliced plates (forged)\r\nnext\x1b[2J end\x85" counted'); fg.log('the next line')
+    first, second = (state / 'guard.log').read_text(encoding='utf-8').splitlines()
+    assert first.endswith(' job "Benchy 2026-11-24 10:00:00 watching for sliced plates (forged)  next [2J end " counted') and second.endswith(' the next line')
+
+@pytest.mark.windows
+def test_the_packaged_guard_starts_tk_without_another_programs_tcl_library(monkeypatch):
+    """TCL_LIBRARY or TK_LIBRARY in the environment, set by another program for its own Tcl, sends the packaged guard's
+    Tcl to a library that is not its own: its first window never comes, and under pythonw nothing says why. A run from
+    source keeps them: there the Python and its Tcl are the user's."""
+    import guard_ui
+    tk_stand_in(monkeypatch); seen = []
+    monkeypatch.setattr(guard_ui.ctypes.windll.shcore, 'SetProcessDpiAwareness', lambda how: None, raising=False)   # not for the process that runs the tests
+    sys.modules['tkinter'].Tk = type('Tk', (), {'__init__': lambda self: seen.append({k: fg.os.environ.get(k) for k in ('TCL_LIBRARY', 'TK_LIBRARY')}), 'withdraw': lambda self: None})
+    for here, kept in (('app', None), ('bambu-filament-guard', 'elsewhere')):
+        monkeypatch.setenv('TCL_LIBRARY', 'elsewhere'); monkeypatch.setenv('TK_LIBRARY', 'elsewhere')
+        monkeypatch.setattr(fg, 'HERE', fg.os.path.join('C:', 'BambuFilamentGuard', here)); guard_ui.make_root()
+        assert seen[-1] == {'TCL_LIBRARY': kept, 'TK_LIBRARY': kept}, here
+
+PACKAGED, FROM_SOURCE = fg.os.path.join('C:', 'BambuFilamentGuard', 'app'), fg.os.path.join('C:', 'src', 'bambu-filament-guard')   # where the scripts are: build.py puts them in app/
+
+def test_a_missing_package_is_told_as_what_can_be_done_about_it(state, monkeypatch):
+    """"pip install paho-mqtt" was the advice on the packaged guard's card too. That guard has no pip, and its Python is
+    its own: there the folder is incomplete, and unzipping it again is what helps."""
+    monkeypatch.setitem(sys.modules, 'paho', None)                                           # no paho-mqtt to import
+    for here, said in ((FROM_SOURCE, 'the Python package paho-mqtt is missing (pip install paho-mqtt)'),
+                       (PACKAGED, "the guard's folder is incomplete (paho-mqtt is missing): unzip the guard again")):
+        monkeypatch.setattr(fg, 'HERE', here)
+        with pytest.raises(fg.PrinterError) as refused: fg.printer_link('192.0.2.1', 'SERIAL', 'code', 'guard', lambda report: None)
+        assert str(refused.value) == said
+
+@pytest.mark.windows
+def test_a_missing_pystray_is_logged_as_what_can_be_done_about_it(state, monkeypatch):
+    import guard_ui
+    monkeypatch.setitem(sys.modules, 'pystray', None)
+    for here, said in ((FROM_SOURCE, 'no icon in the notification area: the Python package pystray is missing (pip install pystray)'),
+                       (PACKAGED, "no icon in the notification area: the guard's folder is incomplete (pystray is missing): unzip the guard again")):
+        monkeypatch.setattr(fg, 'HERE', here); assert guard_ui.Tray(guard_with()).icon is None
+        assert (state / 'guard.log').read_text().splitlines()[-1].endswith(' ' + said)
+
+@pytest.mark.windows
+def test_at_send_print_job_a_plate_that_cannot_be_read_is_one_that_was_not_checked(state, tmp_path, monkeypatch):
+    """A plate whose G-code could not be read, or was still being written, when "Send print job" opened was a line in the
+    log: with the other plates fine, nothing showed beside the dialog, which there means every sliced plate is fine."""
+    import guard_ui
+    monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True); running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 500)))
+    _, odd, writing = project_of(tmp_path, monkeypatch, [FINE, gcode(used=None), gcode(complete=False)])   # plate 2: totals that cannot be placed; plate 3: not all there yet
+    guard = guard_with(); at_send(guard); res = guard.card.res
+    assert guard.card.shown == [('show', 0)] and guard.card.where == 4321 and guard.rank(res) == (1, 0)
+    assert (res['plate_no'], res['title'], res['error']) == (3, 'Farm', 'Bambu Studio is still writing the G-code of plate 3')   # the newest of the two
+    writing.unlink(); guard = guard_with(); at_send(guard); res = guard.card.res
+    assert (res['plate_no'], res['error']) == (2, 'the G-code of plate 2 cannot be read (2 filament totals for 3 filaments and no "; filament:" line to place them)')
+    log = (state / 'guard.log').read_text()
+    assert log.count('at "Send print job": Enough filament for this print: Farm') == 2 and 'at "Send print job": Filament could not be checked: Farm |   the G-code of plate 2 cannot be read' in log
+    odd.write_text(gcode(weights=TOO_MUCH)); again = []                                      # sliced again, and "Check again" on that card: the file is read anew
+    monkeypatch.setattr(guard, 'deliver', lambda new, **how: again.append(new)); guard.recheck(res); guard.todo.get(timeout=5)()
+    assert (again[0]['plate_no'], again[0]['error'], again[0]['worst']) == (2, None, 'SHORT')
+    project_of(tmp_path, monkeypatch, [gcode(used=None), TOO_MUCH]); guard = guard_with(); at_send(guard)   # a warning on another plate comes before it
+    assert (guard.card.res['plate_no'], guard.card.res['worst'], guard.card.res['error']) == (2, 'SHORT', None)
+
+@pytest.mark.windows
+def test_a_warning_held_back_shows_when_the_standing_one_has_gone(state):
+    """While a warning's card stood, another plate's warning that was no worse got no card, and none later: when the
+    standing plate was sliced again and fine, the icon went green over a plate that fell short. The latest answer of
+    each such plate is kept, and the worst of them shows when the standing card goes: by its own plate turning fine,
+    or closed by the user."""
+    shown, icon, guard = warned(answer(1, 'SHORT'), answer(2, 'OK'), answer(3, 'TIGHT'), answer(4, 'SHORT'), answer(3, 'SPLIT'), answer(5, 'TIGHT'), answer(5, 'OK'))
+    assert shown == [] and icon == [] and guard.card.res['plate_no'] == 1                    # as before: the card stands, the icon keeps its colour
+    guard.deliver(answer(1, 'OK'))                                                           # plate 1 sliced again, and fine: not its line, but the worst that waited
+    assert guard.card.shown[-1] == ('show', 0) and (guard.card.res['plate_no'], guard.card.res['worst']) == (4, 'SHORT')
+    assert guard.tray.was[-1] == ('danger', 'Not enough filament for this print · Bracket, plate 4') and guard.last is guard.card.res
+    guard.card.close(); guard.show_held()                                                    # closed by the user: the next, in its latest answer
+    assert guard.card.shown[-1] == ('show', 0) and (guard.card.res['plate_no'], guard.card.res['worst']) == (3, 'SPLIT')
+    assert guard.tray.was[-1] == ('warn', 'No single spool holds enough filament · Bracket, plate 3')
+    guard.card.close(); seen = len(guard.card.shown); guard.show_held()                      # plate 5 was fine in the end, plate 2 always: nothing waits
+    assert guard.card.shown[seen:] == [] and guard.held == {}
+
+@pytest.mark.windows
+def test_the_icon_is_not_green_while_a_warning_waits_to_be_shown(state, tmp_path, monkeypatch):
+    """The icon is green only when no plate that was checked has a warning that was neither shown nor ignored: an answer
+    asked for meanwhile does not turn it green, the icon's click checks the plate it names, and the check for "Send
+    print job" brings what waits up to date."""
+    import guard_ui
+    shown, icon, guard = warned(answer(1, 'SHORT'), answer(2, 'TIGHT'))
+    guard.deliver(answer(7, 'OK'), full=True)                                                # "Check newest slice now", say: a fine plate, shown because it was asked for
+    assert guard.card.res['plate_no'] == 7 and guard.tray.was[-1] == ('warn', 'Filament is tight for this print · Bracket, plate 2') == ('warn', guard.last_text())
+    checked = []; monkeypatch.setattr(guard, 'again', lambda res: checked.append(res['plate_no']) or res); monkeypatch.setattr(fg, 'printer_for', lambda plate: None)
+    waiting = guard.held[(1, 'Bracket', 2)]; waiting['plate'] = {'filaments': []}
+    with monkeypatch.context() as m:
+        m.setattr(fg, 'report_text', lambda res: 'the answer')                               # the answers here are cut down to what a card reads
+        guard.check_last(); guard.todo.get(timeout=5)()                                      # the click on the icon: the plate the icon names
+    assert checked == [2] and guard.card.res is waiting and guard.held == {}
+    monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True); running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 500)))
+    project_of(tmp_path, monkeypatch, [TOO_MUCH, FINE, FINE])
+    guard = guard_with(); guard.tray = Icon(); guard.deliver(answer(9, 'SHORT', 'Other'))    # another project's warning stands
+    guard.held[(1, 'Farm', 2)], guard.held[(1, 'Farm', 1)] = answer(2, 'TIGHT', 'Farm', ignored=False), answer(1, 'TIGHT', 'Farm', ignored=False)
+    at_send(guard)                                                                           # every plate of Farm checked again: plate 2 is fine now, plate 1 short
+    assert (guard.card.res['plate_no'], guard.card.res['worst'], guard.card.where) == (1, 'SHORT', 4321) and guard.held == {}
+
+@pytest.mark.windows
+def test_a_setting_that_cannot_be_kept_is_in_force_and_said_not_to_be_kept(state, monkeypatch):
+    """With config.json not writable (the guard's folder read-only, the file held elsewhere) a setting changed in the
+    icon's menu raised out of the menu: a line in the log, nothing on screen, and no word that the next start forgets it."""
+    def refused(cfg, key=None): raise PermissionError(13, 'Permission denied', fg.CONFIG)
+    monkeypatch.setattr(fg, 'save_config', refused)
+    guard = guard_with(); menu = icon_menu(monkeypatch, guard); settings = next(i.action for i in menu.items if i.text == 'Settings')
+    for text in ("Warn when a spool's amount is unknown", 'One line when there is enough'):
+        item = next(i for i in settings.items if i.text == text); item.action(None, item); guard.todo.get_nowait()()   # does not raise
+        assert item.how['checked'](item) == (text != 'One line when there is enough')        # in force, and the menu shows it
+    assert 'UNKNOWN' in guard.cfg['popup_on'] and guard.cfg['ok_seconds'] == 0
+    assert guard.card.shown == [('note', 'This setting was not kept')] * 2
+    assert guard.card.said == ['config.json could not be written (PermissionError): is the folder the guard runs from read-only?',
+                               'The setting is in force until the guard stops; at its next start it is as config.json has it.']
+    assert 'setting ok_seconds = 0: not kept, config.json could not be written (PermissionError): in force until the guard stops' in (state / 'guard.log').read_text()
+
+@pytest.mark.windows
+def test_the_icon_goes_grey_when_slices_cannot_be_read(state, tmp_path, monkeypatch):
+    """"Filament is not being checked" was a card, once for a Bambu Studio version; the icon kept the colour and the
+    tooltip of the last answer, green as may be, while no slice was checked. It goes grey and says so, until a slice
+    is read again."""
+    running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 500)))
+    class Watcher:
+        problems = []
+        def new_plates(self): guard.stopping.set(); self.problems.append((str(tmp_path / '.1.0.gcode'), 'it carries no filament totals')); return []
+    monkeypatch.setattr(fg, 'Watcher', Watcher)
+    guard = guard_with(); guard.tray = Icon(); guard.deliver(answer(1, 'OK')); guard.card.close()
+    assert guard.tray.was == [('ok', 'Enough filament for this print · Bracket, plate 1')]
+    guard.watch_slices(); run_queued(guard)
+    assert guard.card.shown[-1] == ('note', 'Filament is not being checked') and guard.tray.was[-1] == ('muted', 'Filament is not being checked')
+    assert guard.last_text() == 'Filament is not being checked'
+    guard.card.close(); notes = guard.card.shown.count(('note', 'Filament is not being checked'))
+    f = slice_file(tmp_path, gcode()); guard.take_slice(str(f), fg.parse_plate(f.read_text())); run_queued(guard)   # a slice that reads: checked again
+    assert guard.tray.was[-1][0] == 'ok' and guard.last_text().startswith('Enough filament for this print') and guard.card.shown.count(('note', 'Filament is not being checked')) == notes
+
+@pytest.mark.windows
+def test_a_stop_asked_for_during_slice_all_does_not_wait_for_every_plate(state, monkeypatch):
+    """The stop flag was looked at between rounds only: with "slice all" under way, each plate a check of seconds, an
+    install, an update or a stop gave up waiting after 10 s while the old guard went on to the last plate."""
+    guard, taken = guard_with(), []
+    class Watcher:
+        problems = []
+        def new_plates(self): return [('plate 1', {}), ('plate 2', {}), ('plate 3', {})]
+    def take(path, plate):
+        taken.append(path); (state / 'stop').write_text('')                                  # "stop", asked for while the first plate is checked
+    monkeypatch.setattr(fg, 'Watcher', Watcher); guard.take_slice = take
+    guard.watch_slices()
+    assert taken == ['plate 1'] and guard.stopping.is_set()
+
+@pytest.mark.windows
+def test_another_trays_amount_window_takes_the_open_ones_place(state, monkeypatch):
+    """One amount window at a time: the button of the tray it is for brings it forward, but the button of another tray,
+    or "Weigh", asks for another window, and gets it in the open one's place."""
+    import guard_ui
+    card = guard_ui.Card(None); w = amount_asked(monkeypatch, EXT, card=card); first, made = w.made[0], len(w.made)
+    other = dict(EXT, label='A3', reading=300.0)
+    card.ask_amount(None, other)
+    assert first.k.get('destroyed') and not first.k.get('lifted') and len(w.made) > made and 'A3' in w.made[made + 1].k['text']
+    second = w.made[made]; card.ask_amount(None, other, weigh=True)                           # the same tray, to weigh: another window again
+    assert second.k.get('destroyed') and card.asking is not second and not card.asking.k.get('destroyed')
+
+@pytest.mark.windows
+def test_a_card_that_is_no_answer_does_not_end_a_standing_warning(state, monkeypatch):
+    """There is one card at a time, and a card of the guard's own took a warning's place for good: "Filament is not being
+    checked" for a slice it could not read, "This setting was not kept", the self-test's lines. The warning waits
+    behind such a card, and shows again when it has gone."""
+    short = answer(1, 'SHORT')
+    for say in (lambda guard: guard.not_checking([(False, 'Bambu Studio 02.10 wrote a slice the guard cannot read.')]),
+                lambda guard: (monkeypatch.setattr(fg, 'save_config', lambda cfg, key=None: (_ for _ in ()).throw(PermissionError(13, 'Permission denied'))), guard.set_option('ok_seconds', 8)),
+                lambda guard: guard.forget_learned()):
+        shown, icon, guard = warned(short); say(guard)
+        assert guard.card.shown[-1][0] == 'note' and guard.held == {(1, 'Bracket', 1): short}
+        guard.show_held(); assert guard.card.shown[-1][0] == 'note'                          # while that card is open: nothing moves
+        guard.card.close(); guard.show_held()
+        assert guard.card.shown[-1] == ('show', 0) and guard.card.res is short and guard.held == {} and guard.standing_warning()
+    shown, icon, guard = warned(short); guard.forget_learned(); guard.deliver(answer(1, 'OK'))   # its plate fine meanwhile: nothing waits any more
+    assert guard.held == {} and guard.card.shown[-1] == ('show', CFG['ok_seconds'])
