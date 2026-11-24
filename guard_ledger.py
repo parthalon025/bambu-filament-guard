@@ -141,10 +141,15 @@ def fits(s, name, layers, plate=None):
     return plate is None or s.get('plate') == plate
 
 def match_slice(name, layers, slices, plate=None):
-    """The slice a job was made from: the newest one whose project title starts the job's name and whose layer count is
-    the job's (fits); of that plate, when the job's plate is known. Two plates of one project with the same layer count
-    are told apart only by that."""
-    return next((s for s in slices if fits(s, name, layers, plate)), None)
+    """The slice a job was made from: the newest that fits it (fits: the job's layer count; its plate, when that is
+    known) among the slices of the project it is named after. That project is the one whose title is the job's name;
+    failing that, the one with the longest title that, followed by "_", starts it. A job "Bracket_v2" was once counted
+    by a newer slice of the project "Bracket", 40 g for 300 g. When no slice of that project fits, the job is not
+    matched to another project's: None, and it is not counted. Two plates of one project with the same layer count are
+    told apart only by the plate."""
+    titles = {s['title'] for s in slices if name == s['title'] or name.startswith(s['title'] + '_')}
+    title = name if name in titles else max(titles, key=len, default=None)
+    return next((s for s in slices if s['title'] == title and fits(s, name, layers, plate)), None)
 
 def versions(status, slices):
     """The slices the job the printer shows may have been made from: the newest that fits it (match_slice) and the

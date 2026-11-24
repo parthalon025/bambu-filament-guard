@@ -179,3 +179,19 @@ def test_the_follower_notes_the_job_on_the_printer_too(state):
     watch = gl.JobWatch('SERIAL', dict(CFG, learn=False)); watch.see(printing('RUNNING', [spool(2)], mapping=(2,), layer=1))
     assert fg.load_state()['on'] == {'SERIAL': {'name': 'Part', 'layers': 100, 'plate': None}}
     watch.see(printing('FINISH', [spool(2)], mapping=(2,), layer=100)); assert fg.load_state()['on'] == {}
+
+def test_a_job_is_matched_to_the_project_it_is_named_after(state):
+    """"Bracket_v2" (300 g) is sliced and sent; then the project "Bracket" (40 g, as many layers, plate 1) is sliced. The
+    job's name also starts with "Bracket_", as a plate of that project would be named, but it is the name of a project
+    that was sliced: the job is counted by that one, and an entered 500 g go down by 300 g, not by 40 g. When no slice
+    of the project a job is named after fits it, it is not counted by another project's."""
+    part(300.0, title='Bracket_v2'); part(40.0, title='Bracket'); slices = fg.load_state()['slices']
+    assert gl.match_slice('Bracket_v2', 100, slices, 1)['title'] == 'Bracket_v2' and gl.match_slice('Bracket_v2_lid', 100, slices, 1)['title'] == 'Bracket_v2'
+    assert gl.match_slice('Bracket_plate A', 100, slices, 1)['title'] == 'Bracket' and gl.match_slice('Bracket', 100, slices)['title'] == 'Bracket'
+    job = printing('RUNNING', [spool(0, 400), spool(2)], name='Bracket_v2', mapping=(0,), layer=1, gcode_file='/data/Metadata/plate_1.gcode')
+    assert gl.owed(job, slices) == ({'A1': 300.0}, True)
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 500)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(dict(job, gcode_state='IDLE', task_id='1')); watch.look(dict(job, mapping=[2]))
+    assert fg.load_state()['spools']['SERIAL']['A3']['grams'] == 200
+    part(40.0, title='Bracket', layers=50)                                               # "Bracket" at 50 layers: it fits a job of 50 layers, "Bracket_v2" does not
+    assert gl.match_slice('Bracket_v2', 50, fg.load_state()['slices'], 1) is None and gl.owed(dict(job, total_layer_num=50), fg.load_state()['slices']) == ({}, False)
