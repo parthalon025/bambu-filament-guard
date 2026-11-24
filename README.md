@@ -101,8 +101,8 @@ When a filament falls short it is the full table, as in the picture at the top, 
 |---|---|
 | Enough | One matching spool holds the need plus the reserve. |
 | Tight | One spool holds the need, without the reserve. |
-| Needs two spools | No single spool holds it; the matching spools together do. AMS auto refill must be on. |
-| Not enough | The matching spools together hold less than the need. |
+| Needs two spools | No single spool holds it; spools that AMS auto refill goes on between do together: the same product and colour, both in an AMS. AMS auto refill must be on. |
+| Not enough | The matching spools together hold less than the need, or hold it only with a spool AMS auto refill does not go on to (another product or shade, the external spool): the note names those and their amounts. |
 | Not loaded | No spool of that material is loaded where the print's nozzle can reach it. |
 | Colour not loaded | The material is loaded, this colour of it is not. The nearest spool is named and counts for nothing. |
 | Unknown | The matching spool reports no remaining amount. Shown as one line, like "enough", unless `popup_on` names it. |

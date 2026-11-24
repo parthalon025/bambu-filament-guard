@@ -105,9 +105,10 @@ def test_a_spool_that_stands_in_for_another_product_is_shared_with_its_own_filam
     fils = [dict(fil(60, '#000000'), slot=1), dict(fil(60, '#000000', fid='GFA01'), slot=2)]
     alone, rows = judged(fils, [tray('A1', 100, '#000000', weight=1000), tray('A2', 30, '#000000', fid='GFL99', name='Generic PLA', weight=1000)])
     assert alone == ['OK', 'OK'] and [tray_labels(r) for r in rows] == [['A1'], ['A1', 'A2']]
-    assert [r['status'] for r in rows] == ['SHORT', 'SPLIT']
-    assert rows[0]['note'].startswith('filaments 1, 2 share A1 and need 120 g together: short by 20 g')
-    assert rows[1]['note'].startswith('filaments 1, 2 share A1 and need 120 g together: ')
+    assert [r['status'] for r in rows] == ['SHORT', 'SHORT']
+    assert rows[0]['note'] == 'filaments 1, 2 share A1 and need 120 g together: short by 20 g; similar colour: A2 Generic PLA 30 g'
+    assert rows[1]['note'] == ("filaments 1, 2 share A1 and need 120 g together: short by 20 g; AMS auto refill does not go on from A1 to A2 (30 g); "
+                               "A1 is PLA Basic and A2 is Generic PLA, another product than the project's Bambu PLA Basic")
 
 def test_the_external_spool_is_shared_by_the_filaments_of_both_nozzles():
     """The external spool counts for either nozzle: the left nozzle's filament can also print from B1, the right one's
@@ -115,7 +116,8 @@ def test_the_external_spool_is_shared_by_the_filaments_of_both_nozzles():
     fils = [dict(fil(60, nozzle='left'), slot=1), dict(fil(60, nozzle='right'), slot=2)]
     alone, rows = judged(fils, [tray('B1', 20, nozzle='left', weight=1000), tray('Ext', 100, weight=1000)])
     assert alone == ['OK', 'OK'] and [tray_labels(r) for r in rows] == [['Ext', 'B1'], ['Ext']]
-    assert [r['status'] for r in rows] == ['SPLIT', 'SHORT']
+    assert [r['status'] for r in rows] == ['SHORT', 'SHORT']
+    assert rows[0]['note'] == 'filaments 1, 2 share Ext and need 120 g together: short by 20 g; AMS auto refill does not go on from Ext to B1 (20 g)'
     assert rows[1]['note'] == 'filaments 1, 2 share Ext and need 120 g together: short by 20 g'
 
 def test_two_shades_within_tolerance_of_one_spool_share_it():
@@ -124,8 +126,9 @@ def test_two_shades_within_tolerance_of_one_spool_share_it():
     fils = [dict(fil(60, '#808080', fid=''), slot=1), dict(fil(60, '#949494', fid=''), slot=2)]
     alone, rows = judged(fils, [tray('A1', 100, '#8A8A8A', fid='', weight=1000), tray('A2', 20, '#9E9E9E', fid='', weight=1000)])
     assert alone == ['OK', 'OK'] and [tray_labels(r) for r in rows] == [['A1'], ['A1', 'A2']]
-    assert [r['status'] for r in rows] == ['SHORT', 'SPLIT']
+    assert [r['status'] for r in rows] == ['SHORT', 'SHORT']
     assert rows[0]['note'] == 'filaments 1, 2 share A1 and need 120 g together: short by 20 g'
+    assert rows[1]['note'] == 'filaments 1, 2 share A1 and need 120 g together: short by 20 g; AMS auto refill does not go on from A1 to A2 (20 g)'
 
 def test_a_filament_is_judged_with_those_it_shares_a_spool_with_against_its_own_spools():
     """Three greys in a row: slot 1 prints from A1, slot 2 from A1 or A2, slot 3 from A2. Slot 2 may take either, so it
@@ -136,3 +139,38 @@ def test_a_filament_is_judged_with_those_it_shares_a_spool_with_against_its_own_
     assert [r['status'] for r in rows] == ['OK', 'OK', 'SHORT']                         # 120 g of A1's 250; 180 g of them; 120 g of A2's 100
     assert [r['note'] for r in rows] == ['filaments 1, 2 share A1 and need 120 g together', 'filaments 1, 2, 3 share A1 + A2 and need 180 g together',
                                          'filaments 2, 3 share A2 and need 120 g together: short by 20 g']
+
+def test_a_spool_of_another_product_that_counts_is_named_even_when_there_is_enough():
+    """PLA Basic red in the project, only a PLA Silk+ red loaded (31 apart in colour): it counts, as it can be picked at
+    "Send print job", and the row says which spool that is. It read "enough" with nothing said."""
+    silk = tray('B3', 192, colour='#D02727', fid='GFA06', name='PLA Silk+')
+    row = fg.assess(fil(50), [silk], CFG)
+    assert row['status'] == 'OK' and row['note'] == "B3 is PLA Silk+, another product than the project's Bambu PLA Basic"
+    row = fg.assess(fil(50), [silk, tray('C1', 20, colour='#C02020', fid='GFL99', name='')], CFG)       # two of them, one that names no product
+    assert row['status'] == 'OK' and row['note'] == "B3 is PLA Silk+ and C1 is PLA, another product than the project's Bambu PLA Basic"
+    row = fg.assess(fil(50), [dict(silk, grams=None)], CFG)
+    assert row['status'] == 'UNKNOWN' and row['note'] == "B3 reports no remaining amount; B3 is PLA Silk+, another product than the project's Bambu PLA Basic"
+    assert fg.assess(fil(50), [tray('B2', 81)], CFG)['note'] == ''                                     # the project's own product
+    assert fg.assess(fil(50, fid=''), [silk], CFG)['note'] == ''                                       # a project that names no product
+
+def test_two_spools_count_together_only_where_ams_auto_refill_goes_on_from_one_to_the_other():
+    """The same product and colour, both in an AMS. A total reached only with another spool is "not enough", and the note
+    names that spool and its amount: it read "AMS auto refill must be on" across an AMS tray and the external spool."""
+    row = fg.assess(fil(100), [tray('A1', 60), tray('Ext', 60)], CFG)
+    assert (row['status'], row['best'], row['total']) == ('SHORT', 60, 120)
+    assert row['note'] == 'short by 40 g; AMS auto refill does not go on from A1 to Ext (60 g)'
+    row = fg.assess(fil(100, fid='GFA01'), [tray('A1', 60), tray('A2', 60, colour='#D02727', fid='GFA06', name='PLA Silk+')], CFG)   # two other products
+    assert row['status'] == 'SHORT' and row['note'] == ("short by 40 g; AMS auto refill does not go on from A1 to A2 (60 g); "
+                                                        "A1 is PLA Basic and A2 is PLA Silk+, another product than the project's Bambu PLA Basic")
+    row = fg.assess(fil(100, fid=''), [tray('A1', 60, fid=''), tray('A2', 60, colour='#C43020', fid='')], CFG)                       # two shades
+    assert row['status'] == 'SHORT' and row['note'] == 'short by 40 g; AMS auto refill does not go on from A1 to A2 (60 g)'
+    three = [tray('A1', 60), tray('A2', 60), tray('Ext', 30)]
+    row = fg.assess(fil(100), three, CFG)
+    assert row['status'] == 'SPLIT' and row['note'] == 'only across A1 + A2: AMS auto refill must be on'
+    row = fg.assess(fil(140), three, CFG)
+    assert row['status'] == 'SHORT' and row['note'] == 'short by 20 g; AMS auto refill does not go on from A1 + A2 to Ext (30 g)'
+    assert fg.assess(fil(200), three, CFG)['note'] == 'short by 50 g'                                  # not there with every spool either
+    row = fg.assess(fil(100), [tray('A1', 60), tray('A2', 60)], CFG)
+    assert row['status'] == 'SPLIT' and row['note'] == 'only across these spools: AMS auto refill must be on'
+    res = {'error': None, 'worst': 'SHORT', 'rows': [fg.assess(fil(100), [tray('A1', 60), tray('Ext', 60)], CFG)]}
+    assert fg.exit_code(res) == 2 and fg.headline(res) == 'Not enough filament for this print'

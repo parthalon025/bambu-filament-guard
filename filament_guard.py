@@ -601,12 +601,16 @@ def assess(fil, trays, cfg, times=1):
     """One filament of the print against the loaded spools.
     OK       one spool holds the need plus the reserve (see DEFAULTS)
     TIGHT    one spool holds the need, without the reserve
-    SPLIT    no single spool holds it, the matching spools together do (the AMS must refill from one to the next)
-    SHORT    the matching spools together hold less than the need
+    SPLIT    no single spool holds it; matching spools that AMS auto refill goes on between do together (same_filament,
+             both in an AMS)
+    SHORT    the matching spools together hold less than the need, or hold it only with a spool the AMS does not go
+             on to by itself (another product or shade, the external spool): those are named, with their amounts
     MISSING  no spool of this material is loaded where the print's nozzle can reach it
     COLOUR   the material is loaded, this colour of it is not: the nearest spool is named, and counts for nothing
     UNKNOWN  the matching spool reports no remaining amount
-    Matching: same material type, on the nozzle that prints it, of the project's colour (the same product first)."""
+    Matching: same material type, on the nozzle that prints it, of the project's colour. Of the project's own product
+    while a spool of it is loaded; otherwise of any product, since that spool can be picked at "Send print job", and
+    the note then names it, whatever the answer."""
     need = fil['grams'] * times
     row = {'slot': fil['slot'], 'type': fil['type'], 'name': fil['name'], 'colour': fil['colour'], 'nozzle': fil['nozzle'], 'need': need,
            'trays': [], 'best': None, 'total': None, 'note': ''}
@@ -636,11 +640,13 @@ def assess(fil, trays, cfg, times=1):
                      'spool': t.get('spool'), 'fid': t.get('fid'), 'weight': t.get('weight')} for t in group]
     known = [t['grams'] for t in group if t['grams'] is not None]
     unknown = [t['label'] for t in group if t['grams'] is None]
+    other = [t for t in group if fil['fid'] and t['fid'] != fil['fid']]     # no spool of the project's product is loaded: these count in its place
+    stands_in = (' and '.join(f"{t['label']} is {t['name'] or t['type']}" for t in other) + f", another product than the project's {fil['name'] or fil['type']}") if other else ''
     if not known:
         stale = [t['label'] for t in group if t.get('stale')]
         row['status'] = 'UNKNOWN'
         row['note'] = (f"the amount entered for {', '.join(stale)} is out of date: a print the guard could not count has drawn on it" if stale
-                       else f"{', '.join(unknown)} reports no remaining amount")
+                       else f"{', '.join(unknown)} reports no remaining amount") + (f'; {stands_in}' if stands_in else '')
         return row
     row['best'], row['total'] = max(known), sum(known)
     # The reserve is a share of the largest full weight among the spools the filament could be printed from, not of the
@@ -658,10 +664,22 @@ def assess(fil, trays, cfg, times=1):
         measure = lambda q: max(floor_g, floor_share * need, q * (row['sliced'] + guard_learn.MARGIN_K))
         reserve = measure(group[0]['margin']) if group[0].get('margin') is not None else max(fixed, measure(max(floors)))
     row['reserve'], row['measured'], row['raised'] = reserve, group[0].get('margin') is not None, group[0].get('margin') is None and reserve > fixed
+    # Two spools hold it together only where the AMS goes on from one to the other by itself: the spools of one filament
+    # (same_filament), both in an AMS. The sum of any others once read "AMS auto refill must be on" across an AMS tray
+    # and the external spool, and across two products 31 apart in colour.
+    in_ams = lambda t: t['grams'] is not None and not t['label'].startswith('Ext')
+    chain = max(([t] + [o for o in group if in_ams(t) and in_ams(o) and same_filament(t, o)] for t in group if t['grams'] is not None), key=lambda c: sum(t['grams'] for t in c))
+    reach, apart = sum(t['grams'] for t in chain), [t for t in group if t['grams'] and t not in chain]
     if row['best'] >= need + reserve: row['status'] = 'OK'
     elif row['best'] >= need: row['status'] = 'TIGHT'; row['note'] = (f"{row['best'] - need:.0f} g to spare, and " + (
         f"past prints put the figure up to {reserve:.0f} g out" if row['measured'] or row['raised'] else f"the AMS's figure can be {reserve:.0f} g out"))
-    elif row['total'] >= need: row['status'] = 'SPLIT'; row['note'] = 'only across these spools: AMS auto refill must be on'
+    elif reach >= need:
+        row['status'] = 'SPLIT'
+        row['note'] = f"only across {'these spools' if len(chain) == len(group) else ' + '.join(t['label'] for t in chain)}: AMS auto refill must be on"
+    elif row['total'] >= need:
+        row['status'] = 'SHORT'
+        row['note'] = (f"short by {need - reach:.0f} g; AMS auto refill does not go on from {' + '.join(t['label'] for t in chain)} to "
+                       + ', '.join(f"{t['label']} ({t['grams']:.0f} g)" for t in apart))
     else: row['status'] = 'SHORT'; row['note'] = f"short by {need - row['total']:.0f} g"
     if unknown and row['status'] in ('SHORT', 'SPLIT', 'TIGHT'): row['note'] += f"; {', '.join(unknown)} holds an unknown amount more"
     said = [x for x in (tray_note(t) for t in group) if x]
@@ -674,6 +692,7 @@ def assess(fil, trays, cfg, times=1):
     alike = [t for t in near if t not in group]              # the same colour to the eye, another product: the user's call, so named, not counted
     if alike and row['status'] in ('SHORT', 'SPLIT', 'TIGHT'):
         row['note'] += '; similar colour: ' + ', '.join(f"{t['label']} {t['name'] or t['type']}" + (f" {t['grams']:.0f} g" if t['grams'] is not None else '') for t in alike)
+    if stands_in: row['note'] += ('; ' if row['note'] else '') + stands_in
     return row
 
 def tray_note(t):
