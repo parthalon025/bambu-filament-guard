@@ -4,6 +4,8 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-24
+
 ### Changed
 
 - The window for a spool's amount ("Amount in …", "Weigh C3…") takes what the scale shows and what the empty spool weighs, and takes one from the other: the filament shows as you type. It starts with the empty spool's weight entered last (`empty_spool_g`, 250 g at first); 0 there is the filament weighed alone, as before.
@@ -64,7 +66,8 @@ The first public release.
 - A notification-area icon with the last result and the settings; `check`, `status`, `trays`, `selftest`, `install` and `uninstall` commands, with exit codes a script can gate on.
 - A packaged folder and zip with a Python of its own (`python build.py`), for a computer that has none.
 
-[Unreleased]: https://github.com/parthalon025/bambu-filament-guard/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/parthalon025/bambu-filament-guard/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/parthalon025/bambu-filament-guard/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/parthalon025/bambu-filament-guard/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/parthalon025/bambu-filament-guard/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/parthalon025/bambu-filament-guard/releases/tag/v1.2.0
