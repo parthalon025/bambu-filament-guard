@@ -766,3 +766,11 @@ def test_the_self_test_ends_in_lines_whatever_it_meets_and_fails_when_no_printer
     assert '[!!] No known printer answered' in capsys.readouterr().out
     monkeypatch.setattr(fg, 'load_state', lambda: 1 / 0); lines = fg.selftest(CFG)
     assert lines[-1] == (False, 'The self-test could not finish (ZeroDivisionError: division by zero)') and lines[0][0] is True
+
+def test_install_starts_the_guard_whatever_becomes_of_its_list_of_printers(state, monkeypatch, capsys):
+    """Install prints where each known printer is, before it starts the guard. An error there other than a missing
+    Bambu Studio (a configuration of another shape, a state file held elsewhere) ended the install before the guard
+    was started."""
+    done = install_on(monkeypatch); monkeypatch.setattr(fg, 'bs_conf', lambda: ['not', 'a', 'configuration'])
+    assert fg.install() == (True, []) and done[-1] == 'start'
+    assert 'the printers could not be listed (AttributeError)' in capsys.readouterr().out

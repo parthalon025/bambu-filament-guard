@@ -1593,6 +1593,7 @@ def install(start_line=True):
             ip = printer_ip(p['serial'], cfg, refresh=True)
             print(f"  {p['name']}: " + (ip or 'not announcing itself on this network now (it is looked for again when a plate is sliced)'))
     except (OSError, ValueError): print("  Bambu Studio's configuration was not found: the guard waits for it")
+    except Exception as e: print(f'  the printers could not be listed ({e.__class__.__name__}): the guard looks for them when a plate is sliced')   # the list is for the eye: the guard is started all the same
     was, ours, logfile = guard_folder(), False, os.path.join(STATE_DIR, 'guard.log')
     if stop(60) == 'still running':
         with contextlib.suppress(OSError): os.remove(os.path.join(STATE_DIR, 'stop'))    # it is not replaced, so it is not left to stop later either
