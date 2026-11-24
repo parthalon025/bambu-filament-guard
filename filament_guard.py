@@ -1474,10 +1474,10 @@ class Guard:
                        + ([(None, f'What it had learned is kept as {aside}: one copy, until something is forgotten again.')] if kept else []))
 
     def check_last(self):
-        """The icon's click: the plate the icon names (on_icon) is checked again, and the fresh answer shows. The answer as it was
-        is not shown again: hours old, after a print that had taken 120 g, its card read "Enough", "as the printer
-        reports them now". A click while the check runs says so again and starts no second one; with no answer yet,
-        the newest slice is checked."""
+        """The icon's click: the plate the icon names (on_icon) is checked again, and the fresh answer shows. The answer
+        as it was is not shown again: hours old, after a print that had taken 120 g, its card read "Enough", "as the
+        printer reports them now". A click while the check runs says so again and starts no second one; with no answer
+        yet, the newest slice is checked."""
         res = self.on_icon()
         if not res or not res.get('plate'): self.check_newest(); return
         if 'icon' in self.busy: self.checking('icon', self.busy['icon'][1]); return

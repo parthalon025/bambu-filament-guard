@@ -1410,3 +1410,15 @@ def test_a_stop_asked_for_during_slice_all_does_not_wait_for_every_plate(state, 
     monkeypatch.setattr(fg, 'Watcher', Watcher); guard.take_slice = take
     guard.watch_slices()
     assert taken == ['plate 1'] and guard.stopping.is_set()
+
+@pytest.mark.windows
+def test_another_trays_amount_window_takes_the_open_ones_place(state, monkeypatch):
+    """One amount window at a time: the button of the tray it is for brings it forward, but the button of another tray,
+    or "Weigh", asks for another window, and gets it in the open one's place."""
+    import guard_ui
+    card = guard_ui.Card(None); w = amount_asked(monkeypatch, EXT, card=card); first, made = w.made[0], len(w.made)
+    other = dict(EXT, label='A3', reading=300.0)
+    card.ask_amount(None, other)
+    assert first.k.get('destroyed') and not first.k.get('lifted') and len(w.made) > made and 'A3' in w.made[made + 1].k['text']
+    second = w.made[made]; card.ask_amount(None, other, weigh=True)                           # the same tray, to weigh: another window again
+    assert second.k.get('destroyed') and card.asking is not second and not card.asking.k.get('destroyed')
