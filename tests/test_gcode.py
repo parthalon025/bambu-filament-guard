@@ -1,10 +1,12 @@
 """Reading a sliced plate: the G-code header and the grams each layer takes (filament_guard)."""
 import io
+import json
+import zipfile
 
 import pytest
 
 import filament_guard as fg
-from helpers import gcode, sliced, e
+from helpers import gcode, sliced, e, running, blue_reads
 
 
 def profile_of(body, weights, layers=3, why=None, **more):
@@ -109,3 +111,37 @@ def test_profile_out_of_tolerance_is_refused_with_the_figures_and_within_it_scal
     why = []
     assert profile_of(body, '1.03,20.05', layers=1, why=why) is None
     assert why == ['filament 1 adds up to 0.990 g, the header says 1.03 g (-0.040 g)', 'filament 3 adds up to 20.000 g, the header says 20.05 g (-0.050 g)']
+
+def exported(tmp_path, plates, name='Brackets.gcode.3mf'):
+    """A sliced file as Bambu Studio exports it, with the G-code of each plate (a text, or the grams of blue PLA it needs)."""
+    path = tmp_path / name
+    with zipfile.ZipFile(path, 'w') as z:
+        for n, plate in enumerate(plates, start=1):
+            z.writestr(f'Metadata/plate_{n}.gcode', plate if isinstance(plate, str) else gcode(weights=f'{plate:.2f}', used='1'))
+    return str(path)
+
+def test_the_plates_of_a_file_add_up_by_filament():
+    """The same material, colour, product and nozzle is one filament, whatever its slot; anything else is another."""
+    first = fg.parse_plate(gcode(weights='60.00,10.00', nozzles='0.4,0.4', fmap='1,1,2'))
+    second = fg.parse_plate(gcode(weights='60.00,5.00,7.00', used='1,2,3', nozzles='0.4,0.4', fmap='1,1,1'))   # its red is on the other nozzle
+    both = fg.plates_together([first, second])
+    assert [(f['slot'], f['type'], f['colour'], f['nozzle'], f['grams']) for f in both['filaments']] == [
+        (1, 'PLA', '#0A2989', 'left', 120.0), (3, 'PLA', '#C12E1F', 'right', 10.0), (2, 'PETG', '#FFFFFF', 'left', 5.0), (3, 'PLA', '#C12E1F', 'left', 7.0)]
+    assert both['printer_model'] == 'Bambu Lab H2D' and first['filaments'][0]['grams'] == 60.0
+
+def test_check_judges_the_plates_of_a_file_together_as_well(state, tmp_path, monkeypatch, capsys):
+    """"Print all plates" needs the sum, and docs/limits.md sends there to `check FILE`. Three plates of 400 g of one
+    blue against a spool that reads 1000 g: each plate alone read "enough", and the exit code was 0."""
+    path, asked = exported(tmp_path, [400, 400, 400]), []
+    running(monkeypatch, blue_reads(1000)); monkeypatch.setattr(fg, 'read_status', lambda *a, **k: asked.append(1) or blue_reads(1000))
+    assert fg.main(['check', path]) == 2 and len(asked) == 1                              # every answer from one reading of the printer
+    blocks = capsys.readouterr().out.splitlines()
+    assert [line for line in blocks if not line.startswith(' ')] == [f'Enough filament for this print: Brackets.gcode.3mf plate {n}' for n in (1, 2, 3)] + [
+        'Not enough filament for this print: Brackets.gcode.3mf all plates together']
+    assert 'needs  1200.0 g' in blocks[-1] and 'NOT ENOUGH  (short by 200 g)' in blocks[-1]
+    assert fg.main(['check', path, '--json']) == 2
+    results = json.loads(capsys.readouterr().out)
+    assert [(r['title'], r['worst']) for r in results] == [(f'Brackets.gcode.3mf plate {n}', 'OK') for n in (1, 2, 3)] + [('Brackets.gcode.3mf all plates together', 'SHORT')]
+    assert fg.main(['check', exported(tmp_path, [400, 400]), '--times', '2']) == 2 and 'all plates together x 2' in capsys.readouterr().out   # 1600 g
+    assert fg.main(['check', exported(tmp_path, [480, 480])]) == 1 and 'Filament is tight for this print: Brackets.gcode.3mf all plates together' in capsys.readouterr().out
+    assert fg.main(['check', exported(tmp_path, [400])]) == 0 and 'together' not in capsys.readouterr().out   # one plate: one answer

@@ -122,7 +122,7 @@ python filament_guard.py selftest     # can the guard read this Bambu Studio and
 python filament_guard.py uninstall    # remove the shortcut and stop
 ```
 
-`check` exits with a code a script can gate on: `--json` prints the full answer; `--popup` also shows the card.
+`check` exits with a code a script can gate on: `--json` prints the full answer; `--popup` also shows the card. For a file with several plates it answers for each plate and then for all plates together, which is what "Print all plates" needs; the exit code is the worst of those answers.
 
 | Exit code | Meaning |
 |---|---|

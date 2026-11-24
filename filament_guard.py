@@ -11,6 +11,7 @@ short. The card comes back beside the "Send print job" dialog while a warning st
   filament_guard.py status | stop      is the guard running / stop it
   filament_guard.py check [FILE]       check one file now: .gcode or .gcode.3mf; no FILE = the newest slice of the
                                        running Bambu Studio. Options: --times N (N prints of it), --popup, --json.
+                                       A file with several plates: each plate, then all its plates together.
                                        Exit code 0 enough, 1 tight / unknown, 2 short, 3 not checked.
   filament_guard.py trays              the spools every known printer reports
   filament_guard.py learned [--forget [TRAY]] what was learned from previous prints, per tray (--forget: start again,
@@ -281,6 +282,17 @@ def plates_of_file(path):
     with open(path, 'rb') as f: plate = parse_plate(read_head(f))
     if not plate: raise ValueError('not a complete Bambu Studio G-code file')
     return [('', plate)]
+
+def plates_together(plates):
+    """One plate that needs what the plates of a file need together, for "Print all plates": the grams of each filament
+    added up over the plates. A filament is one material, colour, product and nozzle, whichever slot it is in."""
+    sums = {}
+    for plate in plates:
+        for f in plate['filaments']:
+            key = (f['type'].upper(), f['colour'], f['fid'], f['nozzle'])
+            if key in sums: sums[key]['grams'] += f['grams']
+            else: sums[key] = dict(f)
+    return {'printer_model': plates[0]['printer_model'], 'time': '', 'layers': None, 'filaments': list(sums.values())}
 
 def lines_of(stream, size=1 << 20):
     """The lines of a binary stream, read in large pieces: a 3MF member's own readline is too slow for 4 million lines."""
@@ -1475,7 +1487,11 @@ def main(argv=None):
             with open(newest, 'rb') as f: plate = parse_plate(read_head(f))
             if not plate: print('Bambu Studio is still writing its newest slice'); return 3
             plates = [(project_title(newest), plate)]
-        results = [evaluate(plate, cfg, title, a.times) for title, plate in plates]
+        seen = {}
+        results = [evaluate(plate, cfg, title, a.times, seen) for title, plate in plates]
+        # "Print all plates" needs the sum: each plate alone can fit a spool that does not hold them all, and exit code 0
+        # for such a file once sent a script on. The same reading of the printer serves every answer (seen).
+        if len(plates) > 1: results.append(evaluate(plates_together([plate for _, plate in plates]), cfg, os.path.basename(a.file) + ' all plates together', a.times, seen))
         if not a.file: results[0]['pid'], results[0]['plate_no'] = studio_pid(newest), plate_number(newest)
         print(json.dumps(results, indent=1) if a.json else '\n'.join(report_text(r) for r in results))
         if a.popup:
