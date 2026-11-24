@@ -97,7 +97,7 @@ From source: `python filament_guard.py stop`, update the files, then `python fil
 
 Your settings, the amounts you entered and what was learned are kept. From 1.5.0 they are all in `%LOCALAPPDATA%\BambuFilamentGuard\`, not in the guard's folder. Up to 1.4.0 the settings were in the guard's own folder (`app\config.json`; from source, beside the script). `Install.cmd` brings that file over, and says so on its card, when it can tell where the old copy is: you quit it rather than uninstalled it, so its Startup shortcut still points there, or you unzipped over its folder. Otherwise copy `config.json` from the old folder to `%LOCALAPPDATA%\BambuFilamentGuard\` before you delete the old folder.
 
-Do not run the `Uninstall.cmd` of a copy of 1.4.0 or earlier once the new one is installed: it removes the new copy's shortcut and stops the new guard. Delete the old folder instead.
+Do not run the `Uninstall.cmd` of a copy of 1.4.0 or earlier once the new one is installed: it removes the new copy's shortcut and stops the new guard. Delete the old folder instead. From 1.5.0, `Uninstall.cmd` removes the shortcut and stops the guard only where they are its own folder's, and names what it left alone.
 
 ## Usage
 

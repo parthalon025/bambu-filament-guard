@@ -478,3 +478,37 @@ def test_a_guard_that_fails_while_it_starts_says_so_in_the_log(state, monkeypatc
     def no_screen(): raise RuntimeError('no display')
     monkeypatch.setattr(fg, 'sole_guard', lambda: 0); monkeypatch.setattr(guard_ui, 'make_root', no_screen)
     assert fg.watch() == 1 and 'the guard has stopped on an error: RuntimeError: no display (test_guard.py, line ' in (state / 'guard.log').read_text()
+
+def uninstall_on(monkeypatch, tmp_path, shortcut, guard):
+    """uninstall() where the Startup shortcut points into the folder `shortcut` and a guard runs that was started from
+    the folder `guard` ('' = a guard up to 1.4.0, which did not note it; None = no guard runs): (is the shortcut still
+    there?, was the guard told to stop?)."""
+    lnk, stopped = tmp_path / 'Bambu Filament Guard.lnk', []
+    lnk.write_text(''); monkeypatch.setattr(fg, 'STARTUP_LNK', str(lnk)); monkeypatch.setattr(fg, 'shortcut_folder', lambda: shortcut)
+    (tmp_path / 'guard.pid').write_text('4242' if not guard else f'4242\n{guard}\n')
+    monkeypatch.setattr(fg, 'is_running', lambda: guard is not None and not stopped); monkeypatch.setattr(fg, 'stop', lambda *a, **k: stopped.append(1) or True)
+    fg.uninstall()
+    return lnk.exists(), bool(stopped)
+
+def test_uninstall_leaves_the_shortcut_and_the_guard_of_a_copy_in_another_folder(state, tmp_path, monkeypatch, capsys):
+    """An update unzipped beside the old copy and installed: the one Startup shortcut now points into the new folder,
+    and the guard that runs is the new one. Uninstall.cmd in the old folder removed that shortcut and stopped that
+    guard, and said "stopped, shortcut removed": no guard ran from then on, nor after the next login."""
+    new = str(tmp_path / 'new' / 'app')
+    assert uninstall_on(monkeypatch, tmp_path, new, new) == (True, False)
+    out = capsys.readouterr().out
+    assert f'the Startup shortcut starts the guard in {new}, not this copy: left alone' in out and f'the running guard was started from {new}, not from this folder: left alone' in out
+    assert uninstall_on(monkeypatch, tmp_path, fg.HERE, fg.HERE) == (False, True)           # this folder's own: both go, as before
+    out = capsys.readouterr().out
+    assert 'shortcut removed' in out and 'stopped' in out and 'left alone' not in out
+    assert uninstall_on(monkeypatch, tmp_path, fg.HERE, None) == (False, False) and 'was not running' in capsys.readouterr().out
+    assert uninstall_on(monkeypatch, tmp_path, '', '') == (True, False)                       # neither can be told: neither is touched, and it says so
+    out = capsys.readouterr().out
+    assert 'the Startup shortcut could not be read: left alone' in out and 'it is not known from which folder the running guard was started: left alone' in out
+
+@pytest.mark.windows
+def test_the_guard_notes_the_folder_it_was_started_from(state, monkeypatch):
+    """For uninstall, which stops only the guard of its own folder: beside its process id in guard.pid, which nothing read."""
+    assert fg.guard_folder() == ''
+    started(monkeypatch)
+    assert (state / 'guard.pid').read_text() == f'{fg.os.getpid()}\n{fg.HERE}\n' and fg.guard_folder() == fg.HERE

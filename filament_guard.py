@@ -1386,7 +1386,7 @@ def watch(start_line=True):
         os.makedirs(STATE_DIR, exist_ok=True)
         stop_flag = os.path.join(STATE_DIR, 'stop')
         if os.path.exists(stop_flag): os.remove(stop_flag)
-        with open(os.path.join(STATE_DIR, 'guard.pid'), 'w') as f: f.write(str(os.getpid()))
+        with open(os.path.join(STATE_DIR, 'guard.pid'), 'w', encoding='utf-8') as f: f.write(f'{os.getpid()}\n{HERE}\n')   # the folder: for uninstall (guard_folder)
         guard = Guard(load_config(), guard_ui.make_root()); guard.greeted = not start_line
         note = settings_note(guard.cfg)
         if note: guard.todo.put(lambda: guard.card.note(*note))                  # the guard runs on defaults the user did not choose: said at once, not only in the log
@@ -1401,6 +1401,17 @@ def watch(start_line=True):
         return 1
     finally:
         if handle: ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+def guard_folder():
+    """The folder the running guard was started from, which watch() notes under its process id in guard.pid; '' when
+    that is not known (no such file, or one of a guard up to 1.4.0, which noted its process id alone)."""
+    try:
+        with open(os.path.join(STATE_DIR, 'guard.pid'), encoding='utf-8') as f: return (f.read().splitlines() + ['', ''])[1].strip()
+    except (OSError, ValueError): return ''
+
+def here(folder):
+    """Is `folder` the one this guard's script is in, as Windows tells folders apart?"""
+    return bool(folder) and os.path.normcase(os.path.abspath(folder)) == os.path.normcase(HERE)
 
 def is_running():
     import ctypes
@@ -1526,8 +1537,19 @@ def install(start_line=True):
     return said
 
 def uninstall():
-    if os.path.exists(STARTUP_LNK): os.remove(STARTUP_LNK)
-    print('stopped' if stop() else 'was not running'); print('shortcut removed')
+    """Removes the Startup shortcut and stops the guard, where they are this folder's own. There is one shortcut and one
+    running guard for the Windows user: after an update unzipped beside the old copy and installed, both are the new
+    copy's, and the uninstall of the old folder took them, so that no guard ran from then on. What is another folder's,
+    or cannot be told, is left alone and named."""
+    points, runs = shortcut_folder(), guard_folder()
+    if not os.path.exists(STARTUP_LNK): print('no Startup shortcut')
+    elif here(points): os.remove(STARTUP_LNK); print('shortcut removed')
+    elif points: print(f'the Startup shortcut starts the guard in {points}, not this copy: left alone')
+    else: print(f'the Startup shortcut could not be read: left alone ({STARTUP_LNK})')
+    if not is_running(): print('was not running')
+    elif here(runs): print('stopped' if stop() else 'was not running')
+    elif runs: print(f'the running guard was started from {runs}, not from this folder: left alone ("stop" stops it)')
+    else: print('it is not known from which folder the running guard was started: left alone ("stop" stops it)')
     print(f'settings, entered amounts, what was learned and the log stay in {STATE_DIR}: delete it, and this folder, to remove every trace')
 
 def setup():
