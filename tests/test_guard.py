@@ -558,3 +558,24 @@ def test_install_says_which_guard_runs_when_the_one_that_ran_does_not_go(state, 
     ours, said = fg.install()
     assert not ours and said == [(False, f"The guard did not start. The log may say why: {state / 'guard.log'}.")] and fg.main(['install']) == 1
     assert 'watcher did NOT start' in capsys.readouterr().out
+
+def test_a_status_without_its_spools_is_not_judged(state, monkeypatch, capsys):
+    """A piece of the printer's report taken for the whole: every spool read as not loaded, the card said "not loaded",
+    and each amount entered by hand for an AMS tray was deleted as if the tray were empty. Such a status is answered
+    "did not report its spools", by a check and by "trays", and no entry ends on it."""
+    import guard_ledger as gl
+    running(monkeypatch, {'gcode_state': 'IDLE', 'ams': {'tray_now': '255', 'version': 4}})
+    gl.enter('SERIAL', {'label': 'A1', 'type': 'PLA', 'colour': '#0A2989'}, 640)
+    res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['error'] == 'the Bambu Lab H2D did not report its spools' and res['rows'] == [] and fg.exit_code(res) == 3
+    assert fg.load_state()['spools']['SERIAL']['A1']['grams'] == 640
+    assert fg.main(['trays']) == 0 and 'Bambu Lab H2D: did not report its spools' in capsys.readouterr().out
+    assert fg.load_state()['spools']['SERIAL']['A1']['grams'] == 640
+
+@pytest.mark.windows
+def test_the_self_test_does_not_count_the_spools_of_a_status_without_them(state, monkeypatch):
+    import guard_ui, guard_ledger as gl
+    running(monkeypatch, {'gcode_state': 'IDLE', 'ams': {'tray_now': '255', 'version': 4}}); gl.enter('SERIAL', {'label': 'A1', 'type': 'PLA', 'colour': '#0A2989'}, 640)
+    monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None); monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {})
+    lines = fg.selftest(CFG)
+    assert (None, 'Bambu Lab H2D: it did not report its spools') in lines and fg.load_state()['spools']['SERIAL']['A1']['grams'] == 640

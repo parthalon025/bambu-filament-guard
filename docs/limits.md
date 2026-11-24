@@ -12,6 +12,7 @@ What the guard cannot read or does not yet know, and what it does in each case.
 - Two slots of one colour draw on the same spools and are judged on what they need together.
 - With two printers of one model, the one selected in Bambu Studio is asked.
 - Printers are the ones Bambu Studio holds a LAN access code for. A plate sliced for another printer is logged and shows no card.
+- A printer sends its status in pieces. The guard waits up to three seconds for the piece with the spools (the list of AMS units, which may be empty); a status that still has none is not judged: the card says the printer did not report its spools, and no amount entered by hand ends on it.
 - Which nozzle an AMS feeds is read as on the H2D (firmware 01.04.20.00). Where that cannot be read, a spool counts for either nozzle.
 - How a job names an external spool in its tray mapping has not been seen on a print; a tray the guard cannot name makes the entered amounts out of date, never wrong.
 - Learning learns nothing from a print not sliced on this computer. From a print it followed only from its middle (the guard started during it) it learns a run-dry but no rate and no loss before the first layer, which need the print's start. A spool moved to another tray starts again there: what is learned belongs to the tray, not the spool.

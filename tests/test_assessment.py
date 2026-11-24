@@ -1,4 +1,6 @@
 """Judging one filament against the spools that could print it (filament_guard.assess)."""
+import json
+
 import filament_guard as fg
 from helpers import CFG, tray, fil
 
@@ -89,3 +91,28 @@ def test_the_spools_a_print_goes_on_with_are_taken_in_the_order_without_learning
     plain = {t['label']: t['grams'] for t in fg.credit([dict(t) for t in trays], {'B1': 85.0})}
     strict = {t['label']: t['grams'] for t in fg.credit([dict(t) for t in trays], {'B1': 85.0}, learned)}
     assert plain == {'A1': 35.0, 'B1': 0.0, 'C1': 90.0} and strict == {'A1': 0.0, 'B1': 0.0, 'C1': 75.0}
+
+def linked(monkeypatch, reports):
+    """read_status on a stand-in for the link to the printer: `reports` are (tenths of a second after the link is up, the
+    "print" part of a report), on a clock that only time.sleep moves. Returns the status read."""
+    tenths, heard = [0], []
+    def link(ip, serial, code, client_id, on_report, on_refused=None):
+        heard.append(on_report); told()
+        return type('Client', (), {'loop_stop': lambda self: None, 'disconnect': lambda self: None})()
+    def told():
+        for at, report in reports:
+            if at == tenths[0]: heard[0](json.loads(json.dumps(report)))                 # as it comes off the link: a message of its own
+    monkeypatch.setattr(fg, 'printer_link', link); monkeypatch.setattr(fg.time, 'sleep', lambda s: (tenths.__setitem__(0, tenths[0] + 1), told()))
+    return fg.read_status('printer', 'SERIAL', 'code')
+
+WHOLE = {'gcode_state': 'IDLE', 'ams': {'tray_now': '255', 'ams': [{'id': '0', 'tray': [{'id': '0', 'tray_type': 'PLA', 'tray_color': '0A2989FF', 'remain_g': 640}]}]}}
+
+def test_a_report_still_in_pieces_is_waited_for_until_it_has_its_spools(monkeypatch):
+    """A printer sends its report in pieces. With a small piece of "ams" ahead of the whole ({"tray_now": ...}), the
+    status was returned after a second as it stood: no spool loaded, yet taken for complete."""
+    piece = {'gcode_state': 'IDLE', 'ams': {'tray_now': '255', 'version': 4}}
+    assert not fg.has_spools(piece) and not fg.has_spools({'gcode_state': 'IDLE'}) and not fg.has_spools({'ams': None}) and not fg.has_spools({'ams': {'ams': None}})
+    assert fg.has_spools(WHOLE) and fg.has_spools({'ams': {'ams': []}})                    # an AMS with nothing in it, or none: said by the printer
+    status = linked(monkeypatch, [(0, piece), (15, WHOLE)])
+    assert fg.has_spools(status) and [t['label'] for t in fg.trays_of(status)[0]] == ['A1']
+    assert not fg.has_spools(linked(monkeypatch, [(0, piece), (40, WHOLE)]))               # not within three seconds: returned as it is, and not taken for whole

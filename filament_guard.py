@@ -626,8 +626,15 @@ def printer_link(ip, serial, code, client_id, on_report, on_refused=None):
     c.loop_start()
     return c
 
+def has_spools(status):
+    """Is this status whole as far as the spools go? Only with the list of its AMS units in it (empty when there is
+    none). A printer sends its report in pieces: a small piece of "ams" ahead of the whole ({"tray_now": ...}) read as a
+    printer with nothing loaded, and ended every amount entered for an AMS tray. Without the list nothing is judged."""
+    return isinstance(status.get('ams'), dict) and isinstance(status['ams'].get('ams'), list)
+
 def read_status(ip, serial, code, wait=10.0):
-    """The printer's full status, read once."""
+    """The printer's full status, read once: waited for until it has its spools (has_spools), three seconds at most
+    after its first piece, and returned as it then is. The caller asks has_spools before it judges by it."""
     state, lock, full, refused = {}, threading.Lock(), threading.Event(), []
     def on_report(d):
         with lock: merge(state, d)
@@ -640,7 +647,7 @@ def read_status(ip, serial, code, wait=10.0):
         for tenth in range(30):                           # the H2D sends its report in pieces: a second at least, three at most, for the spools
             time.sleep(0.1)
             with lock:
-                if tenth >= 9 and 'ams' in state: break
+                if tenth >= 9 and has_spools(state): break
         with lock: return json.loads(json.dumps(state))
     finally:
         c.loop_stop(); c.disconnect()
@@ -901,13 +908,14 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
                 status = read_status(new_ip, printer['serial'], code)
             if seen is not None: seen[printer['serial']] = status
         if cfg.get('learn'): mark_looked(printer['serial'])
+        if not has_spools(status): raise PrinterError(f"the {printer['model']} did not report its spools")
     except Exception as e:                   # whatever goes wrong before the printer has answered is an answer too: a card with the reason, not a line in the log
         res['error'] = str(e) if isinstance(e, PrinterError) else f'{e.__class__.__name__}: {e}'
         return res
     try:
         import guard_ledger
         trays, _ = trays_of(status)
-        guard_ledger.apply(trays, printer['serial'], 'ams' in status)   # spools the printer cannot measure get the amount entered for them
+        guard_ledger.apply(trays, printer['serial'], has_spools(status))   # spools the printer cannot measure get the amount entered for them
         # The answer is for the moment this print could start: what the print running now still needs is not there for
         # it (see credit: an entered amount the ledger has not yet taken it off included).
         owed, counted = guard_ledger.owed(status, load_state().get('slices', []))
@@ -1462,7 +1470,8 @@ def selftest(cfg):
             ip = printer_ip(p['serial'], cfg)
             if not ip: raise PrinterError('it is not announcing itself on this network (is it on?)')
             status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
-            trays, _ = trays_of(status); guard_ledger.apply(trays, p['serial'], 'ams' in status)
+            if not has_spools(status): raise PrinterError('it did not report its spools')
+            trays, _ = trays_of(status); guard_ledger.apply(trays, p['serial'])
             out.append((True, f"{p['model']}: {len(trays)} spool(s), {sum(t['grams'] is not None for t in trays)} with a known amount"))
         except PrinterError as e: out.append((False if 'refused' in str(e) else None, f"{p['model']}: {e}"))
     import guard_learn
@@ -1633,8 +1642,9 @@ def main(argv=None):
             try:
                 if not ip: raise PrinterError('not announcing itself on this network')
                 status = read_status(ip, p['serial'], conf['access_code'][p['serial']])
+                if not has_spools(status): raise PrinterError('did not report its spools')
             except PrinterError as e: print(f"{p['model']}: {e}"); continue
-            trays, two = trays_of(status); guard_ledger.apply(trays, p['serial'], 'ams' in status)
+            trays, two = trays_of(status); guard_ledger.apply(trays, p['serial'])
             print(f"{p['model']} ({ip}), {status.get('gcode_state')}")
             for t in trays:
                 amount = 'entered amount out of date' if t.get('stale') else 'amount unknown' if t['grams'] is None else f"{t['grams']:.0f} g" + (' (entered by hand)' if t.get('entered') else '')
