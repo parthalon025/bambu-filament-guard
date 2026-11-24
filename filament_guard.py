@@ -1751,12 +1751,16 @@ class Guard:
         for job in self.jobs.values(): job.stopped.set()
 
 
-def sole_guard():
-    """The named mutex that makes this process the one running guard: its handle, or None when another guard holds it
-    (0 when Windows made none: the guard runs all the same)."""
+def sole_guard(name=MUTEX):
+    """The named mutex that makes this process the one running guard (or, by another name, the one setup at work): its
+    handle, or None when another process holds it (0 when Windows made none: the guard runs all the same)."""
     k32 = ctypes.WinDLL('kernel32', use_last_error=True); k32.CreateMutexW.restype = ctypes.c_void_p
-    handle = k32.CreateMutexW(None, False, MUTEX)
+    handle = k32.CreateMutexW(None, False, name)
     return None if ctypes.get_last_error() == 183 else handle or 0               # ERROR_ALREADY_EXISTS: one guard is enough
+
+def let_go(handle):
+    """Gives back a mutex sole_guard made: the name is free for the next process as soon as no handle to it is open."""
+    if handle: ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
 
 def watch(start_line=True):
     handle = None
@@ -1780,8 +1784,7 @@ def watch(start_line=True):
         at = traceback.extract_tb(e.__traceback__)[-1]
         log(f'the guard has stopped on an error: {e.__class__.__name__}: {e} ({os.path.basename(at.filename)}, line {at.lineno})')
         return 1
-    finally:
-        if handle: ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
+    finally: let_go(handle)
 
 def guard_folder():
     """The folder the running guard was started from, which watch() notes under its process id in guard.pid; '' when
@@ -1971,21 +1974,41 @@ def uninstall():
     print(f'settings, entered amounts, what was learned and the log stay in {STATE_DIR}: delete it, and this folder, to remove every trace')
 
 def setup():
-    """Install, and say so on a card: for someone who started the packaged guard with a double click and sees no console."""
-    import guard_ui
+    """Install, and say so on a card: for someone who started the packaged guard with a double click and sees no console.
+    The install can take a minute and more (it waits for a guard that runs to go, and listens eight seconds for each
+    printer that is off): a line says at once that it is under way, the install runs behind it on a thread of its own,
+    and the card takes the line's place. A second double click meanwhile must not install beside the first: setup
+    holds a named mutex of its own while it installs (the guard's own is held by whichever guard runs), and one that
+    finds it held leaves; the line of the first is on the screen."""
     if sys.stdout is None: sys.stdout = sys.stderr = open(os.devnull, 'w')       # pythonw has no console to print to
-    try: running, said = install(start_line=False)                               # this card says it, in the same corner as the guard's start line would
-    except Exception as e:                   # no console shows it: whatever kept install from its end is said on the card, and in the log
-        log(f'install failed: {e.__class__.__name__}: {e}')
-        running, said = False, [(False, f"It could not be installed ({e.__class__.__name__}: {e}). The log is {os.path.join(STATE_DIR, 'guard.log')}.")]
-    failed = any(mark is False for mark, _ in said)
-    root = guard_ui.make_root(); card = guard_ui.Card(root, on_close=root.quit)
-    card.note('Bambu Filament Guard did not start' if not running else 'Bambu Filament Guard runs, but is not fully installed' if failed else 'Bambu Filament Guard is installed', [
-        *([(True, "It checks every plate you slice in Bambu Studio and shows the answer in Bambu Studio's window."),
-           (True, 'Its icon, a spool, is in the notification area while Bambu Studio runs: settings, self-test, quit.')] if running else []), *said,
-        (None, f'It runs from this folder, so the folder has to stay: {os.path.dirname(HERE) if os.path.basename(HERE) == "app" else HERE}'),
-        (None, 'To remove it: Uninstall.cmd in that folder, then delete the folder.')], 'danger' if not running else 'warn' if failed else 'ok')
-    def tick(): card.follow(); root.after(400, tick)
+    mutex = sole_guard(MUTEX + '-setup')
+    if mutex is None: return 0
+    def installed(start_line=False):         # no console shows it: whatever kept install from its end is said on the card, and in the log
+        try: return install(start_line)
+        except Exception as e:
+            log(f'install failed: {e.__class__.__name__}: {e}')
+            return False, [(False, f"It could not be installed ({e.__class__.__name__}: {e}). The log is {os.path.join(STATE_DIR, 'guard.log')}.")]
+    try:
+        import guard_ui
+        root = guard_ui.make_root(); card = guard_ui.Card(root)                  # closing the line does not end setup: the install behind it would end with it
+        card.line('Installing Bambu Filament Guard…')
+    except Exception as e:                   # Tk that does not start costs the card, not the install; the guard then says itself that it runs
+        log(f'setup: its card cannot be shown ({e.__class__.__name__}: {e}): the install goes on without it')
+        installed(start_line=True); let_go(mutex)
+        return 0
+    done = queue.Queue()
+    threading.Thread(target=lambda: done.put(installed()), daemon=True).start()
+    def tick():
+        card.follow()
+        if not done.empty():
+            running, said = done.get(); failed = any(mark is False for mark, _ in said)
+            let_go(mutex); card.on_close = root.quit                             # the next double click installs again; closing this card ends setup
+            card.note('Bambu Filament Guard did not start' if not running else 'Bambu Filament Guard runs, but is not fully installed' if failed else 'Bambu Filament Guard is installed', [
+                *([(True, "It checks every plate you slice in Bambu Studio and shows the answer in Bambu Studio's window."),
+                   (True, 'Its icon, a spool, is in the notification area while Bambu Studio runs: settings, self-test, quit.')] if running else []), *said,
+                (None, f'It runs from this folder, so the folder has to stay: {os.path.dirname(HERE) if os.path.basename(HERE) == "app" else HERE}'),
+                (None, 'To remove it: Uninstall.cmd in that folder, then delete the folder.')], 'danger' if not running else 'warn' if failed else 'ok')
+        root.after(400, tick)
     tick(); root.mainloop()
     return 0
 

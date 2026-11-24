@@ -1086,14 +1086,30 @@ def test_install_brings_the_settings_over_from_the_folder_of_the_copy_installed_
     (old / 'config.json').write_text('{"spool_reserve_pct": 2}'); install_on(monkeypatch, shortcut=str(old))
     assert fg.install() == (True, []) and fg.load_config()['spool_reserve_pct'] == 5         # settings are there now: not again
 
-def set_up(monkeypatch):
-    """setup() on stand-ins for Tk, after install_on: the card it showed, as (headline, lines, tone)."""
+def set_up(monkeypatch, mutex=7, shown=None):
+    """setup() on stand-ins for Tk and for the mutex it holds while it installs (None: another setup holds it), after
+    install_on. The stand-in's main loop turns, as Tk's does, until the card that ends the install is shown, and that
+    card is closed at once. Returns what was shown, in order: ('line', text), ('mutex let go', it), and the card as
+    (headline, lines, tone)."""
     import guard_ui
-    notes = []
-    monkeypatch.setattr(guard_ui, 'make_root', lambda: type('Root', (), {'quit': None, 'after': lambda *a: None, 'mainloop': lambda *a: None})())
-    monkeypatch.setattr(guard_ui.Card, 'note', lambda card, headline, lines, tone='muted', pid=None: notes.append((headline, lines, tone)))
-    assert fg.setup() == 0 and len(notes) == 1
-    return notes[0]
+    shown = [] if shown is None else shown
+    class Root:
+        def __init__(self): self.todo, self.over = [], False
+        def after(self, ms, then): self.todo.append(then)
+        def quit(self): self.over = True
+        def mainloop(self):
+            turn = threading.Event()
+            for _ in range(2000):                                                          # ten seconds at most
+                if self.over: return
+                for then in self.todo[:]: self.todo.remove(then); then()
+                turn.wait(0.005)
+    root = Root()
+    monkeypatch.setattr(guard_ui, 'make_root', lambda: root); monkeypatch.setattr(fg, 'sole_guard', lambda name=None: mutex)
+    monkeypatch.setattr(fg, 'let_go', lambda handle: shown.append(('mutex let go', handle)))
+    monkeypatch.setattr(guard_ui.Card, 'line', lambda card, text, *a, **k: shown.append(('line', text)))
+    monkeypatch.setattr(guard_ui.Card, 'note', lambda card, headline, lines, tone='muted', **k: (shown.append((headline, lines, tone)), root.quit()))
+    assert fg.setup() == 0
+    return shown
 
 def no_powershell():
     raise fg.subprocess.CalledProcessError(1, ['powershell', '-NoProfile'], stderr='Cannot create type. Only core types are supported in this language mode.\n')
@@ -1103,7 +1119,7 @@ def test_install_starts_the_guard_and_says_so_when_the_startup_shortcut_cannot_b
     """PowerShell in Constrained Language Mode, blocked by a policy or not found: the shortcut cannot be made. Install.cmd
     then did nothing at all: no card, no line in the log, and no guard for this session either."""
     done = install_on(monkeypatch); monkeypatch.setattr(fg, 'make_shortcut', no_powershell)
-    headline, lines, tone = set_up(monkeypatch)
+    headline, lines, tone = set_up(monkeypatch)[-1]
     assert done == ['shortcut read', 'stop', 'start'] and (headline, tone) == ('Bambu Filament Guard runs, but is not fully installed', 'warn')
     assert (False, 'It runs now but will not start with Windows: the Startup shortcut could not be made (PowerShell ended with code 1).') in lines
     assert 'the Startup shortcut could not be made (PowerShell ended with code 1): Cannot create type. Only core types are supported in this language mode.' in (state / 'guard.log').read_text()
@@ -1112,7 +1128,7 @@ def test_install_starts_the_guard_and_says_so_when_the_startup_shortcut_cannot_b
 def test_setup_says_on_its_card_whatever_else_kept_it_from_installing(state, monkeypatch):
     """Install.cmd runs without a console: an error that left install as an error was seen by nobody."""
     install_on(monkeypatch); monkeypatch.setattr(fg, 'start', lambda *a, **k: 1 / 0)
-    headline, lines, tone = set_up(monkeypatch)
+    headline, lines, tone = set_up(monkeypatch)[-1]
     assert (headline, tone) == ('Bambu Filament Guard did not start', 'danger') and (False, f"It could not be installed (ZeroDivisionError: division by zero). The log is {state / 'guard.log'}.") in lines
     assert 'install failed: ZeroDivisionError: division by zero' in (state / 'guard.log').read_text()
 
@@ -1530,3 +1546,20 @@ def test_the_self_test_counts_the_external_spool_of_a_printer_without_an_ams(sta
     assert (True, 'Bambu Lab H2D: 1 spool(s), 1 with a known amount') in fg.selftest(CFG) and kept() == {'A1': 640.0, 'Ext': 400.0}
     kept = entered(monkeypatch, dict(NO_AMS, ams={'tray_now': '255'}))
     assert (None, 'Bambu Lab H2D: it did not report its spools') in fg.selftest(CFG) and kept() == {'A1': 640.0, 'Ext': 400.0}
+
+@pytest.mark.windows
+def test_setup_says_at_once_that_it_installs_and_a_second_one_meanwhile_does_nothing(state, monkeypatch):
+    """Install.cmd showed nothing until the install was over: up to a minute of waiting for a guard that runs to go, and
+    eight seconds of listening for each printer that is off. A second double click in that time started a second
+    install beside the first. A line now says at once that the install is under way, the install runs behind it, and
+    the card comes as before; while it runs, a second setup finds the first one's mutex and leaves."""
+    done = install_on(monkeypatch); shown = set_up(monkeypatch, shown=done)
+    assert shown[:2] == [('line', 'Installing Bambu Filament Guard…'), 'shortcut read'] and 'start' in shown           # the line, before anything of the install
+    assert shown[-2] == ('mutex let go', 7) and shown[-1][0] == 'Bambu Filament Guard is installed'                    # the next double click installs again
+    done = install_on(monkeypatch); assert set_up(monkeypatch, mutex=None, shown=done) == []                           # one is at work: nothing is shown, nothing installed
+    def no_tk(): raise RuntimeError('no display')
+    import guard_ui
+    done = install_on(monkeypatch); shown = set_up(monkeypatch, shown=done); del shown[:]
+    monkeypatch.setattr(guard_ui, 'make_root', no_tk)
+    assert fg.setup() == 0 and shown[:1] == ['shortcut read'] and 'start' in shown and shown[-1] == ('mutex let go', 7)   # no card to be had: installed all the same
+    assert 'setup: its card cannot be shown (RuntimeError: no display): the install goes on without it' in (state / 'guard.log').read_text()

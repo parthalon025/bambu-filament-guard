@@ -70,7 +70,7 @@ A report from any other model, whether it works or not, is welcome: [Printer rep
 
 1. Download `BambuFilamentGuard-<version>.zip` from the [latest release](https://github.com/parthalon025/bambu-filament-guard/releases/latest).
 2. Unzip it into a folder of your own where it can stay, inside your user folder (`C:\Users\<you>\…`): the guard runs from that folder and is started from it each time you log on, so it should be one that no other account of the computer can change.
-3. Open `Install.cmd`.
+3. Open `Install.cmd`. A line says at once that it is installing, which can take a minute; a card then says what was done.
 
 `Uninstall.cmd` removes it. `README.txt` in the folder says what Windows may ask at the first start. `python build.py` makes such a zip in `dist\`, on the Python and from the wheels the script and `requirements-bundle.txt` name.
 
