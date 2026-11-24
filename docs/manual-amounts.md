@@ -2,7 +2,7 @@
 
 [← README](../README.md) · [Using the guard](using.md) · [The running print](running-print.md) · [Learning](learning.md) · **Spools without a reading** · [Limits](limits.md)
 
-A spool without an RFID tag, or on an external holder, reports no amount. Enter it on the card ("Amount in …"): weigh the spool and take off the empty spool. The guard then counts down, erring to the low side:
+A spool without an RFID tag, or on an external holder, reports no amount. Enter it on the card ("Amount in …"): put the spool on a scale and type what the scale shows and what the empty spool weighs. The filament is the difference, shown as you type. The window starts with the empty spool's weight you entered last (`empty_spool_g`; 250 g at first, about a Bambu spool); enter 0 there when you weighed the filament alone or already took the spool off. The guard then counts down, erring to the low side:
 
 - A print is taken off in full when it starts to run, also when it is cancelled later.
 - An amount entered while a print runs is what the spool held then: what that print still needs of it comes off at the guard's next look at the printer. When that is not known (the print was not sliced on this computer), the card says it could not count the running print.

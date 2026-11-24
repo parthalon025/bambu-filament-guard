@@ -109,11 +109,13 @@ def work_area(hwnd):
 
 class Card:
     """One card at a time; each newer answer replaces it. act(name, res, arg) is told what its buttons ask for:
-    'recheck', 'ignore', 'details', 'amount' with arg (tray, grams or None), 'weigh' with arg (tray, grams), and 'asked'
-    with the tray a weigh-in is offered for."""
+    'recheck', 'ignore', 'details', 'amount' with arg (tray, grams or None), 'weigh' with arg (tray, grams), 'asked'
+    with the tray a weigh-in is offered for, and 'spool' with the empty spool's weight typed in the amount window.
+    empty_spool is the weight that window starts with."""
     def __init__(self, root, act=None, on_close=None):
         self.root, self.win, self.act, self.on_close = root, None, act or (lambda *a: None), on_close
         self.owner, self.beside, self.spot, self.held = None, None, None, False
+        self.empty_spool = fg.DEFAULTS['empty_spool_g']
         self.one_line = False                                                # the card open is one line, which a new line may replace
         self.closes_after = 0                                                # seconds the open card stays once it is on screen; 0 = until closed
 
@@ -286,30 +288,44 @@ class Card:
 
     def ask_amount(self, res, tray, weigh=False):
         """Asks for the grams left on a spool the printer cannot measure, or (weigh) on one it measures, to set its reading
-        against. An ordinary small window: it has to take the keyboard."""
+        against: what the scale shows and what the empty spool weighs, the filament being the difference. An ordinary
+        small window: it has to take the keyboard."""
         import tkinter as tk
         t = self.t; d = tk.Toplevel(self.root, bg=t['surface'], padx=3 * SPACE, pady=3 * SPACE)
         d.title('Bambu Filament Guard'); d.attributes('-topmost', True); d.resizable(False, False)
-        self._label(d, f"Filament {'on the spool' if weigh else 'left'} in {tray['label']} ({tray['name'] or tray['type']}), in grams", size=10, bold=True, row=0, column=0, columnspan=3)
-        self._label(d, (f"Weigh the spool and take off the empty spool (a Bambu spool: about 250 g). The printer reads {tray['reading']:.0f} g; from now on the guard "
-                        'counts this spool with no more than it held, and a spool weighed near empty teaches it what the tray reads at empty.') if weigh else
-                       ('Weigh the spool and take off the empty spool (a Bambu spool: about 250 g). The guard counts down from this with every print it sees start; '
-                        'a print it cannot count makes the amount unknown again.'), 'muted', 9, wrap=420, row=1, column=0, columnspan=3, pady=(SPACE, 2 * SPACE))
-        value = tk.StringVar(value='' if weigh else f"{tray['grams']:.0f}" if tray['grams'] is not None else '')
-        entry = tk.Entry(d, textvariable=value, width=10, bg=t['raised'], fg=t['text'], insertbackground=t['text'], relief='flat', font=('Segoe UI', 11),
+        self._label(d, f"Filament {'on the spool' if weigh else 'left'} in {tray['label']} ({tray['name'] or tray['type']})", size=10, bold=True, row=0, column=0, columnspan=3)
+        self._label(d, 'Put the spool on a scale. The filament is what the scale shows less the empty spool (a Bambu spool: about 250 g; 0 if you weighed the filament alone). '
+                       + (f"The printer reads {tray['reading']:.0f} g; from now on the guard counts this spool with no more than it held, and a spool weighed near empty "
+                          'teaches it what the tray reads at empty.' if weigh else
+                          'The guard counts down from this with every print it sees start; a print it cannot count makes the amount unknown again.'),
+                    'muted', 9, wrap=420, row=1, column=0, columnspan=3, pady=(SPACE, 2 * SPACE))
+        tare = f'{self.empty_spool:g}'
+        scale = tk.StringVar(value='' if weigh or tray['grams'] is None else f"{tray['grams'] + self.empty_spool:.0f}")
+        spool = tk.StringVar(value=tare)
+        def field(row, text, var):
+            self._label(d, text, size=9, row=row, column=0, padx=(0, 2 * SPACE))
+            e = tk.Entry(d, textvariable=var, width=10, bg=t['raised'], fg=t['text'], insertbackground=t['text'], relief='flat', font=('Segoe UI', 11),
                          highlightthickness=1, highlightbackground=t['border'], highlightcolor=t['ok'])
-        entry.grid(row=2, column=0, sticky='w', ipady=SPACE // 2)
-        wrong = self._label(d, '', 'danger', 9, row=3, column=0, columnspan=3)
+            e.grid(row=row, column=1, sticky='w', ipady=SPACE // 2, pady=(0, SPACE)); return e
+        entry, empty = field(2, 'On the scale, in grams', scale), field(3, 'Empty spool, in grams', spool)
+        result = self._label(d, '', size=10, bold=True, row=4, column=0, columnspan=3)
+        wrong = self._label(d, '', 'danger', 9, wrap=420, row=5, column=0, columnspan=3)
+        def show(*_):
+            grams, _why = fg.filament_on(scale.get(), spool.get())
+            result.configure(text=f'{grams:.0f} g of filament' if grams is not None else ''); wrong.configure(text='')
+        scale.trace_add('write', show); spool.trace_add('write', show); show()
         def done(grams):
             d.destroy(); self.act('weigh' if weigh else 'amount', res, (tray, grams))
         def accept(*_):
-            try: grams = float(value.get().replace(',', '.').replace('g', '').strip())
-            except ValueError: grams = -1
-            if not 0 < grams <= 10000: wrong.configure(text='A number of grams between 1 and 10000.'); return
+            grams, why = fg.filament_on(scale.get(), spool.get())
+            if grams is None: wrong.configure(text=why); return
+            self.act('spool', res, fg.typed_grams(spool.get()) or 0)       # the next window starts with this spool's weight
             done(grams)
-        self._button(d, 'Save', accept, row=2, column=1, padx=(2 * SPACE, 0))
-        if not weigh and (tray.get('entered') or tray.get('stale')): self._button(d, 'Forget this amount', lambda: done(None), row=2, column=2, padx=(SPACE, 0))
-        entry.bind('<Return>', accept); d.bind('<Escape>', lambda e: d.destroy())
+        bar = tk.Frame(d, bg=t['surface']); bar.grid(row=6, column=0, columnspan=3, sticky='w', pady=(SPACE, 0))
+        self._button(bar, 'Save', accept, row=0, column=0)
+        if not weigh and (tray.get('entered') or tray.get('stale')): self._button(bar, 'Forget this amount', lambda: done(None), row=0, column=1, padx=(SPACE, 0))
+        for e in (entry, empty): e.bind('<Return>', accept)
+        d.bind('<Escape>', lambda e: d.destroy())
         d.update_idletasks()
         x, y = (self.spot or (200, 200)); d.geometry(f'+{max(0, x)}+{max(0, y - d.winfo_reqheight() - 48)}')
         d.focus_force(); entry.focus_set(); entry.select_range(0, 'end')
