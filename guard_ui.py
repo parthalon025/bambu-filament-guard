@@ -30,14 +30,14 @@ def theme():
             return THEMES['light' if winreg.QueryValueEx(k, 'AppsUseLightTheme')[0] else 'dark']
     except OSError: return THEMES['light']
 
-def age_text(res):
-    """' This answer is from 14:32: "Check again" asks the printer now.' for an answer shown again more than a minute after
-    its check (res['at']; with the day when that was not today), '' for one as it comes: "Show last result" showed hours-old
-    amounts as what the printer "reports now"."""
+def when_text(res):
+    """'at 14:32' for an answer whose check (res['at']) is more than a minute old, with the day ('on 23 Nov at 14:32')
+    when that was not today; '' for one as it comes. A card made from an old answer says when the printer reported its
+    spools, not "now": hours-old amounts once read as what the printer "reports now"."""
     at = res.get('at')
     if not at or time.time() - at < 60: return ''
     when = time.localtime(at)
-    return f" This answer is from {time.strftime('%H:%M' if when[:3] == time.localtime()[:3] else '%d %b, %H:%M', when)}: \"Check again\" asks the printer now."
+    return time.strftime('at %H:%M' if when[:3] == time.localtime()[:3] else 'on %d %b at %H:%M', when)
 
 def tone_of(res):
     return 'muted' if res['error'] else {0: 'ok', 1: 'muted', 2: 'warn', 3: 'warn', 4: 'danger'}[fg.SEVERITY[res['worst']]]
@@ -221,7 +221,9 @@ class Card:
         self._label(w, fg.headline(res), tone_of(res), 12, True, row=1, column=0)
         n = res.get('unchecked') or 0                                        # at "Send print job", of a project with more plates than are checked there
         more = (f" {n} older plate{'s' if n != 1 else ''} of the project {'were' if n != 1 else 'was'} not checked: "
-                f'at "Send print job" only the {fg.SEND_MOST} sliced last are.' if n else '') + age_text(res)
+                f'at "Send print job" only the {fg.SEND_MOST} sliced last are.' if n else '')
+        then = when_text(res)
+        if then: more += ' "Check again" asks the printer now.'
         if brief:
             line = tk.Frame(w, bg=t['surface']); line.grid(row=2, column=0, sticky='ew'); line.columnconfigure(0, weight=1)
             p = res['printer']
@@ -235,7 +237,7 @@ class Card:
             return self._place()
         if res['error']:
             self._label(w, res['error'][:1].upper() + res['error'][1:] + '.', wrap=560, row=2, column=0)
-            if more: self._label(w, more.strip(), 'muted', 9, wrap=560, row=4, column=0, pady=(2 * SPACE, 0))
+            if more: self._label(w, ((f'Checked {then}.' if then else '') + more).strip(), 'muted', 9, wrap=560, row=4, column=0, pady=(2 * SPACE, 0))
         else:
             sub = ' · '.join(x for x in (res['title'] + (f" × {res['times']}" if res['times'] != 1 else ''), f"plate {res['plate_no']}" if res.get('plate_no') else '',
                                          res['model'], f"prints in {res['time']}" if res['time'] and res['times'] == 1 else '') if x)
@@ -251,14 +253,15 @@ class Card:
                                                        (fg.has_text(r), 'text', False), (word, colour, True)), start=1):
                     self._label(table, text, c, 10, bold, row=2 * i, column=col, padx=(0, 3 * SPACE))
                 if r['note']: self._label(table, r['note'][:1].upper() + r['note'][1:], 'muted', 9, wrap=600, row=2 * i + 1, column=1, columnspan=5, pady=(0, SPACE // 2))
-            p = res['printer']
+            p, job = res['printer'], fg.job_text(res['printer'])
+            told, runs, needs, hold = (f'reported them {then}', 'then', 'needed', 'held') if then else ('reports them', 'now', 'needs', 'hold')
             if p['state'] in fg.BUSY and p.get('counted'):
-                spools = f"Spools as the {p['model']} reports them, less what the print running there{fg.job_text(p)} still needs; the amounts are the AMS's estimate."
+                spools = f"Spools as the {p['model']} {told}, less what the print running there{' then' if then else ''}{job} still {needs}; the amounts are the AMS's estimate."
             else:
-                spools = f"Spools as the {p['model']} reports them now; the amounts are the AMS's estimate." + (
-                    f" It is printing now{fg.job_text(p)}: that job is still drawing from these spools, and the guard could not count what it still needs."
+                spools = f"Spools as the {p['model']} {told}{'' if then else ' now'}; the amounts are the AMS's estimate." + (
+                    f" It {'was' if then else 'is'} printing {runs}{job}: that job {'was' if then else 'is'} still drawing from these spools, and the guard could not count what it still {needs}."
                     if p['state'] in fg.BUSY else '')
-            spools += ''.join(f" The print running now needs {g:.0f} g more of {label}'s filament than the loaded spools hold." for label, g in (p.get('beyond') or {}).items())
+            spools += ''.join(f" The print running {runs} {needs} {g:.0f} g more of {label}'s filament than the loaded spools {hold}." for label, g in (p.get('beyond') or {}).items())
             for key in ('reserve', 'unlearned'):
                 if p.get(key): spools += f" {p[key][:1].upper()}{p[key][1:]}."
             if res.get('weigh'):
@@ -397,7 +400,7 @@ class Tray:
             Item(f'Bambu Filament Guard {fg.VERSION}', None, enabled=False),
             Item(lambda item: g.last_text(), None, enabled=False),
             Menu.SEPARATOR,
-            Item('Show last result', do(g.show_last), default=True),
+            Item('Check last plate again', do(g.check_last), default=True),
             Item('Check newest slice now', do(g.check_newest)),
             Item('Settings', Menu(
                 option('One line when there is enough', 'ok_seconds', fg.DEFAULTS['ok_seconds'], 0),

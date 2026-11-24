@@ -941,22 +941,33 @@ def test_a_warning_shows_though_the_state_file_cannot_be_read_for_what_is_ignore
     guard = guard_with(); guard.deliver(res); assert guard.card.shown == [('show', 0)]
 
 @pytest.mark.windows
-def test_a_result_shown_again_says_when_its_check_was_made(state, monkeypatch):
-    """"Show last result", the icon's own click, showed an answer that could be hours old under "Spools as the Bambu Lab
-    H2D reports them now", with nothing to tell it from a new one."""
+def test_a_card_made_from_an_old_answer_says_when_it_was_checked_not_now(state, monkeypatch):
+    """A full card read "Spools as the Bambu Lab H2D reports them now" whatever the age of its answer: after "Stop
+    ignoring", a check that failed, or a warning that had to wait for another to go. An answer more than a minute
+    old says when the printer reported its spools, and what ran then, in the past."""
     running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 2))); res = fg.evaluate(fg.parse_plate(gcode()), CFG, 'Benchy')
     guard = guard_with(); guard.deliver(res)
-    assert res['at'] == pytest.approx(time.time(), abs=60) and 'This answer is from' not in card_shown(monkeypatch, res)[0][-1]   # as it comes: nothing to say
-    def said(ago):
-        res['at'] = at = time.time() - ago; guard.show_last()
-        assert guard.card.shown[-1] == ('show', 0) and guard.card.res is res and res['at'] == at                 # shown again, its time as it was
-        when = time.localtime(at); day = '' if when[:3] == time.localtime()[:3] else time.strftime('%d %b, ', when)
-        return f' This answer is from {day}{time.strftime("%H:%M", when)}: "Check again" asks the printer now.'
+    assert res['at'] == pytest.approx(time.time(), abs=60)                                   # stamped where the check did not say
+    assert card_shown(monkeypatch, res)[0][-1] == "Spools as the Bambu Lab H2D reports them now; the amounts are the AMS's estimate."
+    def when(ago):
+        res['at'] = time.time() - ago; at = time.localtime(res['at'])
+        return time.strftime('at %H:%M' if at[:3] == time.localtime()[:3] else 'on %d %b at %H:%M', at)
     for ago in (90, 3 * 86400):
-        text = said(ago); assert card_shown(monkeypatch, res)[0][-1].endswith("the amounts are the AMS's estimate." + text)
+        then = when(ago)
+        assert card_shown(monkeypatch, res)[0][-1] == f"Spools as the Bambu Lab H2D reported them {then}; the amounts are the AMS's estimate. \"Check again\" asks the printer now."
+    then = when(3 * 86400); assert then.startswith('on ')
+    res['printer'].update(state='RUNNING', job='Benchy', layer=11, layers=27, counted=True, beyond={'A2': 40.0})
+    assert card_shown(monkeypatch, res)[0][-1] == (f"Spools as the Bambu Lab H2D reported them {then}, less what the print running there then (Benchy, layer 11 of 27) still needed; "
+        "the amounts are the AMS's estimate. The print running then needed 40 g more of A2's filament than the loaded spools held. \"Check again\" asks the printer now.")
+    res['printer'].update(counted=False, beyond={})
+    assert card_shown(monkeypatch, res)[0][-1] == (f"Spools as the Bambu Lab H2D reported them {then}; the amounts are the AMS's estimate. It was printing then (Benchy, layer 11 of 27): "
+        "that job was still drawing from these spools, and the guard could not count what it still needed. \"Check again\" asks the printer now.")
+    res['at'] = time.time()                                                                  # and as it comes, in the present
+    assert card_shown(monkeypatch, res)[0][-1] == ("Spools as the Bambu Lab H2D reports them now; the amounts are the AMS's estimate. It is printing now (Benchy, layer 11 of 27): "
+        "that job is still drawing from these spools, and the guard could not count what it still needs.")
     failed = answer(1, 'OK', error='the Bambu Lab H2D did not report its status', at=time.time() - 3 * 86400, times=1, model='Bambu Lab H2D', time='')
-    labels = card_shown(monkeypatch, failed)[0]
-    assert labels[-2:] == ['The Bambu Lab H2D did not report its status.', time.strftime('This answer is from %d %b, %H:%M: "Check again" asks the printer now.', time.localtime(failed['at']))]
+    assert card_shown(monkeypatch, failed)[0][-2:] == ['The Bambu Lab H2D did not report its status.',
+                                                       time.strftime('Checked on %d %b at %H:%M. "Check again" asks the printer now.', time.localtime(failed['at']))]
 
 @pytest.mark.windows
 def test_a_warning_found_for_send_print_job_shows_though_the_dialog_has_closed(state, tmp_path, monkeypatch):
@@ -995,3 +1006,48 @@ def test_popup_on_decides_for_no_result_but_the_four_it_is_for(state):
     assert guard.card.shown == [('show', CFG['ok_seconds'])] * 4 and guard.last['plate_no'] == 4   # a line each, none standing in another's way
     assert guard.opening(answer(1, 'OK')) == [] and guard.rank(answer(1, 'OK')) == (0, 0)
     assert (state / 'guard.log').read_text().count('popup_on in config.json names "OK", which is no result to warn of (UNKNOWN, TIGHT, SPLIT, SHORT, MISSING, COLOUR)') == 1
+
+def icon_menu(monkeypatch, guard):
+    """The icon's menu as guard_ui builds it for a guard, on a stand-in for pystray: each item keeps its text, its
+    action and how it was made (how); a submenu is the action of its item."""
+    import guard_ui
+    class Item:
+        def __init__(self, text, action=None, **how): self.text, self.action, self.how = text, action, how
+    class Menu:
+        SEPARATOR = Item('-')
+        def __init__(self, *items): self.items = items
+    pystray = type(sys)('pystray'); pystray.MenuItem, pystray.Menu = Item, Menu
+    pystray.Icon = type('Icon', (), {'__init__': lambda self, name, image, title, menu: setattr(self, 'menu', menu), 'run_detached': lambda self: None})
+    monkeypatch.setitem(sys.modules, 'pystray', pystray); monkeypatch.setattr(guard_ui, 'icon_image', lambda tone: None)
+    return guard_ui.Tray(guard).icon.menu
+
+def click(guard, menu):
+    """A click on the icon: the menu's default item, done as the guard does what its menu asks. Returns the item's text."""
+    item = next(i for i in menu.items if i.how.get('default')); item.action(None, item); guard.todo.get_nowait()()
+    return item.text
+
+@pytest.mark.windows
+def test_the_icons_click_checks_the_last_plate_again(state, monkeypatch):
+    """"Show last result", the icon's own click, put the last answer on a full card as it was. A print had taken 120 g
+    since: the card still read "Enough filament for this print", "as the Bambu Lab H2D reports them now". The click
+    asks the printer again: one check however often it is clicked, the newest slice when nothing was checked yet."""
+    reads, asked = [400], []
+    running(monkeypatch, None); monkeypatch.setattr(fg, 'read_status', lambda *a, **k: (asked.append(1), spools((BLUE_PLA, reads[0])))[1])
+    guard = guard_with(); menu = icon_menu(monkeypatch, guard)
+    old = fg.evaluate(fg.parse_plate(gcode(weights='300', used='1')), CFG, 'Vase'); old['pid'], old['plate_no'], old['gcode'] = 1, 2, 'a slice'
+    guard.deliver(old); assert old['worst'] == 'OK' and guard.card.shown == [('show', CFG['ok_seconds'])]
+    reads[0] = 280; del asked[:]                                                             # a print started at the printer has taken 120 g
+    assert click(guard, menu) == 'Check last plate again'; guard.todo.get(timeout=5)()
+    assert guard.card.shown[1:] == [('line', 'Checking the spools on the Bambu Lab H2D…', False), ('show', 0)] and len(asked) == 1 and not guard.busy
+    new = guard.card.res
+    assert new is not old and new['worst'] == 'SHORT' and (new['pid'], new['plate_no'], new['gcode'], new['title']) == (1, 2, 'a slice', 'Vase') and guard.last is new
+    assert new['at'] == pytest.approx(time.time(), abs=60)
+    release, check = threading.Event(), fg.evaluate                                          # the printer takes its time, and the icon is clicked five times
+    monkeypatch.setattr(fg, 'evaluate', lambda *a, **k: (release.wait(5), check(*a, **k))[1])
+    del asked[:]; shown = len(guard.card.shown)
+    for _ in range(5): click(guard, menu)
+    release.set(); guard.todo.get(timeout=5)()
+    assert len(asked) == 1 and guard.card.shown[shown:] == [('line', 'Checking the spools on the Bambu Lab H2D…', False), ('show', 0)] and not guard.busy
+    fresh, newest = guard_with(), []                                                         # nothing checked yet: the newest slice
+    monkeypatch.setattr(fresh, 'check_newest', lambda *a, **k: newest.append(a)); click(fresh, icon_menu(monkeypatch, fresh))
+    assert newest == [()]

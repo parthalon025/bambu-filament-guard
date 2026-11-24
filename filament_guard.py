@@ -1197,7 +1197,7 @@ class Guard:
         checked again for it) and to what the user asks for; to nothing else. Another plate's fine answer, or another
         Bambu Studio's, once put a line that went after 8 seconds in its place and turned the icon green: now it does
         not show, and the icon keeps the warning's colour."""
-        res.setdefault('at', time.time())                     # when its check was made: a card that shows it again later says so
+        res.setdefault('at', time.time())                     # when it was checked, where the check did not say (`check --popup`): a card that shows it later says so
         if not res['error']: res['ignored'] = self.ignored(res)
         rank, plate, stands = self.rank(res), (res.get('pid'), res['title'], res.get('plate_no')), self.standing_warning()
         own = bool(stands) and stands[0] == plate
@@ -1260,16 +1260,18 @@ class Guard:
                               {'id': tray.get('spool'), 'type': tray['type'], 'colour': tray['colour'], 'fid': tray.get('fid'), 'weight': tray.get('weight')})
             self.recheck(res, self.card.beside)
 
+    def again(self, res):
+        """The plate of an answer, checked again now: the new answer, with what tells its plate carried over."""
+        new = evaluate(res['plate'], self.cfg, res['title'], res['times'])
+        new.update(pid=res.get('pid'), plate_no=res.get('plate_no'), gcode=res.get('gcode'), at=time.time()); return new
+
     def recheck(self, res, beside=None):
         import guard_ui
         where = lambda: beside if guard_ui.visible(beside) else None
-        def work():
-            new = evaluate(res['plate'], self.cfg, res['title'], res['times']); new['pid'], new['plate_no'], new['gcode'] = res.get('pid'), res.get('plate_no'), res.get('gcode')
-            return new
         def then(new):                                        # the card first, here as after a slice: nothing of the log may hold back an answer
             try: self.deliver(new, full=True, beside=where())
             finally: log('checked again: ' + report_text(new).replace('\n', ' | '))
-        self.later(work, then, lambda: self.deliver(res, full=True, beside=where()))
+        self.later(lambda: self.again(res), then, lambda: self.deliver(res, full=True, beside=where()))
 
     def check_newest(self, pid=None, beside=None):
         """From the icon: the newest slice, as a full card. At "Send print job" (beside): every plate of the project the
@@ -1305,7 +1307,7 @@ class Guard:
                 if res['error'] and not res.get('quiet') and model not in failed:
                     res = evaluate(plate, self.cfg, title, seen=seen)
                     if res['error'] and not seen: failed[model] = res
-                res['pid'], res['plate_no'], res['gcode'] = studio_pid(path), plate_number(path), path
+                res['pid'], res['plate_no'], res['gcode'], res['at'] = studio_pid(path), plate_number(path), path, time.time()
                 if not res['error']: res['ignored'] = self.ignored(res)
                 out.append(res)
             return (max(out, key=self.rank) if out else None), unread, out        # the newest of those that most ask to be seen
@@ -1375,9 +1377,19 @@ class Guard:
         self.card.note('What was learned is forgotten', [(None, 'The guard learns again from the next prints it follows.')]
                        + ([(None, f'What it had learned is kept as {aside}: one copy, until something is forgotten again.')] if kept else []))
 
-    def show_last(self):
-        if self.last: self.deliver(self.last, full=True)
-        else: self.check_newest()
+    def check_last(self):
+        """The icon's click: the last answer's plate is checked again, and the fresh answer shows. The answer as it was
+        is not shown again: hours old, after a print that had taken 120 g, its card read "Enough", "as the printer
+        reports them now". A click while the check runs says so again and starts no second one; with no answer yet,
+        the newest slice is checked."""
+        res = self.last
+        if not res or not res.get('plate'): self.check_newest(); return
+        if 'icon' in self.busy: self.checking('icon', self.busy['icon'][1]); return
+        self.checking('icon', checking_text(printer_for(res['plate'])), res.get('pid'))
+        def then(new):
+            try: self.deliver(new, full=True)
+            finally: self.checked('icon'); log('checked again: ' + report_text(new).replace('\n', ' | '))
+        self.later(lambda: self.again(res), then, lambda: self.checked('icon'))
 
     def run_selftest(self):
         def then(lines):
@@ -1418,7 +1430,7 @@ class Guard:
                 printer = printer_for(plate)
                 if printer and self.cfg['ok_seconds']:                          # no line for a check that ends in silence (a printer not on this LAN), nor for a quiet guard
                     waiting = True; self.todo.put(lambda: self.checking('slice', checking_text(printer), studio_pid(path), asked=False))
-                res = evaluate(plate, self.cfg, title); res['pid'], res['plate_no'], res['gcode'] = studio_pid(path), plate_no, path
+                res = evaluate(plate, self.cfg, title); res['pid'], res['plate_no'], res['gcode'], res['at'] = studio_pid(path), plate_no, path, time.time()
                 self.todo.put(lambda: self.deliver(res))
                 log(report_text(res).replace('\n', ' | '))
         finally:                                                                 # the slice is remembered whatever became of the check: guard_ledger counts from it
