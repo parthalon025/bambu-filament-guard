@@ -294,17 +294,19 @@ def write_json(path, data, **how):
     journals the rename and not the file's data, and a power cut seconds later left the new name on a file of zeros.
     The file a KEPT one replaces stays beside it as <name>.bak (a rename, not a copy), for read_json to fall back on.
     Windows refuses a replace while a program outside the guard holds the file: it is tried again for two seconds,
-    then StateBusy, and the file is as it was (or is its .bak, which the next read puts back)."""
+    then StateBusy, and the file is as it was (or is its .bak, which the next read puts back). The temp file goes
+    whatever ended the write."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temp = f'{path}.{os.getpid()}.{threading.get_ident()}.new'
-    with open(temp, 'w', encoding='utf-8') as f: json.dump(data, f, **how); f.flush(); os.fsync(f.fileno())
-    for attempt in range(40):
-        try:
-            if os.path.basename(path) in KEPT and os.path.exists(path): os.replace(path, path + '.bak')
-            os.replace(temp, path); return
-        except PermissionError: time.sleep(0.05)
-    try: os.remove(temp)
-    except OSError: pass
+    try:
+        with open(temp, 'w', encoding='utf-8') as f: json.dump(data, f, **how); f.flush(); os.fsync(f.fileno())
+        for attempt in range(40):
+            try:
+                if os.path.basename(path) in KEPT and os.path.exists(path): os.replace(path, path + '.bak')
+                os.replace(temp, path); return
+            except PermissionError: time.sleep(0.05)
+    finally:
+        with contextlib.suppress(OSError): os.remove(temp)
     raise StateBusy(f'{os.path.basename(path)} could not be written: another program holds it')
 
 def load_state():

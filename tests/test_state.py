@@ -211,3 +211,10 @@ def test_a_lock_that_could_not_be_made_once_is_tried_again(state, monkeypatch):
     with pytest.raises(fg.StateBusy): fg.load_state()
     assert fg.update_state(lambda st: st.setdefault('x', 1)) == 1 and fg.load_state() == {'x': 1}
     assert Kernel32.made == 2 and list(fg._MUTEXES.values()) == [4242]                    # made once more, then kept
+
+def test_a_write_of_the_state_that_fails_leaves_no_temp_file(state):
+    """The new file is written beside the old one first. When that failed for another reason than the file being held (a
+    value JSON cannot hold, a full disk), the temp file stayed in the state folder for good, one for every failure."""
+    fg.update_state(lambda st: st.__setitem__('x', 1))
+    with pytest.raises(TypeError): fg.save_state({'x': 1, 'y': {1, 2}})
+    assert sorted(os.listdir(state)) == ['state.json'] and fg.load_state() == {'x': 1}
