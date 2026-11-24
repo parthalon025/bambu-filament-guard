@@ -39,6 +39,15 @@ def when_text(res):
     when = time.localtime(at)
     return time.strftime('at %H:%M' if when[:3] == time.localtime()[:3] else 'on %d %b at %H:%M', when)
 
+def counted_now(res, tray):
+    """The grams the guard counts for a tray now: its entry in the ledger (state.json, 'spools': guard_ledger), read when
+    asked. None when there is none, it is out of date, or it cannot be read. The row of a card holds what was counted
+    when the card was made: the amount window started from that, and Save wrote it back over every print counted since."""
+    try: entry = fg.load_state().get('spools', {}).get(res['printer']['serial'], {}).get(tray['label']) if res else None
+    except (OSError, TypeError, KeyError, AttributeError): return None
+    grams = entry.get('grams') if isinstance(entry, dict) and not entry.get('stale') else None
+    return grams if isinstance(grams, (int, float)) and not isinstance(grams, bool) else None
+
 def tone_of(res):
     return 'muted' if res['error'] else {0: 'ok', 1: 'muted', 2: 'warn', 3: 'warn', 4: 'danger'}[fg.SEVERITY[res['worst']]]
 
@@ -328,8 +337,9 @@ class Card:
                     'muted', 9, wrap=420, row=1, column=0, columnspan=3, pady=(SPACE, 2 * SPACE))
         last = self.empty_spool                                             # the last weight above 0; a config.json that holds anything else starts as a new one does
         if isinstance(last, bool) or not isinstance(last, (int, float)) or not 0 < last <= 5000: last = fg.DEFAULTS['empty_spool_g']
-        scale = tk.StringVar(value='' if weigh or tray['grams'] is None else f"{tray['grams'] + last:.0f}")
-        spool = tk.StringVar(value=f'{last:g}')
+        now = None if weigh else counted_now(res, tray)
+        scale, spool = tk.StringVar(value='' if now is None else f'{now + last:.0f}'), tk.StringVar(value=f'{last:g}')
+        opened = (scale.get(), spool.get())                                 # with a figure of the guard's own in it: saved as it opened, it is no amount anyone entered
         def field(row, text, var):
             self._label(d, text, size=9, row=row, column=0, padx=(0, 2 * SPACE))
             e = tk.Entry(d, textvariable=var, width=10, bg=t['raised'], fg=t['text'], insertbackground=t['text'], relief='flat', font=('Segoe UI', 11),
@@ -350,6 +360,7 @@ class Card:
             except OSError as e: wrong.configure(text=f'Not saved: {e if isinstance(e, fg.StateBusy) else e.__class__.__name__}. Save again in a moment.'); return False
             d.destroy(); return True
         def accept(*_):
+            if opened[0] and (scale.get(), spool.get()) == opened: d.destroy(); return
             grams, why = fg.filament_on(scale.get(), spool.get())
             if grams is None: wrong.configure(text=why); return
             doubt = fg.weigh_doubt(grams, tray['reading']) if weigh else ''

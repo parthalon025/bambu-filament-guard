@@ -49,6 +49,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - "Show last result", the icon's click, put the last answer on a card as it was: hours old, after a print that had drawn on the spools, it still read "Enough", "as the printer reports them now". The click now checks that plate again and shows the fresh answer ("Check last plate again" in the menu), one check however often it is clicked. A card made from an answer more than a minute old says when the printer reported its spools, in place of "now".
 - A warning found when "Send print job" opened was thrown away when the dialog had closed before the check ended, which a quick click on Send also looks like. It now shows as a card in the corner, as after a slice.
 - "Check newest slice now" while checks were paused turned the icon green, as if slices were being checked. Paused, the icon stays grey and its tooltip says "Checks are paused"; resumed, it takes the last result's colour again.
+- The window for a spool's amount opened with the amount on the card, which is as old as the card: a spool entered at 400 g and counted down to 280 g opened at 400 g, and Save as it stood, or Return to close the window, wrote 400 g back over the count. During a print that figure was then taken off a second time. The window opens with what the guard counts for the spool at that moment, and Save with both fields as they opened enters nothing.
 
 ## [1.4.0] - 2026-11-20
 

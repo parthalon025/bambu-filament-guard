@@ -294,7 +294,7 @@ def test_the_amount_window_takes_the_scale_and_the_empty_spool(monkeypatch):
     save(); assert acts == [('amount', (tray, 720.0)), ('spool', 230.0)]                            # the amount first, then the spool's weight for next time
     entered = dict(tray, grams=412.4, entered=1e6)
     scale, spool, result, wrong, save, buttons, acts = amount_window(monkeypatch, entered)
-    assert (scale.get(), spool.get(), result['text'], buttons) == ('612', '200', '412 g of filament', ['Save', 'Forget this amount'])
+    assert (scale.get(), spool.get(), result['text'], buttons) == ('', '200', '', ['Save', 'Forget this amount'])   # the row's own figure is not where the window starts: see the ledger's test
     spool.set(''); scale.set('300'); save()                                                        # the filament weighed alone: no spool's weight to remember
     assert acts == [('amount', (entered, 300.0))]
     measured = dict(tray, label='C3', grams=110.0, reading=110.0)
@@ -1051,3 +1051,33 @@ def test_the_icons_click_checks_the_last_plate_again(state, monkeypatch):
     fresh, newest = guard_with(), []                                                         # nothing checked yet: the newest slice
     monkeypatch.setattr(fresh, 'check_newest', lambda *a, **k: newest.append(a)); click(fresh, icon_menu(monkeypatch, fresh))
     assert newest == [()]
+
+@pytest.mark.windows
+def test_the_amount_window_starts_from_what_the_guard_counts_now_and_saved_untouched_changes_nothing(state, monkeypatch):
+    """The window started with the amount of the card's own row. C3 was entered at 400 g and a counted print took 120 g:
+    from a card made before that print the window opened at 400 g, and Save as it stood wrote 400 g back over the
+    count. It starts from the ledger's entry, read as it opens, and Save with both fields as they opened enters nothing."""
+    import guard_ledger as gl
+    from helpers import H2D_JOB, SLICE
+    c3 = dict(EXT, label='C3'); res = {'printer': {'serial': 'SERIAL'}}
+    gl.enter('SERIAL', c3, 400); row = dict(c3, grams=400.0, entered=time.time())           # the row of a card made now
+    fg.remember_slice('Benchy', 1, SLICE); watch = gl.JobWatch('SERIAL', CFG)               # then a print runs and is counted: 120 g of C3
+    watch.look(dict(H2D_JOB, gcode_state='FINISH', task_id='10')); watch.look(dict(H2D_JOB, gcode_state='PREPARE')); watch.look(H2D_JOB)
+    counted = lambda: fg.load_state()['spools']['SERIAL']['C3']['grams']
+    assert counted() == 280.0
+    w = amount_asked(monkeypatch, row, res=res)
+    assert (w.scale.get(), w.spool.get(), w.result['text']) == ('480', '200', '280 g of filament')
+    w.save(); assert w.acts == [] and w.closed() and counted() == 280.0                      # as it opened: closed, and nothing entered
+    watch.look(dict(H2D_JOB, layer_num=120)); assert counted() == 280.0                      # nor is the running print taken off a second time
+    w = amount_asked(monkeypatch, row, res=res); w.spool.set('250'); w.save()               # one field changed: that is an amount
+    assert w.acts == [('amount', (row, 230.0)), ('spool', 250.0)] and w.closed()
+    w = amount_asked(monkeypatch, row, res=res); w.scale.set('481'); w.scale.set('480'); w.save()
+    assert w.acts == [] and w.closed()                                                       # changed and put back is untouched too
+    fg.update_state(lambda st: st['spools']['SERIAL']['C3'].__setitem__('stale', True))      # out of date: no figure to start from, and nothing to save unseen
+    w = amount_asked(monkeypatch, dict(row, grams=None, stale=1e6), res=res)
+    assert (w.scale.get(), w.result['text']) == ('', '') and list(w.buttons) == ['Save', 'Forget this amount']
+    w.save(); assert not w.closed() and w.acts == [] and w.wrong['text'].startswith('The weight on the scale')
+    for nothing in (lambda: {}, lambda: (_ for _ in ()).throw(fg.StateBusy('the state folder was held elsewhere for more than 10 s'))):
+        monkeypatch.setattr(fg, 'load_state', nothing)                                       # no entry, or a state file that cannot be read: empty, not the card's old figure
+        assert amount_asked(monkeypatch, row, res=res).scale.get() == ''
+    assert amount_asked(monkeypatch, row).scale.get() == ''                                  # nor without a printer to look it up for
