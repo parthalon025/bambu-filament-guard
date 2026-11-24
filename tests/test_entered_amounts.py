@@ -1,6 +1,7 @@
 """Amounts entered by hand, counted down as prints draw on them, and the link that follows a printer (guard_ledger)."""
 import json
 import time
+import types
 
 import filament_guard as fg
 import guard_ledger as gl
@@ -102,3 +103,57 @@ def test_a_weight_far_from_the_printers_reading_is_doubted_either_way():
     assert fg.weigh_doubt(8.0, 110.0) == '8 g weighed, 110 g read by the printer: 102 g apart. Save again if the weight is right.'
     assert fg.weigh_doubt(59.9, 110.0).startswith('60 g weighed, 110 g read by the printer: 50 g apart') and '51 g apart' in fg.weigh_doubt(161.0, 110.0)
 
+
+def follow(monkeypatch, script, passes, leap=(0, 0)):
+    """JobWatch.run for SERIAL against a scripted link and clock. script: {pass: report}, what the printer sends at that
+    pass of the follower's 3-second wait; leap: (pass, seconds) the wall clock jumps there (the computer slept). Returns
+    the follower, [(pass, job id)] of the statuses it looked at, and for each link it made whether the address was
+    looked up afresh."""
+    clock, n, looks, links, tell = [1_800_000_000.0], [0], [], [], {}
+    monkeypatch.setattr(gl, 'time', types.SimpleNamespace(time=lambda: clock[0]))
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {'SERIAL': 'code'}})
+    monkeypatch.setattr(fg, 'printer_ip', lambda serial, cfg, refresh=False: links.append(refresh) or 'printer')
+    def printer_link(ip, serial, code, client_id, on_report, on_refused=None):
+        tell['report'] = on_report; return types.SimpleNamespace(loop_stop=lambda: None, disconnect=lambda: None)
+    monkeypatch.setattr(fg, 'printer_link', printer_link)
+    watch = gl.JobWatch('SERIAL', dict(CFG, learn=False)); see = watch.see
+    monkeypatch.setattr(watch, 'see', lambda status, *more: (looks.append((n[0], status.get('task_id'))), see(status, *more))[1])
+    def wait(seconds):
+        clock[0] += seconds
+        if seconds == 3:
+            n[0] += 1
+            if n[0] == leap[0]: clock[0] += leap[1]
+            if n[0] in script: tell['report'](script[n[0]])
+        return n[0] >= passes
+    monkeypatch.setattr(watch.stopped, 'wait', wait); monkeypatch.setattr(watch.stopped, 'is_set', lambda: n[0] >= passes)
+    watch.run()
+    return watch, looks, links
+
+def test_a_link_gone_silent_is_not_looked_at_and_the_first_report_after_it_is_one_after_a_gap(state, monkeypatch):
+    """The follower's link goes silent for 15 minutes (the Wi-Fi away, the printer at a new address) while the guard runs;
+    jobs 11 to 13 are printed unseen, job 14 runs when reports come again. The status held is looked at for a minute after
+    its last report and no longer; the link is then ended and made anew with the address looked up afresh; and the first
+    report after the silence is one after a gap: every entered amount is out of date."""
+    gl.enter('SERIAL', {'label': 'C3', 'type': 'PETG', 'colour': '#101010'}, 400); fg.remember_slice('Benchy', 1, SLICE)
+    over, job = dict(H2D_JOB, gcode_state='FINISH', task_id='10'), dict(H2D_JOB, task_id='14')
+    watch, looks, links = follow(monkeypatch, {1: over, 300: job}, 310)
+    assert [n for n, task in looks if task == '10'] == list(range(2, 22))                # a minute of looks at the last report, then none
+    assert links[0] is False and len(links) > 1 and all(links[1:])                        # the link made anew, its address looked up afresh
+    assert ('14' in [task for _, task in looks]) and c3()['stale'] and c3()['grams'] is None
+    assert (state / 'guard.log').read_text().count('no report for a minute: the link is made anew') == 1
+
+def test_a_report_a_minute_ago_is_still_the_printers_status(state, monkeypatch):
+    """A printer that reports every 45 seconds is followed on one link, and its job is counted when it starts."""
+    gl.enter('SERIAL', {'label': 'C3', 'type': 'PETG', 'colour': '#101010'}, 400); fg.remember_slice('Benchy', 1, SLICE)
+    over = dict(H2D_JOB, gcode_state='FINISH', task_id='10')
+    watch, looks, links = follow(monkeypatch, {n: over if n < 200 else H2D_JOB for n in range(1, 300, 15)}, 300)
+    assert links == [False] and c3()['grams'] == 280 and not c3().get('stale')
+
+def test_a_follower_that_stood_still_takes_what_it_holds_for_out_of_date(state, monkeypatch):
+    """The computer sleeps for 8 hours. On waking, a piece of a report arrives before the follower's next look: the status
+    it holds is still the one from before, the job long over. It is not looked at; the link is made anew, and the first
+    whole status, another job running, is one after a gap."""
+    gl.enter('SERIAL', {'label': 'C3', 'type': 'PETG', 'colour': '#101010'}, 400); fg.remember_slice('Benchy', 1, SLICE)
+    over, job = dict(H2D_JOB, gcode_state='FINISH', task_id='10'), dict(H2D_JOB, task_id='14')
+    watch, looks, links = follow(monkeypatch, {1: over, 20: {'wifi_signal': '-40dBm'}, 60: job}, 70, leap=(20, 8 * 3600))
+    assert max(n for n, task in looks if task == '10') < 20 and links[1:] and all(links[1:]) and c3()['stale']

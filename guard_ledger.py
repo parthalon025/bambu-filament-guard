@@ -29,7 +29,10 @@ import filament_guard as fg
 
 STARTED = ('RUNNING', 'PAUSE', 'FINISH', 'FAILED')        # states in which a job has drawn filament and its tray mapping is its own
 NO_JOB = ['-', '-']
-GAP = 600                                                  # seconds without a look at the printer after which jobs may have been missed
+GAP = 600                                                  # seconds without a report from the printer after which jobs may have been missed
+SILENT = 60                                                # seconds without a report after which the status held is no longer the printer's:
+                                                           # the link is ended and made anew (a link went on being read for two hours after
+                                                           # the Wi-Fi had gone, and the prints of those hours were never taken off)
 LOOKED = 1800                                              # seconds a printer a check looked at is followed for learning: a print sent
                                                            # after the check is seen from its start
 PRINTING = 2 * 3600                                        # seconds a printer last seen printing is still followed for learning: while it
@@ -223,7 +226,7 @@ class JobWatch(threading.Thread):
         self.recorder, self.entered, self.said = guard_learn.Recorder(serial), serial in serials(state), set()
         self.printing = state.get('printing', {}).get(serial) or 0           # when a look last saw it printing (kept in the state file); 0: not printing
         self.counted = state.get('jobs', {}).get(serial)                     # the key of the last job counted; None = take the first sighting as the baseline
-        self.followed = state.get('followed', {}).get(serial)                # when the printer was last looked at (kept in the state file, to the minute)
+        self.followed = state.get('followed', {}).get(serial)                # when the printer last reported, at the last look (kept in the state file, to the minute)
         self.saved = 0.0
         self.seen = (None, None)                                             # (state, key) at the last look that was dealt with
         self.active = None                                                   # was the printer running then? None = not looked yet
@@ -252,17 +255,19 @@ class JobWatch(threading.Thread):
         if gstate in STARTED and key == self.counted: catch_up(self.serial, status, state)
         return done
 
-    def see(self, status, state=None):
+    def see(self, status, state=None, at=None):
         """One look at the printer's whole status: for the entered amounts (look) while there are any, and for learning.
-        state: the state file as read for this look, else read here. A state file that cannot be written now is said
-        in the log (once) and tried again at the next look: no count is taken as done until it is written."""
-        state = fg.load_state() if state is None else state
+        state: the state file as read for this look, else read here. at: when the printer last reported (now, when not
+        given): GAP or more since the report of the look before is a gap, in which jobs may have come and gone. A state
+        file that cannot be written now is said in the log (once) and tried again at the next look: no count is taken as
+        done until it is written."""
+        state, at = fg.load_state() if state is None else state, time.time() if at is None else at
         entered = self.serial in serials(state)
         try:
             if entered and not self.entered: self.restart(state)
             self.entered = entered
-            if entered: self.look(status, gap=bool(self.followed) and time.time() - self.followed > GAP, state=state)
-            self.mark_followed(); self.mark_printing(status.get('gcode_state') in fg.BUSY)
+            if entered: self.look(status, gap=bool(self.followed) and at - self.followed > GAP, state=state)
+            self.mark_followed(at); self.mark_printing(status.get('gcode_state') in fg.BUSY)
         except fg.StateBusy as e: self.say(f'following the printer: {e}; tried again at the next look')
         if self.cfg.get('learn'):
             try: self.recorder.look(status)
@@ -291,34 +296,45 @@ class JobWatch(threading.Thread):
         self.counted = key
         fg.update_state(lambda st: st.setdefault('jobs', {}).__setitem__(self.serial, key))
 
-    def mark_followed(self):
-        self.followed = time.time()
+    def mark_followed(self, at):
+        self.followed = at
         if self.followed - self.saved > 60:
             self.saved = self.followed
             fg.update_state(lambda st: st.setdefault('followed', {}).__setitem__(self.serial, self.followed))
 
     def run(self):
+        """Follows the printer on a link of its own, made anew whenever it falls silent. A status is looked at only while
+        the printer reports: one with no report in the last SILENT seconds is the printer's status no longer (the Wi-Fi
+        gone, the printer at another address), and nor is the one held while this thread stood still that long (the
+        computer asleep), whatever arrives on waking. The link is then ended and made again, the address looked up
+        afresh, from an empty status; and as only a look renews 'followed', the first status after a silence of GAP or
+        more is one after a gap."""
         while not self.stopped.is_set() and self.wanted():
             link = None
             try:
                 conf = fg.bs_conf(); ip = fg.printer_ip(self.serial, self.cfg, refresh=self.lost)
                 if ip and self.serial in conf.get('access_code', {}):
-                    status, lock, first, opened = {}, threading.Lock(), [], time.time()
+                    status, lock, heard, opened = {}, threading.Lock(), [], time.time()   # heard: when the first and the latest report came
                     def on_report(d):
-                        with lock: fg.merge(status, d); first.append(time.time()) if not first else None
+                        with lock: fg.merge(status, d); heard[1:] = [time.time()]
                     def on_refused(rc): self.say(f'following the printer: {ip} refused the access code Bambu Studio holds for it')
                     link = fg.printer_link(ip, self.serial, conf['access_code'][self.serial], f'bambu-filament-guard-jobs-{fg.os.getpid()}', on_report, on_refused)
+                    passed = opened                                                  # when this loop last came round
                     while not self.stopped.wait(3):
                         state = fg.load_state()                                      # read once a look: who is followed, and what is entered
                         if not self.wanted(state): self.stopped.set(); break        # no entered amount, and nothing for learning to watch
-                        if not first:
-                            if time.time() - opened > 40: self.lost = True; break    # no report: the address or the access code has changed
+                        now, before = time.time(), passed; passed = now
+                        with lock: first, latest = (heard[0], heard[-1]) if heard else (None, None)
+                        if first is None:
+                            if now - opened > 40: self.lost = True; break            # no report: the address or the access code has changed
                             continue
-                        if time.time() - first[0] < 3: continue                      # the printer sends its first report in pieces
+                        if now - latest > SILENT or now - before > SILENT:
+                            self.lost = True; self.say('following the printer: no report for a minute: the link is made anew'); break
+                        if now - first < 3: continue                                 # the printer sends its first report in pieces
                         with lock: snap = fg.json.loads(fg.json.dumps(status))
                         if 'gcode_state' not in snap: continue
                         self.lost = False
-                        self.see(snap, state)
+                        self.see(snap, state, latest)
             except Exception as e:
                 self.say(f'following the printer: {e.__class__.__name__}: {e}')
             finally:
