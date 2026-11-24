@@ -1050,11 +1050,15 @@ class Guard:
 
     # -- showing an answer
     def ignored(self, res):
+        """Whether the answer's finding is ignored for its plate. What cannot be looked up is not: a state file held
+        elsewhere at that moment once left a warning as a line in the log, with no card."""
         key = ignore_key(res)
         if not key: return False
-        plates = load_state().get('ignored', {}).get(key[0])
-        try: return isinstance(plates, dict) and ignore_covers(plates.get(key[1]), res)
-        except (TypeError, LookupError): return False        # an entry no version of the guard wrote ignores nothing
+        try:
+            plates = load_state().get('ignored', {}).get(key[0])
+            return isinstance(plates, dict) and ignore_covers(plates.get(key[1]), res)
+        except OSError as e: log(f"{res['title']}: what is ignored could not be looked up ({e.__class__.__name__}: {e}): shown as not ignored"); return False
+        except (TypeError, LookupError, AttributeError): return False   # a state, or an entry, no version of the guard wrote ignores nothing
 
     def popup_on(self):
         """The results popup_on names, in capitals: as the guard reads the list, and as the menu ticks it. A name that is

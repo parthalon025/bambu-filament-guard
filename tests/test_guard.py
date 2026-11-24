@@ -912,3 +912,16 @@ def test_the_amount_window_of_a_card_without_a_running_guard_says_the_amount_is_
     assert said in texts(False, False) and fg.Guard(dict(CFG), type('Root', (), {'quit': None})(), standing=False).card.alone
     assert said not in texts(False, True) and said not in texts(True, False) and said not in texts(False, False, weigh=True)
     assert not guard_ui.Card(None).alone
+
+@pytest.mark.windows
+def test_a_warning_shows_though_the_state_file_cannot_be_read_for_what_is_ignored(state, monkeypatch):
+    """deliver looked up "ignored" in state.json before it showed anything: with the file held elsewhere the warning was
+    a line in the log. What cannot be looked up is not ignored."""
+    res = blue_print(monkeypatch, 60, 55)
+    for held in (fg.StateBusy('the state folder was held elsewhere for more than 10 s'), PermissionError(13, 'Permission denied')):
+        monkeypatch.setattr(fg, 'load_state', lambda held=held: (_ for _ in ()).throw(held))
+        guard = guard_with(); guard.deliver(res)
+        assert guard.card.shown == [('show', 0)] and res['ignored'] is False
+    assert 'Bracket: what is ignored could not be looked up (StateBusy: the state folder was held elsewhere for more than 10 s): shown as not ignored' in (state / 'guard.log').read_text()
+    monkeypatch.setattr(fg, 'load_state', lambda: ['not', 'a', 'state'])                      # nor is what cannot be understood
+    guard = guard_with(); guard.deliver(res); assert guard.card.shown == [('show', 0)]
