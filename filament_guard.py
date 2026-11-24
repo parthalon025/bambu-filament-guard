@@ -243,8 +243,9 @@ def state_lock(wait=10.0):
         with STATE_LOCK: yield
         return
     name = 'Local\\' + APP + '-files-' + hashlib.sha1(os.path.abspath(STATE_DIR).lower().encode('utf-8')).hexdigest()[:16]
-    handle = _MUTEXES.get(name) or _MUTEXES.setdefault(name, k32.CreateMutexW(None, False, name))
+    handle = _MUTEXES.get(name) or k32.CreateMutexW(None, False, name)
     if not handle: raise StateBusy(f'no lock could be made for the state folder (error {ctypes.get_last_error()})')
+    handle = _MUTEXES.setdefault(name, handle)                                    # kept only once made: a None kept here was StateBusy for good
     if k32.WaitForSingleObject(handle, int(wait * 1000)) not in (0, 0x80):        # 0x80: its last holder ended without letting go: ours now
         raise StateBusy(f'the state folder was held elsewhere for more than {wait:.0f} s')
     try: yield

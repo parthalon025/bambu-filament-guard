@@ -197,3 +197,17 @@ def test_settings_found_beside_the_script_are_brought_over_once(state):
     assert f'settings brought over from {before}' in (state / 'guard.log').read_text()
     before.write_text('{"spool_reserve_pct": 2}'); cfg['ok_seconds'] = 0; fg.save_config(cfg, 'ok_seconds')
     assert (fg.load_config()['spool_reserve_pct'], fg.load_config()['ok_seconds']) == (5, 0) and before.read_text() == '{"spool_reserve_pct": 2}'   # the old file is left alone, and read no more
+
+def test_a_lock_that_could_not_be_made_once_is_tried_again(state, monkeypatch):
+    """CreateMutexW failing once (Windows out of handles for a moment) left None kept as the folder's lock: every later
+    read and write of the state was StateBusy until the guard was started again, and each made and dropped a handle."""
+    import ctypes
+    class Kernel32:
+        made = 0
+        def CreateMutexW(self, security, owned, name): Kernel32.made += 1; return None if Kernel32.made == 1 else 4242
+        def WaitForSingleObject(self, handle, ms): return 0
+        def ReleaseMutex(self, handle): return 1
+    monkeypatch.setattr(fg, '_K32', [Kernel32()]); monkeypatch.setattr(fg, '_MUTEXES', {}); monkeypatch.setattr(ctypes, 'get_last_error', lambda: 8, raising=False)
+    with pytest.raises(fg.StateBusy): fg.load_state()
+    assert fg.update_state(lambda st: st.setdefault('x', 1)) == 1 and fg.load_state() == {'x': 1}
+    assert Kernel32.made == 2 and list(fg._MUTEXES.values()) == [4242]                    # made once more, then kept
