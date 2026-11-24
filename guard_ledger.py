@@ -27,8 +27,10 @@ print:
 A printer in LAN-only mode gives every job the id 0, so a job sent again has the key of the run before it. Kept with
 the key of the job last counted is therefore whether that job was last seen over ('ended', in the state file): found
 on the printer again after that, it is another run, counted like a new job, or after ten minutes unfollowed making the
-entries out of date. Not seen: a print started and finished while the printer was not followed, when the printer
-names it exactly like the print before it; nor a run that replaced, unfollowed, one last seen running.
+entries out of date. And a key whose id is 0, or that has none, does not tell one run from the next at all: after ten
+minutes or more unfollowed, every entry is out of date whatever such a printer shows (the same job, finished, may be
+a second run of it). Not seen is what is left of that: a print that starts and ends, or takes the place of one last
+seen running, within less than ten minutes unfollowed, when the printer names it exactly like the print before it.
 
 For the check of the next print, owed() tells what the job the printer runs still needs from each tray: the per-layer
 profile of the slice it was made from, from the printer's layer to the end. filament_guard takes that off the trays the
@@ -403,8 +405,10 @@ class JobWatch(threading.Thread):
             again = key == self.counted and gstate in fg.BUSY and (self.ended or not running)   # the job counted is on the printer anew: another run of it
             if self.counted is None:                                         # baseline: what runs or has run is not counted, what is being prepared will be
                 self.remember(key if gstate in STARTED else NO_JOB, not running); unfollowed(self.serial, (time.time() if at is None else at) - GAP, self.followed)
-            elif gap and (key != self.counted or again):                     # prints may have come and gone unseen: this one, and how many before it?
-                all_out_of_date(self.serial, 'the printer was not followed for a while and has printed since'); self.remember(key if gstate in STARTED else NO_JOB, not running); done = True
+            elif gap and (key != self.counted or again or key[0] in ('0', '')):   # prints may have come and gone unseen: this one, and how many before it?
+                all_out_of_date(self.serial, 'the printer was not followed for a while and ' + ('has printed since' if key != self.counted or again else
+                                                                                                'may have printed since: it names every job alike'))
+                self.remember(key if gstate in STARTED else NO_JOB, not running); done = True
             elif gstate in STARTED and (key != self.counted or (again and running)):   # a new job, or the same one started anew
                 try: count(self.serial, status)
                 except fg.StateBusy: raise                                   # not counted: the next look tries again

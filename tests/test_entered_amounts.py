@@ -377,3 +377,19 @@ def test_what_a_job_needs_beyond_its_spool_goes_to_the_fullest_spool_of_it_measu
     assert amounts_at(monkeypatch, watch, printing('RUNNING', spools(), layer=1), needing(100)) == before
     assert amounts_at(monkeypatch, watch, printing('FINISH', spools(880), layer=100), needing(100)) == before
     assert {label: entry['grams'] for label, entry in fg.load_state()['spools']['SERIAL'].items()} == {'A1': 0, 'A2': 30}
+
+def test_after_a_gap_a_printer_that_names_every_job_alike_makes_the_amounts_out_of_date(state):
+    """A LAN-only printer gives every job the number 0. "Part" is printed, counted and seen to end; the computer sleeps,
+    and "Part" is printed again from the printer's screen, start to finish. On waking the printer shows what it showed
+    before: the same name and number, finished. Nothing tells the two runs apart, so after ten minutes or more without
+    following the amount is out of date. A printer that numbers its jobs shows the very job that was counted, and the
+    amount stands."""
+    def after_the_gap(task):
+        part(120.0); spools = [spool(2)]; job = lambda state, layer=0: printing(state, spools, task=task, mapping=(2,), layer=layer)
+        gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 400)
+        watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools, name='', task=task))
+        for status in (job('PREPARE'), job('RUNNING', 1), job('FINISH', 100)): watch.look(status)
+        gl.JobWatch('SERIAL', CFG).look(job('FINISH', 100), gap=True)
+        return fg.load_state()['spools']['SERIAL']['A3']
+    numbered = after_the_gap('7'); assert numbered['grams'] == 280 and not numbered.get('stale')
+    assert after_the_gap('0')['stale'] and 'it names every job alike' in (state / 'guard.log').read_text()
