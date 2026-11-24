@@ -12,7 +12,8 @@ short. The card comes back beside the "Send print job" dialog while a warning st
   filament_guard.py check [FILE]       check one file now: .gcode or .gcode.3mf; no FILE = the newest slice of the
                                        running Bambu Studio. Options: --times N (N prints of it), --popup, --json.
                                        A file with several plates: each plate, then all its plates together.
-                                       Exit code 0 enough, 1 tight / unknown, 2 short, 3 not checked.
+                                       Exit code 0 enough, 1 tight / unknown, 2 short, 3 not checked (also a file
+                                       or a command line that cannot be read: one line says why).
   filament_guard.py trays              the spools every known printer reports
   filament_guard.py learned [--forget [TRAY]] what was learned from previous prints, per tray (--forget: start again,
                                        for one tray only when named; --forget-weigh TRAY: take back that tray's latest
@@ -280,14 +281,18 @@ def parse_plate(text):
             'layers': int(layers) if layers and layers.isdigit() else None, 'filaments': filaments}
 
 def plates_of_file(path):
-    """[(label, plate)] of a .gcode file or of every sliced plate in a .gcode.3mf."""
+    """[(label, plate)] of a .gcode file or of every sliced plate in a .gcode.3mf. ValueError, with the reason, for a
+    file that is not one or cannot be read: a 3MF that is damaged, cut short or encrypted included."""
     if zipfile.is_zipfile(path):
+        import zlib
         out = []
-        with zipfile.ZipFile(path) as z:
-            names = sorted((n for n in z.namelist() if re.fullmatch(r'Metadata/plate_\d+\.gcode', n)), key=lambda n: int(re.findall(r'\d+', n)[0]))
-            for n in names:
-                with z.open(n) as f: plate = parse_plate(read_head(f))
-                if plate: out.append(('plate ' + re.findall(r'\d+', n)[0], plate))
+        try:
+            with zipfile.ZipFile(path) as z:
+                names = sorted((n for n in z.namelist() if re.fullmatch(r'Metadata/plate_\d+\.gcode', n)), key=lambda n: int(re.findall(r'\d+', n)[0]))
+                for n in names:
+                    with z.open(n) as f: plate = parse_plate(read_head(f))
+                    if plate: out.append(('plate ' + re.findall(r'\d+', n)[0], plate))
+        except (zipfile.BadZipFile, zlib.error, RuntimeError, EOFError) as e: raise ValueError(f'this 3MF cannot be read ({e})')
         if not out: raise ValueError('no sliced plate in this 3MF: slice it first (a project file holds no G-code)')
         return out
     with open(path, 'rb') as f: plate = parse_plate(read_head(f))
@@ -1449,9 +1454,45 @@ def setup():
     return 0
 
 
+def number_of_prints(text):
+    """--times: 1 or more. 0 and -1 were taken as given, and read "enough" for a plate one print of which is short."""
+    try: n = int(text)
+    except ValueError: n = 0
+    if n < 1: raise argparse.ArgumentTypeError(f'{text!r} is not a number of prints (1 or more)')
+    return n
+
+def check(a, cfg):
+    """The `check` command: the answer for each plate of a file (and for all its plates together), or for the newest
+    slice, as text or as JSON. Returns the exit code: the worst of the answers, 3 with one line of why (with --json,
+    {"error": ...}) when there is nothing to check."""
+    def not_checked(why): print(json.dumps({'error': why}) if a.json else why); return 3
+    if a.file:
+        try: plates = [(os.path.basename(a.file) + (' ' + label if label else ''), plate) for label, plate in plates_of_file(a.file)]
+        except (OSError, ValueError) as e: return not_checked(f'{a.file}: {e}')
+    else:
+        newest = newest_gcode()
+        if not newest: return not_checked('no sliced plate found: slice in Bambu Studio first, or name a .gcode / .gcode.3mf file')
+        try:
+            with open(newest, 'rb') as f: plate = parse_plate(read_head(f))
+        except (OSError, ValueError) as e: return not_checked(f'the newest slice ({project_title(newest)}) cannot be read: {e}')
+        if not plate: return not_checked('Bambu Studio is still writing its newest slice')
+        plates = [(project_title(newest), plate)]
+    seen = {}
+    results = [evaluate(plate, cfg, title, a.times, seen) for title, plate in plates]
+    # "Print all plates" needs the sum: each plate alone can fit a spool that does not hold them all, and exit code 0
+    # for such a file once sent a script on. The same reading of the printer serves every answer (seen).
+    if len(plates) > 1: results.append(evaluate(plates_together([plate for _, plate in plates]), cfg, os.path.basename(a.file) + ' all plates together', a.times, seen))
+    if not a.file: results[0]['pid'], results[0]['plate_no'] = studio_pid(newest), plate_number(newest)
+    print(json.dumps(results, indent=1) if a.json else '\n'.join(report_text(r) for r in results))
+    if a.popup:
+        import guard_ui
+        guard = Guard(cfg, guard_ui.make_root(), standing=False)
+        guard.deliver(max(results, key=exit_code), full=True); guard.loop()
+    return max(exit_code(r) for r in results)
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0]); sub = ap.add_subparsers(dest='cmd')
-    c = sub.add_parser('check'); c.add_argument('file', nargs='?'); c.add_argument('--times', type=int, default=1)
+    c = sub.add_parser('check'); c.add_argument('file', nargs='?'); c.add_argument('--times', type=number_of_prints, default=1)
     c.add_argument('--popup', action='store_true'); c.add_argument('--json', action='store_true')
     sub.add_parser('watch').add_argument('--no-start-line', action='store_true')
     learned = sub.add_parser('learned'); forgets = learned.add_mutually_exclusive_group()
@@ -1459,7 +1500,8 @@ def main(argv=None):
     forgets.add_argument('--forget-weigh', metavar='TRAY', help="take back that tray's latest weigh-in (e.g. C3): the rest of what was learned stays")
     learned.add_argument('--printer', help='with --forget TRAY or --forget-weigh TRAY: the printer, by serial or model, when more than one has that tray')
     for name in ('install', 'uninstall', 'setup', 'status', 'stop', 'trays', 'selftest'): sub.add_parser(name)
-    a = ap.parse_args(argv)
+    try: a = ap.parse_args(argv)
+    except SystemExit as e: raise SystemExit(3 if e.code == 2 else e.code)        # argparse ends a command line it cannot read with 2, which is "not enough" to a script that gates on `check`
     if a.cmd == 'watch': return watch(start_line=not a.no_start_line)
     if a.cmd == 'install': return install()
     if a.cmd == 'uninstall': return uninstall()
@@ -1501,27 +1543,14 @@ def main(argv=None):
                 print(f"  {t['label']:<5} {t['type']:<8} {t['name'][:18]:<18} {t['colour']}  {amount}" + (f"  {t['nozzle']} nozzle" if two and t['nozzle'] else ''))
         return 0
     if a.cmd == 'check':
-        if a.file:
-            try: plates = [(os.path.basename(a.file) + (' ' + label if label else ''), plate) for label, plate in plates_of_file(a.file)]
-            except (OSError, ValueError) as e: print(f'{a.file}: {e}'); return 3
-        else:
-            newest = newest_gcode()
-            if not newest: print('no sliced plate found: slice in Bambu Studio first, or name a .gcode / .gcode.3mf file'); return 3
-            with open(newest, 'rb') as f: plate = parse_plate(read_head(f))
-            if not plate: print('Bambu Studio is still writing its newest slice'); return 3
-            plates = [(project_title(newest), plate)]
-        seen = {}
-        results = [evaluate(plate, cfg, title, a.times, seen) for title, plate in plates]
-        # "Print all plates" needs the sum: each plate alone can fit a spool that does not hold them all, and exit code 0
-        # for such a file once sent a script on. The same reading of the printer serves every answer (seen).
-        if len(plates) > 1: results.append(evaluate(plates_together([plate for _, plate in plates]), cfg, os.path.basename(a.file) + ' all plates together', a.times, seen))
-        if not a.file: results[0]['pid'], results[0]['plate_no'] = studio_pid(newest), plate_number(newest)
-        print(json.dumps(results, indent=1) if a.json else '\n'.join(report_text(r) for r in results))
-        if a.popup:
-            import guard_ui
-            guard = Guard(cfg, guard_ui.make_root(), standing=False)
-            guard.deliver(max(results, key=exit_code), full=True); guard.loop()
-        return max(exit_code(r) for r in results)
+        # Whatever happens, a script gets one line and "not checked" (3): a traceback ends Python with 1, which is
+        # "tight". And the line is printed whatever it holds: through a pipe the output is in the ANSI code page, where
+        # a project named outside it once ended the check in UnicodeEncodeError; such characters show as "?".
+        if hasattr(sys.stdout, 'reconfigure'): sys.stdout.reconfigure(errors='replace')
+        try: return check(a, cfg)
+        except Exception as e:
+            why = ' '.join(f'the check failed ({e.__class__.__name__}: {e})'.split())
+            print(json.dumps({'error': why}) if a.json else why); return 3
     ap.print_help(); return 0
 
 if __name__ == '__main__':

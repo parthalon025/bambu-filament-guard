@@ -1,6 +1,7 @@
 """Reading a sliced plate: the G-code header and the grams each layer takes (filament_guard)."""
 import io
 import json
+import sys
 import zipfile
 
 import pytest
@@ -194,3 +195,63 @@ def test_a_filament_without_a_weight_is_carried_as_unknown_wherever_the_grams_ar
     assert fg.layer_profile(io.BytesIO(text.encode()), plate, why) is None and why == ['a filament of it has no weight in the header']
     both = fg.plates_together([plate, fg.parse_plate(gcode())])
     assert [(f['slot'], f['grams']) for f in both['filaments']] == [(1, None), (3, 21.74)]
+
+def checked(capsys, *args):
+    """What `check` with these arguments returns and prints: (the exit code, its output without the last line end)."""
+    code = fg.main(['check', *args])
+    return code, capsys.readouterr().out.rstrip('\n')
+
+def test_check_ends_a_file_it_cannot_read_in_one_line_and_exit_code_3(state, tmp_path, monkeypatch, capsys):
+    """A 3MF cut short by an interrupted copy, with a damaged member, or encrypted: each ended in a traceback and
+    Python's exit code 1, which the README gives as "tight"."""
+    good = open(exported(tmp_path, [gcode() * 50]), 'rb').read(); running(monkeypatch, blue_reads(1000))
+    cut = tmp_path / 'cut.gcode.3mf'; cut.write_bytes(good[:200] + good[-22:])
+    with zipfile.ZipFile(tmp_path / 'damaged.gcode.3mf', 'w', zipfile.ZIP_DEFLATED) as z: z.writestr('Metadata/plate_1.gcode', gcode() * 50)
+    damaged = bytearray((tmp_path / 'damaged.gcode.3mf').read_bytes()); damaged[60:90] = b'\xff' * 30; (tmp_path / 'damaged.gcode.3mf').write_bytes(damaged)
+    locked = bytearray(good); locked[locked.find(b'PK\x03\x04') + 6] |= 1; locked[locked.find(b'PK\x01\x02') + 8] |= 1; (tmp_path / 'locked.gcode.3mf').write_bytes(locked)
+    for name, why in (('cut', 'central directory'), ('damaged', 'Error -3 while decompressing data'), ('locked', 'is encrypted')):
+        path = str(tmp_path / f'{name}.gcode.3mf'); code, out = checked(capsys, path)
+        assert code == 3 and out.startswith(f'{path}: this 3MF cannot be read (') and why in out and '\n' not in out
+        assert checked(capsys, path, '--json') == (3, json.dumps({'error': out}))
+    (tmp_path / 'project.3mf').write_bytes(b'PK\x05\x06' + bytes(18))                      # an empty zip: no G-code in it
+    assert checked(capsys, str(tmp_path / 'project.3mf')) == (3, f"{tmp_path / 'project.3mf'}: no sliced plate in this 3MF: slice it first (a project file holds no G-code)")
+    assert json.loads(checked(capsys, str(tmp_path / 'none.gcode'), '--json')[1])['error'].startswith(f"{tmp_path / 'none.gcode'}: [Errno 2]")
+
+def test_check_without_a_file_ends_a_newest_slice_it_cannot_read_in_exit_code_3(state, tmp_path, monkeypatch, capsys):
+    """Totals that cannot be placed, or a file that is gone when it is opened: a traceback and exit code 1 before."""
+    newest = tmp_path / '.1.0.gcode'; newest.write_text(gcode(used=None)); monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: str(newest))
+    assert checked(capsys) == (3, 'the newest slice (Unsaved project) cannot be read: 2 filament totals for 3 filaments and no "; filament:" line to place them')
+    newest.unlink(); code, out = checked(capsys, '--json')
+    assert code == 3 and json.loads(out)['error'].startswith('the newest slice (Unsaved project) cannot be read: [Errno 2]')
+    newest.write_text(gcode(complete=False))
+    assert checked(capsys, '--json') == (3, '{"error": "Bambu Studio is still writing its newest slice"}')
+    monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None)
+    assert checked(capsys) == (3, 'no sliced plate found: slice in Bambu Studio first, or name a .gcode / .gcode.3mf file')
+    assert json.loads(checked(capsys, '--json')[1]) == {'error': 'no sliced plate found: slice in Bambu Studio first, or name a .gcode / .gcode.3mf file'}
+
+def test_whatever_fails_inside_check_ends_in_one_line_and_exit_code_3(state, tmp_path, monkeypatch, capsys):
+    """A script that gates on the exit code reads Python's 1 for an uncaught error as "tight"."""
+    path = tmp_path / 'Benchy.gcode'; path.write_text(gcode())
+    monkeypatch.setattr(fg, 'evaluate', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('the printer said\nsomething odd')))
+    assert checked(capsys, str(path)) == (3, 'the check failed (RuntimeError: the printer said something odd)')
+    assert checked(capsys, str(path), '--json') == (3, '{"error": "the check failed (RuntimeError: the printer said something odd)"}')
+
+def test_a_command_line_that_cannot_be_read_ends_in_exit_code_3(state, tmp_path, monkeypatch, capsys):
+    """argparse's own exit code for it is 2, which is "not enough" to a script; and --times 0 or -1 was taken, and read
+    "Enough filament for this print ... x 0" with exit code 0 for a plate one print of which is short."""
+    path = tmp_path / 'Benchy.gcode'; path.write_text(gcode()); running(monkeypatch, blue_reads(5))
+    assert checked(capsys, str(path))[0] == 2 and checked(capsys, str(path), '--times', '2')[0] == 2
+    for args, why in ((['--times', '0'], "argument --times: '0' is not a number of prints (1 or more)"), (['--times', '-1'], "'-1' is not a number of prints"),
+                      (['--times', 'two'], "'two' is not a number of prints"), (['--tmies', '3'], 'unrecognized arguments: --tmies 3')):
+        with pytest.raises(SystemExit) as stop: fg.main(['check', str(path), *args])
+        said = capsys.readouterr()
+        assert stop.value.code == 3 and said.out == '' and why in said.err
+    with pytest.raises(SystemExit) as stop: fg.main(['check', '--help'])
+    assert stop.value.code == 0                                                           # asked for, and given: not an error
+
+def test_text_output_survives_a_console_that_cannot_show_a_character(state, tmp_path, monkeypatch):
+    """Output through a pipe is in the ANSI code page: a project named outside it ended the check in UnicodeEncodeError."""
+    path = tmp_path / 'ドラゴン.gcode'; path.write_text(gcode()); running(monkeypatch, blue_reads(1000))
+    raw = io.BytesIO(); monkeypatch.setattr(sys, 'stdout', io.TextIOWrapper(raw, encoding='cp1252'))
+    assert fg.main(['check', str(path)]) == 2; sys.stdout.flush()
+    assert raw.getvalue().decode('cp1252').splitlines()[0] == 'A filament of this print is not loaded: ????.gcode'
