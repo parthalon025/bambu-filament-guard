@@ -53,8 +53,9 @@ STARTUP_LNK = os.path.join(os.environ.get('APPDATA', ''), 'Microsoft', 'Windows'
 DEFAULTS = {
     # "Enough" asks for the need plus a reserve, because the AMS's figure is an estimate: the larger of margin_pct of
     # the need and spool_reserve_pct of a spool's full weight (30 g on a 1 kg spool), the largest spool's of those the
-    # filament could be printed from. The AMS counts what it feeds, so its error grows with what the spool has given,
-    # and is largest when the spool is nearly empty.
+    # filament could be printed from; a spool whose full weight the printer does not report, or whose amount was
+    # entered by hand, counts as a 1 kg spool there. The AMS counts what it feeds, so its error grows with what the
+    # spool has given, and is largest when the spool is nearly empty.
     # Measured 2026-11-19 (H2D): a 1 kg spool reported at 105 g ran dry after 84-85 g of a print that needed 85.3 g.
     'margin_pct': 10,
     'spool_reserve_pct': 3,
@@ -779,7 +780,9 @@ def tray_note(t):
 def same_filament(a, b):
     """Two loaded spools the AMS goes on with, one after the other, when one runs out (auto refill): the same material
     and colour, the same product where both name one, for the same nozzle (or one that may feed either). Used for
-    what the running print needs beyond its own tray; for the print checked, assess's looser match decides."""
+    what the running print needs beyond its own tray, and by assess for the spools that hold the checked print's need
+    together ("needs two spools": both must be in an AMS as well). Which spools match the checked print at all is
+    assess's own, looser rule."""
     return (a['label'] != b['label'] and a['type'].upper() == b['type'].upper() and a['colour'] == b['colour']
             and (not a['fid'] or not b['fid'] or a['fid'] == b['fid']) and (a.get('nozzle') is None or b.get('nozzle') is None or a['nozzle'] == b['nozzle']))
 

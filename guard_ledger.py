@@ -11,6 +11,7 @@ print:
     the next look at the printer (catch_up): the amount weighed is what the spool held then, and the print goes on;
   - a print the guard cannot count (not sliced on this computer, or its tray cannot be told) makes the entries of
     the trays it used "out of date": unknown again, until the amount is entered again.
+    So does a filament of a print that its slice has no weight for (fg.parse_plate), for the entry of its own tray.
   - when the printer was not followed for ten minutes or more (this computer asleep, the link down) and shows
     another job than the last one counted, every entry of that printer is out of date: more than one print may
     have come and gone.
