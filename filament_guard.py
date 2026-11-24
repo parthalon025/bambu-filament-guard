@@ -1195,7 +1195,7 @@ class Guard:
         """The answer the icon stands for: the last one shown, or a warning that still waits to be shown (held) when that
         is the worse. So the icon is green only when no plate that was checked has a warning that was neither shown nor
         ignored."""
-        waits = max(self.held.values(), key=self.rank, default=None)
+        waits = max(list(self.held.values()), key=self.rank, default=None)   # a list: the icon's menu asks from a thread of its own
         return waits if waits and (not self.last or self.rank(waits) > self.rank(self.last)) else self.last
 
     def last_text(self):
@@ -1218,12 +1218,20 @@ class Guard:
         until a slice reads again (take_slice). It kept the colour and tooltip of the last answer, green as may be,
         while no slice was checked. lines: the card that says why, shown once for a Bambu Studio version."""
         self.blind = 'Filament is not being checked'; self.show_icon()
-        if lines: self.card.note(self.blind, lines, 'danger', pid)
+        if lines: self.say(self.blind, lines, 'danger', pid)
 
     def standing_warning(self):
         """The warning whose card still stands: (its plate: Bambu Studio's process, the project, the plate number; its
-        rank; its card's window), or None."""
+        rank; its card's window; the answer), or None."""
         return self.warning if self.warning and self.card.is_open() and self.card.win is self.warning[2] else None
+
+    def say(self, headline, lines, tone='muted', pid=None, beside=None, buttons=()):
+        """A card of the guard's own, which is no answer (guard_ui's note). There is one card at a time: a warning whose
+        place it takes is not ended by it, but waits (held) and shows again when this card has gone. "Filament is not
+        being checked" or "This setting was not kept" once took a "Not enough" for good."""
+        stands = self.standing_warning()
+        if stands: self.held[stands[0]] = stands[3]
+        self.card.note(headline, lines, tone, pid, beside, buttons)
 
     def hold(self, res):
         """An answer that may not take a standing warning's place. A warning is kept, the latest of its plate, and shows
@@ -1259,7 +1267,7 @@ class Guard:
         self.held.pop(plate, None); self.last = res; self.show_icon()
         if full or rank[0]:
             self.card.show(res, beside=beside, hold=not full)
-            self.warning = (plate, rank, self.card.win) if rank[0] else None
+            self.warning = (plate, rank, self.card.win, res) if rank[0] else None
             return True
         if own and self.held: self.card.close(); return self.next_held()   # its plate is fine now: the worst that waited behind it shows, not this plate's line
         if not beside and self.cfg['ok_seconds'] and not res['error']: self.card.show(res, brief=self.cfg['ok_seconds'], hold=True)
@@ -1321,8 +1329,8 @@ class Guard:
         label, beside = tray['label'], self.card.beside
         where = lambda: beside if guard_ui.visible(beside) else None
         def refuse(why):
-            self.card.note('Weigh-in not saved', [(False, f'{why}: weigh-in not saved. Check again, then weigh from the new card.')], 'warn', res.get('pid'), where(),
-                           buttons=[('Check again', lambda: self.recheck(res, where()))])
+            self.say('Weigh-in not saved', [(False, f'{why}: weigh-in not saved. Check again, then weigh from the new card.')], 'warn', res.get('pid'), where(),
+                     buttons=[('Check again', lambda: self.recheck(res, where()))])
             log(f'{label}: weigh-in not saved: {why}')
         def then(new):
             now = None if new['error'] else next((t for r in new['rows'] for t in r['trays'] if t['label'] == label), None)
@@ -1373,7 +1381,7 @@ class Guard:
         if key in self.busy: self.checking(key, self.busy[key][1]); return     # asked again while its check runs: it says so, and starts nothing
         newest = newest_gcode(pid)
         if not newest:
-            if not beside: self.card.note('No sliced plate found', [(None, 'Slice a plate in Bambu Studio first.')])
+            if not beside: self.say('No sliced plate found', [(None, 'Slice a plate in Bambu Studio first.')])
             return
         folder = os.path.dirname(newest)
         plates = sorted((p for p in temp_gcodes() if os.path.dirname(p) == folder), key=written, reverse=True) if beside else [newest]
@@ -1416,13 +1424,13 @@ class Guard:
                     if res is not None and self.rank(res)[0]: self.deliver(res)   # a warning found is still one, and shows as after a slice
                 elif res is not None and self.deliver(res, full=not beside, beside=beside): pass
                 elif res is not None and older and not self.standing_warning():   # nothing to warn of among those checked, and no warning standing: the rest still has to be said
-                    self.card.note('Not every plate was checked', [
+                    self.say('Not every plate was checked', [
                         (None, f"{res['title']} has {len(plates)} sliced plates. The {SEND_MOST} sliced last were checked now, with nothing to warn of; "
                                f"the {older} sliced before them {'were' if older != 1 else 'was'} not checked."),
                         (None, 'Slice a plate again to have it checked.')], 'warn', studio_pid(newest), beside)
                 elif res is None and unread and not beside:                       # asked for from the icon: an answer, not a line that goes
-                    self.card.note('Filament could not be checked', [(False, f'The newest slice ({project_title(newest)}): {unread[0]}.'),
-                                                                     (None, 'Slice it again, or check again in a moment. The log has the file.')], 'danger', studio_pid(newest))
+                    self.say('Filament could not be checked', [(False, f'The newest slice ({project_title(newest)}): {unread[0]}.'),
+                                                               (None, 'Slice it again, or check again in a moment. The log has the file.')], 'danger', studio_pid(newest))
             finally:
                 self.checked(key)
                 for r in out: log(('at "Send print job": ' if beside else 'checked on request: ') + report_text(r).replace('\n', ' | '))
@@ -1459,7 +1467,7 @@ class Guard:
         where guard_learn.forget has kept the history as it was."""
         import guard_learn
         if not sure:
-            self.card.note('Forget what was learned?', [
+            self.say('Forget what was learned?', [
                 (None, 'What the guard learned of every tray, from the prints it followed, is set aside, and it starts again from nothing.'),
                 (None, 'Until it has learned again, a tray whose reading runs high is counted as it reads.')],
                 buttons=[('Forget', lambda: self.forget_learned(True)), ('Keep', self.card.close)])
@@ -1468,10 +1476,10 @@ class Guard:
         try: kept = aside in guard_learn.forget()
         except OSError as e:
             log(f'what was learned could not be forgotten: {e.__class__.__name__}: {e}')
-            self.card.note('What was learned could not be forgotten',
-                           [(False, f'Its file could not be written ({e.__class__.__name__}): nothing was changed. Try again in a moment.')], 'danger'); return
-        self.card.note('What was learned is forgotten', [(None, 'The guard learns again from the next prints it follows.')]
-                       + ([(None, f'What it had learned is kept as {aside}: one copy, until something is forgotten again.')] if kept else []))
+            self.say('What was learned could not be forgotten',
+                     [(False, f'Its file could not be written ({e.__class__.__name__}): nothing was changed. Try again in a moment.')], 'danger'); return
+        self.say('What was learned is forgotten', [(None, 'The guard learns again from the next prints it follows.')]
+                 + ([(None, f'What it had learned is kept as {aside}: one copy, until something is forgotten again.')] if kept else []))
 
     def check_last(self):
         """The icon's click: the plate the icon names (on_icon) is checked again, and the fresh answer shows. The answer
@@ -1490,7 +1498,7 @@ class Guard:
     def run_selftest(self):
         def then(lines):
             bad = any(mark is False for mark, _ in lines)
-            self.card.note('Self-test found a problem' if bad else 'Self-test: the guard works', lines, 'danger' if bad else 'ok')
+            self.say('Self-test found a problem' if bad else 'Self-test: the guard works', lines, 'danger' if bad else 'ok')
         self.later(lambda: selftest(self.cfg), then)
 
     def keep(self, key, value):
@@ -1505,8 +1513,8 @@ class Guard:
         try: self.keep(key, value)
         except OSError as e:
             log(f'setting {key} = {value}: not kept, config.json could not be written ({e.__class__.__name__}): in force until the guard stops')
-            self.card.note('This setting was not kept', [(False, f'config.json could not be written ({e.__class__.__name__}): is the folder the guard runs from read-only?'),
-                                                         (None, 'The setting is in force until the guard stops; at its next start it is as config.json has it.')], 'warn')
+            self.say('This setting was not kept', [(False, f'config.json could not be written ({e.__class__.__name__}): is the folder the guard runs from read-only?'),
+                                                   (None, 'The setting is in force until the guard stops; at its next start it is as config.json has it.')], 'warn')
         if self.tray: self.tray.refresh()
 
     def toggle_warning(self, status):

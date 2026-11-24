@@ -1422,3 +1422,20 @@ def test_another_trays_amount_window_takes_the_open_ones_place(state, monkeypatc
     assert first.k.get('destroyed') and not first.k.get('lifted') and len(w.made) > made and 'A3' in w.made[made + 1].k['text']
     second = w.made[made]; card.ask_amount(None, other, weigh=True)                           # the same tray, to weigh: another window again
     assert second.k.get('destroyed') and card.asking is not second and not card.asking.k.get('destroyed')
+
+@pytest.mark.windows
+def test_a_card_that_is_no_answer_does_not_end_a_standing_warning(state, monkeypatch):
+    """There is one card at a time, and a card of the guard's own took a warning's place for good: "Filament is not being
+    checked" for a slice it could not read, "This setting was not kept", the self-test's lines. The warning waits
+    behind such a card, and shows again when it has gone."""
+    short = answer(1, 'SHORT')
+    for say in (lambda guard: guard.not_checking([(False, 'Bambu Studio 02.10 wrote a slice the guard cannot read.')]),
+                lambda guard: (monkeypatch.setattr(fg, 'save_config', lambda cfg: (_ for _ in ()).throw(PermissionError(13, 'Permission denied'))), guard.set_option('ok_seconds', 8)),
+                lambda guard: guard.forget_learned()):
+        shown, icon, guard = warned(short); say(guard)
+        assert guard.card.shown[-1][0] == 'note' and guard.held == {(1, 'Bracket', 1): short}
+        guard.show_held(); assert guard.card.shown[-1][0] == 'note'                          # while that card is open: nothing moves
+        guard.card.close(); guard.show_held()
+        assert guard.card.shown[-1] == ('show', 0) and guard.card.res is short and guard.held == {} and guard.standing_warning()
+    shown, icon, guard = warned(short); guard.forget_learned(); guard.deliver(answer(1, 'OK'))   # its plate fine meanwhile: nothing waits any more
+    assert guard.held == {} and guard.card.shown[-1] == ('show', CFG['ok_seconds'])

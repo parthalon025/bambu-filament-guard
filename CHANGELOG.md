@@ -69,6 +69,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - A setting changed in the icon's menu while `config.json` could not be written (the guard's folder read-only) ended as an error in the log, with nothing on screen. The setting is now in force until the guard stops, and a card says that it was not kept.
 - When Bambu Studio wrote slices the guard could not read, "Filament is not being checked" was said on a card, once, while the icon kept the colour and tooltip of the last result, green as may be. The icon now goes grey and says so, until a slice is read again.
 - A stop, an install or an update while "slice all" was being checked waited for every plate of it, longer than the 10 seconds they give the old guard to end. The guard now looks for the stop between plates as well.
+- A card of the guard's own that is no answer ("Filament is not being checked", the self-test's card, a setting that was not kept) took the place of a standing warning for good. The warning now shows again when that card has gone.
 
 ## [1.4.0] - 2026-11-20
 
