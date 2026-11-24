@@ -1361,3 +1361,19 @@ def test_the_icon_is_not_green_while_a_warning_waits_to_be_shown(state, tmp_path
     guard.held[(1, 'Farm', 2)], guard.held[(1, 'Farm', 1)] = answer(2, 'TIGHT', 'Farm', ignored=False), answer(1, 'TIGHT', 'Farm', ignored=False)
     at_send(guard)                                                                           # every plate of Farm checked again: plate 2 is fine now, plate 1 short
     assert (guard.card.res['plate_no'], guard.card.res['worst'], guard.card.where) == (1, 'SHORT', 4321) and guard.held == {}
+
+@pytest.mark.windows
+def test_a_setting_that_cannot_be_kept_is_in_force_and_said_not_to_be_kept(state, monkeypatch):
+    """With config.json not writable (the guard's folder read-only, the file held elsewhere) a setting changed in the
+    icon's menu raised out of the menu: a line in the log, nothing on screen, and no word that the next start forgets it."""
+    def refused(cfg): raise PermissionError(13, 'Permission denied', fg.CONFIG)
+    monkeypatch.setattr(fg, 'save_config', refused)
+    guard = guard_with(); menu = icon_menu(monkeypatch, guard); settings = next(i.action for i in menu.items if i.text == 'Settings')
+    for text in ("Warn when a spool's amount is unknown", 'One line when there is enough'):
+        item = next(i for i in settings.items if i.text == text); item.action(None, item); guard.todo.get_nowait()()   # does not raise
+        assert item.how['checked'](item) == (text != 'One line when there is enough')        # in force, and the menu shows it
+    assert 'UNKNOWN' in guard.cfg['popup_on'] and guard.cfg['ok_seconds'] == 0
+    assert guard.card.shown == [('note', 'This setting was not kept')] * 2
+    assert guard.card.said == ['config.json could not be written (PermissionError): is the folder the guard runs from read-only?',
+                               'The setting is in force until the guard stops; at its next start it is as config.json has it.']
+    assert 'setting ok_seconds = 0: not kept, config.json could not be written (PermissionError): in force until the guard stops' in (state / 'guard.log').read_text()

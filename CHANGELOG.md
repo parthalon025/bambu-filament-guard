@@ -66,6 +66,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - The packaged guard told of a missing part with "pip install …", which it has no way to do. There it now says that its folder is incomplete, and to unzip the guard again; a run from source keeps the hint.
 - A plate whose G-code could not be read, or was still being written, when "Send print job" opened was a line in the log: with the other plates fine, nothing showed beside the dialog. It now counts as a plate that could not be checked, and shows as one.
 - While one plate's warning stood, another plate's warning that was no worse got no card, then or later; when the first plate was sliced again and fine, the icon went green over a plate that fell short. Such a warning now waits, in its plate's latest answer, and shows when the standing card has gone: its plate fine again, or closed by you. The icon is green only when no checked plate has a warning that was neither shown nor ignored.
+- A setting changed in the icon's menu while `config.json` could not be written (the guard's folder read-only) ended as an error in the log, with nothing on screen. The setting is now in force until the guard stops, and a card says that it was not kept.
 
 ## [1.4.0] - 2026-11-20
 

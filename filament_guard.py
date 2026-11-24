@@ -1290,7 +1290,7 @@ class Guard:
             if not arg or arg <= 0: return                    # 0 is the filament weighed alone, not a spool: as the next window's start it put 250 g too much on the next spool
             self.card.empty_spool = arg
             if arg != self.cfg.get('empty_spool_g'):
-                try: self.set_option('empty_spool_g', arg)    # the amount is stored by now, and a folder that cannot be written must not cost it
+                try: self.keep('empty_spool_g', arg)          # the amount is stored by now, and a folder that cannot be written must not cost it
                 except OSError as e: log(f"the empty spool's weight, {arg:g} g, could not be kept in config.json ({e.__class__.__name__}): it is used until the guard stops")
         elif name == 'amount':
             tray, grams = arg
@@ -1484,8 +1484,20 @@ class Guard:
             self.card.note('Self-test found a problem' if bad else 'Self-test: the guard works', lines, 'danger' if bad else 'ok')
         self.later(lambda: selftest(self.cfg), then)
 
-    def set_option(self, key, value):
+    def keep(self, key, value):
+        """Puts a setting in force and writes config.json. OSError when that cannot be written: the setting is in force all
+        the same, until the guard stops."""
         self.cfg[key] = value; save_config(self.cfg); log(f'setting {key} = {value}')
+
+    def set_option(self, key, value):
+        """A setting changed from the icon's menu. With config.json not writable (the guard's folder read-only, the file
+        held elsewhere) it raised out of the menu: a line in the log, and nothing to say that the next start forgets it.
+        Nothing is raised; the log and a card say that it was not kept."""
+        try: self.keep(key, value)
+        except OSError as e:
+            log(f'setting {key} = {value}: not kept, config.json could not be written ({e.__class__.__name__}): in force until the guard stops')
+            self.card.note('This setting was not kept', [(False, f'config.json could not be written ({e.__class__.__name__}): is the folder the guard runs from read-only?'),
+                                                         (None, 'The setting is in force until the guard stops; at its next start it is as config.json has it.')], 'warn')
         if self.tray: self.tray.refresh()
 
     def toggle_warning(self, status):

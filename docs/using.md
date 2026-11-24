@@ -56,7 +56,7 @@ Its colour and tooltip are the last result, with its project and plate; while a 
 - Start automatically
 - Forget what was learned…: asks first, on a card with "Forget" and "Keep". Learning then starts again from nothing; what was learned is kept beside it as `learned.json.forgotten`, one copy, replaced the next time something is forgotten (see [Learning](learning.md))
 
-Settings are saved to `config.json` beside the script, which holds only what was changed. The keys, their defaults and their meaning are `DEFAULTS` at the top of [`filament_guard.py`](../filament_guard.py).
+Settings are saved to `config.json` beside the script, which holds only what was changed. When that file cannot be written (a folder that is read-only), a setting you change is in force until the guard stops, and a card says that it was not kept. The keys, their defaults and their meaning are `DEFAULTS` at the top of [`filament_guard.py`](../filament_guard.py).
 
 ## What the results mean
 
