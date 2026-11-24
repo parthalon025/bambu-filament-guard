@@ -36,14 +36,19 @@ ENOUGH = {'gcode_state': 'IDLE', 'ams': {'ams': [{'id': '0', 'tray': [{'id': '0'
 
 def tk_stand_in(monkeypatch):
     """Puts a stand-in in tkinter's place (there is none where no screen is) and returns the widgets made on it, in
-    order: each keeps what it was made and configured with (k) and the keys bound to it (keys)."""
+    order: each keeps what it was made and configured with (k) and the keys bound to it (keys). A window is 300 by
+    100 pixels on a screen at 100 %, and keeps where it was put (k['geometry'])."""
     made = []
     class Widget:
         def __init__(self, *a, **k): self.k, self.keys = dict(k), {}; made.append(self)
         def configure(self, **k): self.k.update(k)
         def bind(self, key, then): self.keys[key] = then
         def destroy(self): self.k['destroyed'] = True
+        def geometry(self, where=None): self.k['geometry'] = where
         def winfo_reqheight(self): return 100
+        def winfo_reqwidth(self): return 300
+        def winfo_fpixels(self, what): return 96.0
+        def wm_frame(self): return '0x1'
         def __getitem__(self, key): return self.k.get(key, '')
         def __getattr__(self, name): return lambda *a, **k: None
     class Var:
@@ -1117,3 +1122,23 @@ def test_a_weigh_in_is_kept_against_a_reading_asked_for_anew_or_not_at_all(state
         assert saved(c3_reads(105))[1] == 'The weigh-in of C3 could not be written (StateBusy)' + after and kept() == []
     assert saved(c3_reads(104), 86.0) == ['Benchy']                                          # within 2 g, the same spool, no job: kept, against what it reads now
     [w] = kept(); assert (w['reading'], w['weight'], w['spool']['id'], w['spool']['colour']) == (104, 86.0, 'A' * 32, '#0A2989')
+
+@pytest.mark.windows
+def test_the_amount_window_opens_on_the_screen_its_card_is_on(monkeypatch):
+    """The window was held to x and y of 0 or more: with Bambu Studio on a screen left of the primary one, or above it,
+    it opened at the edge of the primary screen, a screen away from the card that was clicked. It is held to the work
+    area of the monitor the card is on, 48 pixels above the card's corner at 100 %."""
+    import guard_ui, types
+    asked = []
+    def placed(spot, area, scale=1.0, owner=77):
+        monkeypatch.setattr(guard_ui, 'work_area', lambda hwnd: (asked.append(hwnd), types.SimpleNamespace(left=area[0], top=area[1], right=area[2], bottom=area[3]))[1])
+        made = tk_stand_in(monkeypatch); monkeypatch.setattr(sys.modules['tkinter'].Toplevel, 'winfo_fpixels', lambda self, what: 96.0 * scale, raising=False)
+        card = guard_ui.Card(None); card.t, card.spot, card.owner = guard_ui.THEMES['dark'], spot, owner
+        card.ask_amount(None, EXT)
+        return made[0].k['geometry']
+    assert placed((1160, 440), (0, 0, 1920, 1040)) == '+1160+292' and asked == [77]           # on the primary screen: above the card, the monitor asked for by the card's owner
+    assert placed((-760, 440), (-1920, 0, 0, 1040)) == '+-760+292'                           # Bambu Studio on a screen left of the primary one
+    assert placed((1160, -640), (0, -1080, 1920, -40)) == '+1160+-788'                       # and on one above it
+    assert placed((1800, 60), (0, 0, 1920, 1040)) == '+1620+0'                               # held inside that screen: its right edge, its top
+    assert placed((1160, 440), (0, 0, 1920, 1040), scale=1.5) == '+1160+268'                 # the gap grows with the screen's scaling: 72 pixels at 150 %
+    del asked[:]; assert placed((1160, 440), (0, 0, 1920, 1040), owner=None) == '+1160+292' and asked == [1]   # a card with no window of Bambu Studio's: by a window of its own

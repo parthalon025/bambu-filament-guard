@@ -373,7 +373,13 @@ class Card:
         for e in (entry, empty): e.bind('<Return>', accept)
         d.bind('<Escape>', lambda e: d.destroy())
         d.update_idletasks()
-        x, y = (self.spot or (200, 200)); d.geometry(f'+{max(0, x)}+{max(0, y - d.winfo_reqheight() - 48)}')
+        # Above the card's corner, on the screen the card is on: held to x and y of 0 or more, it opened a screen away
+        # from the card with Bambu Studio left of or above the primary screen. The gap is scaled like the card's distances.
+        (x, y), w, h = self.spot or (200, 200), d.winfo_reqwidth(), d.winfo_reqheight()
+        y -= h + int(8 * SPACE * d.winfo_fpixels('1i') / 96.0)
+        area = work_area(self.owner or int((self.win if self.is_open() else d).wm_frame(), 16))
+        if area.right - area.left >= w and area.bottom - area.top >= h: x, y = min(max(area.left, x), area.right - w), min(max(area.top, y), area.bottom - h)
+        d.geometry(f'+{x}+{y}')
         d.focus_force(); entry.focus_set(); entry.select_range(0, 'end')
 
 
