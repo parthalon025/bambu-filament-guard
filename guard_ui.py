@@ -111,11 +111,11 @@ class Card:
     """One card at a time; each newer answer replaces it. act(name, res, arg) is told what its buttons ask for:
     'recheck', 'ignore', 'details', 'amount' with arg (tray, grams or None), 'weigh' with arg (tray, grams), 'asked'
     with the tray a weigh-in is offered for, and 'spool' with the empty spool's weight typed in the amount window.
-    empty_spool is the weight that window starts with."""
+    empty_spool is the weight that window starts with. alone: the card of a guard that is not the watcher."""
     def __init__(self, root, act=None, on_close=None):
         self.root, self.win, self.act, self.on_close = root, None, act or (lambda *a: None), on_close
         self.owner, self.beside, self.spot, self.held = None, None, None, False
-        self.empty_spool = fg.DEFAULTS['empty_spool_g']
+        self.empty_spool, self.alone = fg.DEFAULTS['empty_spool_g'], False
         self.one_line = False                                                # the card open is one line, which a new line may replace
         self.closes_after = 0                                                # seconds the open card stays once it is on screen; 0 = until closed
 
@@ -310,11 +310,13 @@ class Card:
         self._label(d, 'Put the spool on a scale. The filament is what the scale shows less the empty spool (a Bambu spool: about 250 g; 0 if you weighed the filament alone). '
                        + (f"The printer reads {tray['reading']:.0f} g; from now on the guard counts this spool with no more than it held, and a spool weighed near empty "
                           'teaches it what the tray reads at empty.' if weigh else
-                          'The guard counts down from this with every print it sees start; a print it cannot count makes the amount unknown again.'),
+                          'The guard counts down from this with every print it sees start; a print it cannot count makes the amount unknown again.'
+                          + (' The guard is not running: the amount is kept, and counted down only while the guard runs.' if self.alone and not fg.is_running() else '')),
                     'muted', 9, wrap=420, row=1, column=0, columnspan=3, pady=(SPACE, 2 * SPACE))
-        tare = f'{self.empty_spool:g}'
-        scale = tk.StringVar(value='' if weigh or tray['grams'] is None else f"{tray['grams'] + self.empty_spool:.0f}")
-        spool = tk.StringVar(value=tare)
+        last = self.empty_spool                                             # the last weight above 0; a config.json that holds anything else starts as a new one does
+        if isinstance(last, bool) or not isinstance(last, (int, float)) or not 0 < last <= 5000: last = fg.DEFAULTS['empty_spool_g']
+        scale = tk.StringVar(value='' if weigh or tray['grams'] is None else f"{tray['grams'] + last:.0f}")
+        spool = tk.StringVar(value=f'{last:g}')
         def field(row, text, var):
             self._label(d, text, size=9, row=row, column=0, padx=(0, 2 * SPACE))
             e = tk.Entry(d, textvariable=var, width=10, bg=t['raised'], fg=t['text'], insertbackground=t['text'], relief='flat', font=('Segoe UI', 11),
@@ -324,19 +326,25 @@ class Card:
         result = self._label(d, '', size=10, bold=True, row=4, column=0, columnspan=3)
         wrong = self._label(d, '', 'danger', 9, wrap=420, row=5, column=0, columnspan=3)
         doubted = []                                                        # a weigh-in far from the reading has had its line shown: Save again saves it
+        def tare(): return fg.typed_grams(spool.get()) if spool.get().strip() else 0
         def show(*_):
             grams, _why = fg.filament_on(scale.get(), spool.get())
-            result.configure(text=f'{grams:.0f} g of filament' if grams is not None else ''); wrong.configure(text=''); del doubted[:]   # a number changed: asked anew
+            result.configure(text='' if grams is None else f'{grams:.0f} g of filament' + ('' if tare() else ': nothing taken off for the spool'))
+            wrong.configure(text=''); del doubted[:]                        # a number changed: asked anew
         scale.trace_add('write', show); spool.trace_add('write', show); show()
         def done(grams):
-            d.destroy(); self.act('weigh' if weigh else 'amount', res, (tray, grams))
+            """Stores the amount, then closes: a window gone before its amount was stored took the weight typed with it
+            when the state file was held elsewhere. Not stored, it stays open and says so."""
+            try: self.act('weigh' if weigh else 'amount', res, (tray, grams))
+            except OSError as e: wrong.configure(text=f'Not saved: {e if isinstance(e, fg.StateBusy) else e.__class__.__name__}. Save again in a moment.'); return False
+            d.destroy(); return True
         def accept(*_):
             grams, why = fg.filament_on(scale.get(), spool.get())
             if grams is None: wrong.configure(text=why); return
             doubt = fg.weigh_doubt(grams, tray['reading']) if weigh else ''
             if doubt and not doubted: doubted.append(grams); wrong.configure(text=doubt); return
-            self.act('spool', res, fg.typed_grams(spool.get()) or 0)       # the next window starts with this spool's weight
-            done(grams)
+            spool_g = tare()
+            if done(grams) and spool_g: self.act('spool', res, spool_g)     # after the amount, which it must not cost: the next window starts with this spool's weight (not with 0)
         bar = tk.Frame(d, bg=t['surface']); bar.grid(row=6, column=0, columnspan=3, sticky='w', pady=(SPACE, 0))
         self._button(bar, 'Save', accept, row=0, column=0)
         if not weigh and (tray.get('entered') or tray.get('stale')): self._button(bar, 'Forget this amount', lambda: done(None), row=0, column=1, padx=(SPACE, 0))

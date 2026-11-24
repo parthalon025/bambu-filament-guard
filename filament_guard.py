@@ -1045,6 +1045,7 @@ class Guard:
         self.watcher = None                                   # the thread that watches for slices, once it runs (watch_slices)
         self.card = guard_ui.Card(root, act=self.act, on_close=None if standing else root.quit)
         self.card.empty_spool = cfg['empty_spool_g']
+        self.card.alone = not standing                        # no watcher behind this card: its amount window looks whether one runs
         self.tray = guard_ui.Tray(self) if standing else None
 
     # -- showing an answer
@@ -1145,8 +1146,11 @@ class Guard:
             if on: self.card.close()
             else: self.deliver(res, full=True, beside=self.card.beside)
         elif name == 'spool':                                 # the empty spool's weight typed in the amount window: the next one starts with it
+            if not arg or arg <= 0: return                    # 0 is the filament weighed alone, not a spool: as the next window's start it put 250 g too much on the next spool
             self.card.empty_spool = arg
-            if arg != self.cfg['empty_spool_g']: self.set_option('empty_spool_g', arg)
+            if arg != self.cfg.get('empty_spool_g'):
+                try: self.set_option('empty_spool_g', arg)    # the amount is stored by now, and a folder that cannot be written must not cost it
+                except OSError as e: log(f"the empty spool's weight, {arg:g} g, could not be kept in config.json ({e.__class__.__name__}): it is used until the guard stops")
         elif name == 'amount':
             tray, grams = arg
             guard_ledger.enter(res['printer']['serial'], tray, grams); self.recheck(res, self.card.beside)

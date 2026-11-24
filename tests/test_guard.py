@@ -42,6 +42,7 @@ def tk_stand_in(monkeypatch):
         def __init__(self, *a, **k): self.k, self.keys = dict(k), {}; made.append(self)
         def configure(self, **k): self.k.update(k)
         def bind(self, key, then): self.keys[key] = then
+        def destroy(self): self.k['destroyed'] = True
         def winfo_reqheight(self): return 100
         def __getitem__(self, key): return self.k.get(key, '')
         def __getattr__(self, name): return lambda *a, **k: None
@@ -290,16 +291,16 @@ def test_the_amount_window_takes_the_scale_and_the_empty_spool(monkeypatch):
     spool.set('1000'); save()
     assert result['text'] == '' and 'no filament' in wrong['text'] and acts == []                  # not saved, and it says why
     spool.set('230'); assert wrong['text'] == '' and result['text'] == '720 g of filament'
-    save(); assert acts == [('spool', 230.0), ('amount', (tray, 720.0))]
+    save(); assert acts == [('amount', (tray, 720.0)), ('spool', 230.0)]                            # the amount first, then the spool's weight for next time
     entered = dict(tray, grams=412.4, entered=1e6)
     scale, spool, result, wrong, save, buttons, acts = amount_window(monkeypatch, entered)
     assert (scale.get(), spool.get(), result['text'], buttons) == ('612', '200', '412 g of filament', ['Save', 'Forget this amount'])
-    spool.set(''); scale.set('300'); save()                                                        # the filament weighed alone
-    assert acts == [('spool', 0), ('amount', (entered, 300.0))]
+    spool.set(''); scale.set('300'); save()                                                        # the filament weighed alone: no spool's weight to remember
+    assert acts == [('amount', (entered, 300.0))]
     measured = dict(tray, label='C3', grams=110.0, reading=110.0)
     scale, spool, result, wrong, save, buttons, acts = amount_window(monkeypatch, measured, weigh=True)
     assert (scale.get(), buttons) == ('', ['Save'])                                                # a weigh-in is never guessed from the reading
-    scale.set('292'); save(); assert acts == [('spool', 200.0), ('weigh', (measured, 92.0))]
+    scale.set('292'); save(); assert acts == [('weigh', (measured, 92.0)), ('spool', 200.0)]
 
 @pytest.mark.windows
 def test_a_weigh_in_far_from_the_reading_is_saved_only_when_saved_again(monkeypatch):
@@ -310,18 +311,18 @@ def test_a_weigh_in_far_from_the_reading_is_saved_only_when_saved_again(monkeypa
     scale.set('208'); save()                                                                       # 8 g of filament, where 86 was meant
     assert acts == [] and wrong['text'] == '8 g weighed, 110 g read by the printer: 102 g apart. Save again if the weight is right.'
     scale.set('286'); assert wrong['text'] == '' and result['text'] == '86 g of filament'          # put right: the line goes
-    save(); assert acts == [('spool', 200.0), ('weigh', (c3, 86.0))]                               # 24 g apart: saved at the first Save
+    save(); assert acts == [('weigh', (c3, 86.0)), ('spool', 200.0)]                               # 24 g apart: saved at the first Save
     scale, spool, result, wrong, save, buttons, acts = amount_window(monkeypatch, c3, weigh=True)
     scale.set('208'); save(); assert acts == []
-    save(); assert acts == [('spool', 200.0), ('weigh', (c3, 8.0))]                                # saved again with the same numbers: taken as right
+    save(); assert acts == [('weigh', (c3, 8.0)), ('spool', 200.0)]                                # saved again with the same numbers: taken as right
     scale, spool, result, wrong, save, buttons, acts = amount_window(monkeypatch, c3, weigh=True)
     scale.set('208'); save(); spool.set('190'); save()                                             # a number changed in between: asked anew
     assert acts == [] and wrong['text'].startswith('18 g weighed, 110 g read by the printer: 92 g apart')
     scale.set('370'); save(); assert acts == [] and '180 g weighed' in wrong['text'] and '70 g apart' in wrong['text']   # more than it reads, too
-    scale.set('350'); save(); assert acts == [('spool', 190.0), ('weigh', (c3, 160.0))]            # 50 g apart is within what a gauge can be out
+    scale.set('350'); save(); assert acts == [('weigh', (c3, 160.0)), ('spool', 190.0)]            # 50 g apart is within what a gauge can be out
     ext = {'label': 'Ext', 'name': '', 'type': 'PETG', 'grams': 400.0, 'entered': 1e6, 'reading': 400.0}
     scale, spool, result, wrong, save, buttons, acts = amount_window(monkeypatch, ext)
-    scale.set('205'); save(); assert acts == [('spool', 200.0), ('amount', (ext, 5.0))]            # an amount entered for a spool the printer cannot measure has no reading to doubt it by
+    scale.set('205'); save(); assert acts == [('amount', (ext, 5.0)), ('spool', 200.0)]            # an amount entered for a spool the printer cannot measure has no reading to doubt it by
 
 @pytest.mark.windows
 def test_the_card_says_when_what_was_learned_could_not_be_used(state, monkeypatch):
@@ -823,3 +824,91 @@ def test_forget_what_was_learned_is_among_the_settings_away_from_quit(state, mon
     assert guard.card.shown == [('note', 'Forget what was learned?')]
     ticks = {i.text: i.how['checked'](i) for i in settings.items if i.text.startswith('Warn when')}
     assert ticks == {'Warn when a colour is not loaded': True, "Warn when a spool's amount is unknown": False}   # as the guard reads popup_on: in capitals
+
+def amount_asked(monkeypatch, tray, weigh=False, act=None, card=None, res=None):
+    """The window guard_ui opens for a tray's amount, on the stand-in for tkinter, with its parts by name: the two
+    fields (scale, spool), the labels of the result and of what is wrong, what Save does, every text in it (texts), the
+    buttons by their text, what it told the guard (acts) and whether it has closed. act: what telling the guard does;
+    card: the card it belongs to, else one that starts from an empty spool of 200 g."""
+    import guard_ui, types
+    made, w = tk_stand_in(monkeypatch), types.SimpleNamespace(acts=[])
+    def told(name, res, arg=None):
+        w.acts.append((name, arg))
+        if act: act(name, res, arg)
+    if card is None: card = guard_ui.Card(None); card.empty_spool = 200
+    card.act, card.t = told, guard_ui.THEMES['dark']
+    card.ask_amount(res, tray, weigh)
+    w.scale, w.spool = [x.k['textvariable'] for x in made if type(x).__name__ == 'Entry']
+    w.result, w.wrong = [x for x in made if type(x).__name__ == 'Label'][-2:]
+    w.buttons = {x.k['text']: x.k['command'] for x in made if type(x).__name__ == 'Button'}
+    w.save, w.texts, w.closed = w.buttons['Save'], lambda: [x.k['text'] for x in made if type(x).__name__ == 'Label'], lambda: bool(made[0].k.get('destroyed'))
+    return w
+
+EXT = {'label': 'Ext', 'name': '', 'type': 'PETG', 'colour': '#101010', 'grams': None}
+
+@pytest.mark.windows
+def test_saving_an_amount_does_not_wait_on_the_empty_spools_weight(state, monkeypatch):
+    """The empty spool's weight was kept first, in config.json, and the amount after it: with the guard's folder not
+    writable, Save did nothing and said nothing. The amount comes first; a weight that cannot be kept is logged and
+    used until the guard stops."""
+    guard = fg.Guard(dict(CFG), type('Root', (), {'quit': None})(), standing=False); monkeypatch.setattr(guard, 'recheck', lambda res, beside=None: None)
+    def refused(cfg): raise PermissionError(13, 'Permission denied', fg.CONFIG)
+    monkeypatch.setattr(fg, 'save_config', refused)
+    w = amount_asked(monkeypatch, EXT, act=guard.act, card=guard.card, res={'printer': {'serial': 'SERIAL'}})
+    assert w.spool.get() == '250'
+    w.scale.set('640'); w.spool.set('212'); w.save()
+    assert w.acts == [('amount', (EXT, 428.0)), ('spool', 212.0)] and w.closed()
+    assert fg.load_state()['spools']['SERIAL']['Ext']['grams'] == 428.0
+    assert guard.card.empty_spool == 212.0 and guard.cfg['empty_spool_g'] == 212.0           # for this run
+    assert "the empty spool's weight, 212 g, could not be kept in config.json (PermissionError): it is used until the guard stops" in (state / 'guard.log').read_text()
+
+@pytest.mark.windows
+def test_an_amount_that_cannot_be_stored_leaves_the_window_open_and_says_so(state, monkeypatch):
+    """The window was destroyed before the amount was stored: with the state file held elsewhere the weight typed was
+    gone, with a line in the log for all notice."""
+    held, stored = [fg.StateBusy('state.json could not be written: another program holds it')], []
+    def act(name, res, arg):
+        if name != 'spool' and held: raise held[0]
+        stored.append((name, arg))
+    for weigh, tray, kind in ((False, EXT, 'amount'), (True, dict(EXT, label='C3', grams=420.0, reading=420.0), 'weigh')):
+        del stored[:]; held[:] = [fg.StateBusy('state.json could not be written: another program holds it')]
+        w = amount_asked(monkeypatch, tray, weigh, act)
+        w.scale.set('640'); w.spool.set('230'); w.save()
+        assert not w.closed() and stored == [] and w.wrong['text'] == 'Not saved: state.json could not be written: another program holds it. Save again in a moment.'
+        assert (w.scale.get(), w.spool.get()) == ('640', '230')                              # what was typed is still there
+        del held[:]; w.save()
+        assert w.closed() and stored == [(kind, (tray, 410.0)), ('spool', 230.0)]
+    held[:] = [PermissionError(13, 'Permission denied')]
+    w = amount_asked(monkeypatch, dict(EXT, grams=300.0, entered=1e6), act=act); w.buttons['Forget this amount']()
+    assert not w.closed() and w.wrong['text'] == 'Not saved: PermissionError. Save again in a moment.'
+
+@pytest.mark.windows
+def test_an_empty_spool_of_nothing_is_said_and_is_not_the_next_windows_start(state, monkeypatch):
+    """A refill weighed without its spool left 0 as the start of every later window: 612 typed for a 250 g spool was then
+    kept as 612 g of filament, 250 g too much. 0 or blank is not remembered, and while the field holds it the result
+    says that nothing is taken off."""
+    w = amount_asked(monkeypatch, EXT)
+    w.scale.set('612'); assert w.result['text'] == '412 g of filament'
+    for nothing in ('', '0', ' ', '0,0'):
+        w.spool.set(nothing); assert w.result['text'] == '612 g of filament: nothing taken off for the spool', nothing
+    w.save(); assert w.acts == [('amount', (EXT, 612.0))] and w.closed()                     # the amount, and no weight to remember
+    guard = guard_with(); guard.card = type('Card', (), {'beside': None, 'empty_spool': 230.0})()
+    for nothing in (0, 0.0, None, -5): guard.act('spool', None, nothing)
+    assert guard.card.empty_spool == 230.0 and 'empty_spool_g' not in fg.load_config().keys() - fg.DEFAULTS.keys() and fg.load_config()['empty_spool_g'] == 250
+    import guard_ui
+    for odd in (0, None, '250', -1, True):                                                   # nor does a config.json that holds one start a window with it
+        card = guard_ui.Card(None); card.empty_spool = odd
+        assert amount_asked(monkeypatch, EXT, card=card).spool.get() == '250', odd
+
+@pytest.mark.windows
+def test_the_amount_window_of_a_card_without_a_running_guard_says_the_amount_is_not_counted_down(state, monkeypatch):
+    """`check --popup` with no guard running: the amount entered there is kept, and nothing counts it down."""
+    import guard_ui
+    said = 'The guard is not running: the amount is kept, and counted down only while the guard runs.'
+    def texts(standing, running, weigh=False):
+        monkeypatch.setattr(fg, 'is_running', lambda: running)
+        guard = fg.Guard(dict(CFG), type('Root', (), {'quit': None})(), standing=False); guard.standing = standing; guard.card.alone = not standing
+        return ' '.join(amount_asked(monkeypatch, dict(EXT, reading=400.0), weigh, card=guard.card).texts())
+    assert said in texts(False, False) and fg.Guard(dict(CFG), type('Root', (), {'quit': None})(), standing=False).card.alone
+    assert said not in texts(False, True) and said not in texts(True, False) and said not in texts(False, False, weigh=True)
+    assert not guard_ui.Card(None).alone
