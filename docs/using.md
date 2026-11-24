@@ -56,7 +56,15 @@ Its colour and tooltip are the last result, with its project and plate; while a 
 - Start automatically
 - Forget what was learned…: asks first, on a card with "Forget" and "Keep". Learning then starts again from nothing; what was learned is kept beside it as `learned.json.forgotten`, one copy, replaced the next time something is forgotten (see [Learning](learning.md))
 
-Settings are saved to `config.json` beside the script, which holds only what was changed. The keys, their defaults and their meaning are `DEFAULTS` at the top of [`filament_guard.py`](../filament_guard.py).
+Settings are saved to `config.json` in `%LOCALAPPDATA%\BambuFilamentGuard\`, beside the log and the state, so an update into a new folder keeps them. The file holds only what was changed. Up to 1.4.0 it was beside the script (`app\config.json` in the packaged folder): with no settings in the new place yet, the guard brings that file over when it finds it beside its own script, and `Install.cmd` from the folder of the copy installed before (see [Updating](../README.md#updating)). The keys, their defaults and their meaning are `DEFAULTS` at the top of [`filament_guard.py`](../filament_guard.py).
+
+The file can be written by hand; the guard reads it when it starts, so a change made while it runs takes effect at its next start (Quit in the icon's menu, then start it again). A setting changed from the menu meanwhile is set in the file as it then is: the rest of what you wrote stays. Every value is checked. One the guard cannot use (a number in quotes, `"false"` in quotes where `false` belongs, a name in `popup_on` that is no result) is not used: that setting alone stays at its default, and a card when the guard starts and the self-test say which. A file the guard cannot read at all (a comma too many, an encoding other than UTF-8) leaves every setting at its default, and the same card says "config.json cannot be read", with the place where reading stopped; before the guard next saves a setting, it copies that file to `config.json.unreadable`. A printer that does not announce itself on your network can be given its address there, by its serial number:
+
+```json
+{"printers": {"<serial>": {"ip": "192.168.1.50"}}}
+```
+
+The address as plain text, `{"printers": {"<serial>": "192.168.1.50"}}`, is read as well. The guard finds a printer by listening for what the printer announces on the local network (UDP ports 2021 and 1990). When a card says that a printer is not announcing itself although it is on, Windows Firewall may be keeping those announcements from the guard: allow the guard (`pythonw.exe`) on private networks, or give the address as above.
 
 ## What the results mean
 

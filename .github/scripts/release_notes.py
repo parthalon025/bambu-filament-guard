@@ -44,11 +44,11 @@ Windows may ask twice at the first start. "Windows protected your PC": the file 
 
 ## Updating
 
-1. Quit the guard you have: "Quit" in its icon's menu.
+1. Quit the guard you have: "Quit" in its icon's menu. Do not run its `Uninstall.cmd`: the new guard finds the old folder, and your settings in it, through the old copy's start with Windows.
 2. Unzip the new folder and open its `Install.cmd`.
-3. Delete the old folder. Do not run the old folder's `Uninstall.cmd` after installing the new one: up to 1.4.0 it removes the new guard's start with Windows.
+3. Delete the old folder.
 
-Your settings, the amounts you entered by hand and what was learned are kept.
+The amounts you entered by hand and what was learned are kept. So are your settings: from 1.5.0 they are in `%LOCALAPPDATA%\\BambuFilamentGuard\\config.json`, and `Install.cmd` brings them over from the old folder. If the old copy was uninstalled first, copy `app\\config.json` from its folder there yourself.
 
 SHA-256 of `{name}`:
 `{hashlib.sha256(open(sys.argv[1], 'rb').read()).hexdigest()}`

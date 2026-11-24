@@ -572,7 +572,7 @@ def test_an_odd_history_file_costs_neither_the_check_nor_what_else_was_learned(s
     for shape in ([], 'x', None, {'SERIAL': []}, {'SERIAL': {'C3': []}}, {'SERIAL': {'C3': {'jobs': {}, 'dry': c3['dry']}}}):
         assert checked(shape)['status'] in ('TIGHT', 'SHORT')
     log = (state / 'guard.log').read_text()
-    assert log.count('learned.json: left out what cannot be read: SERIAL C3: 1 of 2 dry\n') == 1 and 'left out what cannot be read: all of it (not a history)' in log   # said once, not at every read
+    assert log.count('learned.json: left out what cannot be read: SERIAL C3: 1 of 2 dry\n') == 1 and 'learned.json was damaged: set aside as learned.json.damaged' in log   # said once, not at every read; a file that is no history at all is set aside like a damaged one
     assert "SERIAL (not a printer's trays)" in log and "SERIAL C3 (not a tray's history)" in log and 'SERIAL C3: its jobs (not a list)' in log
     capsys.readouterr()
     monkeypatch.setattr(fg, 'read_json', lambda path, empty, read=fg.read_json: h if path == gn.path() else read(path, empty))   # every change is a check: none of them needs the disk

@@ -8,6 +8,7 @@ import filament_guard as fg
 def state(tmp_path, monkeypatch):
     """The guard's state and settings in a folder of the test's own."""
     monkeypatch.setattr(fg, 'STATE_DIR', str(tmp_path)); monkeypatch.setattr(fg, 'CONFIG', str(tmp_path / 'config.json'))
+    monkeypatch.setattr(fg, 'CONFIG_BEFORE', str(tmp_path / 'before' / 'config.json'))    # not a config.json that may lie beside the script
     return tmp_path
 
 

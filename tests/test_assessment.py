@@ -1,4 +1,6 @@
 """Judging one filament against the spools that could print it (filament_guard.assess)."""
+import json
+
 import filament_guard as fg
 from helpers import CFG, tray, fil
 
@@ -218,3 +220,56 @@ def test_a_filament_that_shares_a_spool_with_one_without_a_weight_is_not_enough_
     alone, rows = judged([no_weight, dict(no_weight, slot=4), blue], trays)
     assert (rows[2]['status'], rows[2]['note']) == ('UNKNOWN', 'filaments 1, 4 can also print from C3, and Bambu Studio gives them no weight')
     assert rows[0]['note'] == rows[1]['note'] == "Bambu Studio gives no weight for this filament (its profile's density is 0)"   # each says its own
+
+def linked(monkeypatch, reports):
+    """read_status on a stand-in for the link to the printer: `reports` are (tenths of a second after the link is up, the
+    "print" part of a report), on a clock that only time.sleep moves. Returns the status read."""
+    tenths, heard = [0], []
+    def link(ip, serial, code, client_id, on_report, on_refused=None):
+        heard.append(on_report); told()
+        return type('Client', (), {'loop_stop': lambda self: None, 'disconnect': lambda self: None})()
+    def told():
+        for at, report in reports:
+            if at == tenths[0]: heard[0](json.loads(json.dumps(report)))                 # as it comes off the link: a message of its own
+    monkeypatch.setattr(fg, 'printer_link', link); monkeypatch.setattr(fg.time, 'sleep', lambda s: (tenths.__setitem__(0, tenths[0] + 1), told()))
+    return fg.read_status('printer', 'SERIAL', 'code')
+
+WHOLE = {'gcode_state': 'IDLE', 'ams': {'tray_now': '255', 'ams': [{'id': '0', 'tray': [{'id': '0', 'tray_type': 'PLA', 'tray_color': '0A2989FF', 'remain_g': 640}]}]}}
+
+def test_a_report_still_in_pieces_is_waited_for_until_it_has_its_spools(monkeypatch):
+    """A printer sends its report in pieces. With a small piece of "ams" ahead of the whole ({"tray_now": ...}), the
+    status was returned after a second as it stood: no spool loaded, yet taken for complete."""
+    piece = {'gcode_state': 'IDLE', 'ams': {'tray_now': '255', 'version': 4}}
+    assert not fg.has_spools(piece) and not fg.has_spools({'gcode_state': 'IDLE'}) and not fg.has_spools({'ams': None}) and not fg.has_spools({'ams': {'ams': None}})
+    assert fg.has_spools(WHOLE) and fg.has_spools({'ams': {'ams': []}})                    # an AMS with nothing in it, or none: said by the printer
+    status = linked(monkeypatch, [(0, piece), (15, WHOLE)])
+    assert fg.has_spools(status) and [t['label'] for t in fg.trays_of(status)[0]] == ['A1']
+    assert not fg.has_spools(linked(monkeypatch, [(0, piece), (40, WHOLE)]))               # not within three seconds: returned as it is, and not taken for whole
+
+def two_nozzles(infos=(), external=()):
+    """The status of a printer with two nozzles: an AMS for each 'info' word, each with one spool of red PLA, and the
+    external holders with these ids. Returns the nozzle of each tray, by label."""
+    spool = {'tray_type': 'PLA', 'tray_color': 'C12E1FFF', 'remain_g': 100}
+    status = {'device': {'extruder': {'info': [{'id': 0, 'snow': 0xFFFF}, {'id': 1, 'snow': 0xFFFF}]}},
+              'ams': {'ams': [{'id': str(i), 'info': info, 'tray': [dict(spool, id='0')]} for i, info in enumerate(infos)]}, 'vir_slot': [dict(spool, id=i) for i in external]}
+    return {t['label']: t['nozzle'] for t in fg.trays_of(status)[0]}
+
+def test_the_nozzle_an_ams_feeds_is_read_as_bambu_studio_reads_it():
+    """Bambu Studio takes the extruder an AMS is bound to from bits 8-11 of its 'info' word: 0 the main one (right), 1 the
+    deputy (left), 0xE none. The H2D on firmware 01.04 sends 0xE there and tells the side in bits 24-27, the only place
+    the guard looked: an AMS that says it by Bambu Studio's bits read as right whatever it fed."""
+    assert two_nozzles(['00000103', '00000003']) == {'A1': 'left', 'B1': 'right'}             # bound: 1 the left nozzle, 0 the right
+    assert two_nozzles(['51001E03', '50001E03']) == {'A1': 'left', 'B1': 'right'}             # not bound (0xE): the top byte, as the H2D sends it
+    assert two_nozzles(['50000103', '51000003']) == {'A1': 'left', 'B1': 'right'}             # both there, and at odds: the binding counts
+    assert two_nozzles([0x51001E03, None, '', 'no number', ['51001E03']]) == {label: None for label in ('A1', 'B1', 'C1', 'D1', 'E1')}   # not text: not known, and no error
+
+def test_an_external_spool_counts_for_its_own_nozzle_on_a_printer_with_two():
+    """The H2D has an external holder for each nozzle: id 254 the left (Ext-L), 255 the right (Ext-R). Both counted for
+    either nozzle: 900 g on the left holder made "enough" of a filament the right nozzle prints, which had 20 g."""
+    assert two_nozzles(['50001E03'], ['254', '255']) == {'A1': 'right', 'Ext': 'left', 'Ext2': 'right'}
+    assert two_nozzles([], [255, 254, '7']) == {'Ext': 'right', 'Ext2': 'left', 'Ext3': None}  # by its id, not its place; an id that is neither: not known
+    trays = [tray('A1', 20, nozzle='right'), tray('Ext', 900, nozzle=two_nozzles([], ['254'])['Ext'])]
+    row = fg.assess(fil(300, nozzle='right'), trays, CFG)
+    assert row['status'] == 'SHORT' and [t['label'] for t in row['trays']] == ['A1'] and fg.assess(fil(300, nozzle='left'), trays, CFG)['status'] == 'OK'
+    one = fg.trays_of({'ams': {'ams': []}, 'vt_tray': {'id': '254', 'tray_type': 'PLA', 'tray_color': 'C12E1FFF'}})
+    assert one == ([{'label': 'Ext', 'type': 'PLA', 'fid': '', 'colour': '#C12E1F', 'name': '', 'grams': None, 'weight': None, 'nozzle': None, 'spool': None}], False)   # one nozzle: no side

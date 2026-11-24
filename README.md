@@ -87,6 +87,18 @@ python filament_guard.py install      # start automatically, and now
 
 Either way, the guard starts with Windows and waits. Its icon, a spool, is in the notification area while Bambu Studio runs.
 
+### Updating
+
+1. Stop the old copy first: Quit in its icon's menu. (`Uninstall.cmd` in its folder stops it too.)
+2. Unzip the new version: into a new folder, or over the old one once the old copy has stopped.
+3. Open the new `Install.cmd`.
+
+From source: `python filament_guard.py stop`, update the files, then `python filament_guard.py install`.
+
+Your settings, the amounts you entered and what was learned are kept. From 1.5.0 they are all in `%LOCALAPPDATA%\BambuFilamentGuard\`, not in the guard's folder. Up to 1.4.0 the settings were in the guard's own folder (`app\config.json`; from source, beside the script). `Install.cmd` brings that file over, and says so on its card, when it can tell where the old copy is: you quit it rather than uninstalled it, so its Startup shortcut still points there, or you unzipped over its folder. Otherwise copy `config.json` from the old folder to `%LOCALAPPDATA%\BambuFilamentGuard\` before you delete the old folder.
+
+Do not run the `Uninstall.cmd` of a copy of 1.4.0 or earlier once the new one is installed: it removes the new copy's shortcut and stops the new guard. Delete the old folder instead. From 1.5.0, `Uninstall.cmd` removes the shortcut and stops the guard only where they are its own folder's, and names what it left alone.
+
 ## Usage
 
 There is nothing to do beyond slicing as usual. When a plate is sliced, the guard reads from its G-code the grams each filament needs, asks the printer what is left on every spool, takes off what a running print still needs, and shows the answer as a **Filament check** card inside Bambu Studio's window, bottom right, under the slicing result.
@@ -134,7 +146,7 @@ python filament_guard.py uninstall    # remove the shortcut and stop
 > [!TIP]
 > **After a Bambu Studio update**, run `selftest` (or Self-test in the icon's menu). When Bambu Studio writes a slice the guard cannot read, a card says so once for that version, and every such file is in the log.
 
-**Log and state** are in `%LOCALAPPDATA%\BambuFilamentGuard\`, with the grams per layer of the last 30 slices in `profiles\` and what was learned in `learned.json`. Settings are saved to `config.json` beside the script.
+**Log, state and settings** are in `%LOCALAPPDATA%\BambuFilamentGuard\`, with the grams per layer of the last 30 slices in `profiles\`, what was learned in `learned.json` and the settings in `config.json`.
 
 ## Documentation
 

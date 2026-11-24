@@ -426,8 +426,8 @@ def test_a_name_in_popup_on_the_guard_does_not_know_is_said_once_and_the_menu_st
     assert log.count('TIGTH') == 1 and 'popup_on in config.json names "TIGTH", which is no result to warn of' in log
     assert guard.card.shown == [('show', CFG['ok_seconds'])] * 3                           # the tight row is not warned of: one line
     assert guard.popup_on() == ['SHORT', 'TIGTH', 'COLOUR']
-    guard.toggle_warning('COLOUR'); assert guard.cfg['popup_on'] == ['SHORT', 'TIGTH'] and fg.load_config()['popup_on'] == ['SHORT', 'TIGTH']
-    guard.toggle_warning('UNKNOWN'); assert guard.popup_on() == ['SHORT', 'TIGTH', 'UNKNOWN']
+    guard.toggle_warning('COLOUR'); assert guard.cfg['popup_on'] == ['SHORT'] and fg.load_config()['popup_on'] == ['SHORT']     # the name that is none is not written back
+    guard.toggle_warning('UNKNOWN'); assert guard.popup_on() == ['SHORT', 'UNKNOWN'] and '_wrong' not in fg.load_config()
 
 def blue_print(monkeypatch, need, reads, title='Bracket', plate_no=1, folder=None):
     """The answer for a plate that needs `need` g of blue PLA, with a blue spool that reads `reads` g: sliced as plate
@@ -866,7 +866,7 @@ def test_saving_an_amount_does_not_wait_on_the_empty_spools_weight(state, monkey
     writable, Save did nothing and said nothing. The amount comes first; a weight that cannot be kept is logged and
     used until the guard stops."""
     guard = fg.Guard(dict(CFG), type('Root', (), {'quit': None})(), standing=False); monkeypatch.setattr(guard, 'recheck', lambda res, beside=None: None)
-    def refused(cfg): raise PermissionError(13, 'Permission denied', fg.CONFIG)
+    def refused(cfg, key=None): raise PermissionError(13, 'Permission denied', fg.CONFIG)
     monkeypatch.setattr(fg, 'save_config', refused)
     w = amount_asked(monkeypatch, EXT, act=guard.act, card=guard.card, res={'printer': {'serial': 'SERIAL'}})
     assert w.spool.get() == '250'
@@ -995,3 +995,433 @@ def test_popup_on_decides_for_no_result_but_the_four_it_is_for(state):
     assert guard.card.shown == [('show', CFG['ok_seconds'])] * 4 and guard.last['plate_no'] == 4   # a line each, none standing in another's way
     assert guard.opening(answer(1, 'OK')) == [] and guard.rank(answer(1, 'OK')) == (0, 0)
     assert (state / 'guard.log').read_text().count('popup_on in config.json names "OK", which is no result to warn of (UNKNOWN, TIGHT, SPLIT, SHORT, MISSING, COLOUR)') == 1
+
+def test_a_failure_before_the_printer_answers_is_an_answer_with_its_reason(state, monkeypatch):
+    """Whatever goes wrong while the printer is chosen and asked ends as "Filament could not be checked" with its reason,
+    and is never quiet. An error the first part of evaluate did not list left as a raised error: a line in the log, the
+    "Checking…" line closed, and no card."""
+    running(monkeypatch, ENOUGH); monkeypatch.setattr(fg, 'printer_ip', lambda *a, **k: {}.missing)
+    res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['error'] == "AttributeError: 'dict' object has no attribute 'missing'" and not res.get('quiet')
+    assert fg.headline(res) == 'Filament could not be checked' and fg.exit_code(res) == 3
+
+def test_a_printers_address_given_as_plain_text_in_the_settings_is_used(state, monkeypatch):
+    """{"printers": {"<serial>": "address"}}, the shape a user writes from the one-line hint: every check ended in an
+    AttributeError that only the log saw."""
+    (state / 'config.json').write_text('{"printers": {"SERIAL": "192.0.2.50"}}'); asked = []
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {'SERIAL': 'code'}}); monkeypatch.setattr(fg, 'model_by_serial_prefix', lambda: {'SER': 'Bambu Lab H2D'})
+    monkeypatch.setattr(fg, 'read_status', lambda ip, serial, code: (asked.append(ip), ENOUGH)[1])
+    res = fg.evaluate(BLUE, fg.load_config(), 'Benchy')
+    assert asked == ['192.0.2.50'] and res['error'] is None and res['worst'] == 'OK'
+
+def started(monkeypatch):
+    """watch() run from its start to its end, on stand-ins for the mutex, Tk, the icon and the watcher's thread:
+    (what it returned, the cards it showed as (headline, lines, tone))."""
+    import guard_ui
+    notes = []
+    monkeypatch.setattr(fg, 'sole_guard', lambda: 0); monkeypatch.setattr(guard_ui, 'make_root', lambda: None); monkeypatch.setattr(guard_ui, 'Tray', lambda guard: None)
+    monkeypatch.setattr(guard_ui.Card, 'note', lambda card, headline, lines, tone='muted', pid=None: notes.append((headline, lines, tone)))
+    monkeypatch.setattr(fg.Guard, 'watch_slices', lambda guard: None); monkeypatch.setattr(fg.Guard, 'loop', run_queued)
+    return fg.watch(), notes
+
+@pytest.mark.windows
+def test_the_guard_says_at_its_start_which_settings_are_not_in_use(state, monkeypatch):
+    """A value in config.json the guard cannot use: it starts on the default for that setting, and a card says which."""
+    (state / 'config.json').write_text('{"margin_pct": "25", "spool_reserve_pct": 5}')
+    assert started(monkeypatch) == (0, [('Settings in config.json are not in use', [
+        (False, 'margin_pct in config.json is "25", not a number from 0 to 1000: the default is in use.'),
+        (None, f'The file is {fg.CONFIG}. The guard reads it when it starts.')], 'danger')])
+    (state / 'config.json').write_text('{"spool_reserve_pct": 5}')
+    assert started(monkeypatch) == (0, [])                                                # nothing wrong: no card
+
+def no_studio():
+    raise FileNotFoundError('BambuStudio.conf')
+
+@pytest.mark.windows
+def test_the_self_test_fails_on_a_setting_that_is_not_in_use(state, monkeypatch):
+    """What config.json holds and the guard cannot use is the self-test's first failed line, with Bambu Studio found or not."""
+    import guard_ui
+    (state / 'config.json').write_text('{"margin_pct": "25"}'); wrong = (False, 'margin_pct in config.json is "25", not a number from 0 to 1000: the default is in use')
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'app': {'version': '02.09.01.70'}}); monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None)
+    monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {})
+    assert fg.selftest(fg.load_config())[0] == wrong
+    monkeypatch.setattr(fg, 'bs_conf', no_studio)
+    assert fg.selftest(fg.load_config())[0] == wrong                                      # also where Bambu Studio's configuration is not found
+
+@pytest.mark.windows
+def test_the_guard_says_at_its_start_that_its_settings_cannot_be_read(state, monkeypatch):
+    """A comma too many in config.json: the defaults are in use, and the first card says so, where one line in the log did."""
+    (state / 'config.json').write_text('{"margin_pct": 25,}')
+    result, [(headline, [(mark, line), where], tone)] = started(monkeypatch)
+    assert (result, headline, mark, tone) == (0, 'Settings in config.json are not in use', False, 'danger')
+    assert line.startswith('config.json cannot be read (') and 'line 1 column 1' in line and line.endswith('): the defaults are in use.')
+
+@pytest.mark.windows
+def test_a_setting_changed_from_the_menu_leaves_what_was_edited_by_hand_meanwhile(state):
+    """The menu's click saves its one setting: a margin written into config.json since the guard started stays."""
+    (state / 'config.json').write_text('{"learn": false}'); guard = guard_with(fg.load_config())
+    (state / 'config.json').write_text('{"learn": false, "margin_pct": 25}')            # by hand, while the guard runs
+    guard.toggle_warning('UNKNOWN')
+    assert fg.json.load(open(fg.CONFIG)) == {'learn': False, 'margin_pct': 25, 'popup_on': fg.DEFAULTS['popup_on'] + ['UNKNOWN']}
+
+def install_on(monkeypatch, shortcut=''):
+    """install() on stand-ins for Windows: the Startup shortcut points into the folder `shortcut` ('' = there is none),
+    no Bambu Studio, and no guard runs until install starts its own. Returns what was done, in order."""
+    done = []
+    monkeypatch.setattr(fg, 'shortcut_folder', lambda: (done.append('shortcut read'), shortcut)[1])
+    monkeypatch.setattr(fg, 'make_shortcut', lambda: done.append('shortcut made')); monkeypatch.setattr(fg, 'bs_conf', no_studio)
+    monkeypatch.setattr(fg, 'is_running', lambda: 'start' in done)
+    monkeypatch.setattr(fg, 'stop', lambda *a, **k: (done.append('stop'), 'not running')[1]); monkeypatch.setattr(fg, 'start', lambda *a, **k: done.append('start'))
+    monkeypatch.setattr(fg.time, 'sleep', lambda s: None)
+    return done
+
+def test_install_brings_the_settings_over_from_the_folder_of_the_copy_installed_before(state, tmp_path, monkeypatch, capsys):
+    """An update unzipped into a new folder: the Startup shortcut still points into the old one, whose config.json
+    (up to 1.4.0, beside the script) holds the settings. They are brought over before the shortcut is made to point
+    here, and the install card says so. They stayed behind, and the new guard ran on the defaults without a word."""
+    old = tmp_path / 'old' / 'app'; old.mkdir(parents=True); (old / 'config.json').write_text('{"spool_reserve_pct": 5, "measured_reserve": false}')
+    done = install_on(monkeypatch, shortcut=str(old)); ours, said = fg.install()
+    assert done[:2] == ['shortcut read', 'shortcut made'] and fg.load_config()['spool_reserve_pct'] == 5
+    assert ours and said == [(True, f'Your settings are kept: config.json was brought over from {old}.')] and f'brought over from {old}' in capsys.readouterr().out
+    (old / 'config.json').write_text('{"spool_reserve_pct": 2}'); install_on(monkeypatch, shortcut=str(old))
+    assert fg.install() == (True, []) and fg.load_config()['spool_reserve_pct'] == 5         # settings are there now: not again
+
+def set_up(monkeypatch):
+    """setup() on stand-ins for Tk, after install_on: the card it showed, as (headline, lines, tone)."""
+    import guard_ui
+    notes = []
+    monkeypatch.setattr(guard_ui, 'make_root', lambda: type('Root', (), {'quit': None, 'after': lambda *a: None, 'mainloop': lambda *a: None})())
+    monkeypatch.setattr(guard_ui.Card, 'note', lambda card, headline, lines, tone='muted', pid=None: notes.append((headline, lines, tone)))
+    assert fg.setup() == 0 and len(notes) == 1
+    return notes[0]
+
+def no_powershell():
+    raise fg.subprocess.CalledProcessError(1, ['powershell', '-NoProfile'], stderr='Cannot create type. Only core types are supported in this language mode.\n')
+
+@pytest.mark.windows
+def test_install_starts_the_guard_and_says_so_when_the_startup_shortcut_cannot_be_made(state, monkeypatch):
+    """PowerShell in Constrained Language Mode, blocked by a policy or not found: the shortcut cannot be made. Install.cmd
+    then did nothing at all: no card, no line in the log, and no guard for this session either."""
+    done = install_on(monkeypatch); monkeypatch.setattr(fg, 'make_shortcut', no_powershell)
+    headline, lines, tone = set_up(monkeypatch)
+    assert done == ['shortcut read', 'stop', 'start'] and (headline, tone) == ('Bambu Filament Guard runs, but is not fully installed', 'warn')
+    assert (False, 'It runs now but will not start with Windows: the Startup shortcut could not be made (PowerShell ended with code 1).') in lines
+    assert 'the Startup shortcut could not be made (PowerShell ended with code 1): Cannot create type. Only core types are supported in this language mode.' in (state / 'guard.log').read_text()
+
+@pytest.mark.windows
+def test_setup_says_on_its_card_whatever_else_kept_it_from_installing(state, monkeypatch):
+    """Install.cmd runs without a console: an error that left install as an error was seen by nobody."""
+    install_on(monkeypatch); monkeypatch.setattr(fg, 'start', lambda *a, **k: 1 / 0)
+    headline, lines, tone = set_up(monkeypatch)
+    assert (headline, tone) == ('Bambu Filament Guard did not start', 'danger') and (False, f"It could not be installed (ZeroDivisionError: division by zero). The log is {state / 'guard.log'}.") in lines
+    assert 'install failed: ZeroDivisionError: division by zero' in (state / 'guard.log').read_text()
+
+@pytest.mark.windows
+def test_a_guard_that_fails_while_it_starts_says_so_in_the_log(state, monkeypatch):
+    """The guard runs without a console (pythonw): Tk, the icon or a stop file that cannot be removed ended it at its
+    start with nothing anywhere."""
+    import guard_ui
+    def no_screen(): raise RuntimeError('no display')
+    monkeypatch.setattr(fg, 'sole_guard', lambda: 0); monkeypatch.setattr(guard_ui, 'make_root', no_screen)
+    assert fg.watch() == 1 and 'the guard has stopped on an error: RuntimeError: no display (test_guard.py, line ' in (state / 'guard.log').read_text()
+
+def uninstall_on(monkeypatch, tmp_path, shortcut, guard):
+    """uninstall() where the Startup shortcut points into the folder `shortcut` and a guard runs that was started from
+    the folder `guard` ('' = a guard up to 1.4.0, which did not note it; None = no guard runs): (is the shortcut still
+    there?, was the guard told to stop?)."""
+    lnk, stopped = tmp_path / 'Bambu Filament Guard.lnk', []
+    lnk.write_text(''); monkeypatch.setattr(fg, 'STARTUP_LNK', str(lnk)); monkeypatch.setattr(fg, 'shortcut_folder', lambda: shortcut)
+    (tmp_path / 'guard.pid').write_text('4242' if not guard else f'4242\n{guard}\n')
+    monkeypatch.setattr(fg, 'is_running', lambda: guard is not None and not stopped); monkeypatch.setattr(fg, 'stop', lambda *a, **k: (stopped.append(1), 'stopped')[1])
+    fg.uninstall()
+    return lnk.exists(), bool(stopped)
+
+def test_uninstall_leaves_the_shortcut_and_the_guard_of_a_copy_in_another_folder(state, tmp_path, monkeypatch, capsys):
+    """An update unzipped beside the old copy and installed: the one Startup shortcut now points into the new folder,
+    and the guard that runs is the new one. Uninstall.cmd in the old folder removed that shortcut and stopped that
+    guard, and said "stopped, shortcut removed": no guard ran from then on, nor after the next login."""
+    new = str(tmp_path / 'new' / 'app')
+    assert uninstall_on(monkeypatch, tmp_path, new, new) == (True, False)
+    out = capsys.readouterr().out
+    assert f'the Startup shortcut starts the guard in {new}, not this copy: left alone' in out and f'the running guard was started from {new}, not from this folder: left alone' in out
+    assert uninstall_on(monkeypatch, tmp_path, fg.HERE, fg.HERE) == (False, True)           # this folder's own: both go, as before
+    out = capsys.readouterr().out
+    assert 'shortcut removed' in out and 'stopped' in out and 'left alone' not in out
+    assert uninstall_on(monkeypatch, tmp_path, fg.HERE, None) == (False, False) and 'was not running' in capsys.readouterr().out
+    assert uninstall_on(monkeypatch, tmp_path, '', '') == (True, False)                       # neither can be told: neither is touched, and it says so
+    out = capsys.readouterr().out
+    assert 'the Startup shortcut could not be read: left alone' in out and 'it is not known from which folder the running guard was started: left alone' in out
+
+@pytest.mark.windows
+def test_the_guard_notes_the_folder_it_was_started_from(state, monkeypatch):
+    """For uninstall, which stops only the guard of its own folder: beside its process id in guard.pid, which nothing read."""
+    assert fg.guard_folder() == ''
+    started(monkeypatch)
+    assert (state / 'guard.pid').read_text() == f'{fg.os.getpid()}\n{fg.HERE}\n' and fg.guard_folder() == fg.HERE
+
+def old_guard(monkeypatch, state, stops_after):
+    """A guard that is already running, on a clock that only time.sleep moves: once the stop flag is there it stops
+    when the clock reaches `stops_after` seconds (None: never: its watcher hangs). install's shortcut and Bambu Studio
+    are stood in for. Returns (the clock, the times at which a new guard was started)."""
+    clock, started, flag = [0.0], [], state / 'stop'
+    monkeypatch.setattr(fg.time, 'sleep', lambda s: clock.__setitem__(0, clock[0] + s))
+    monkeypatch.setattr(fg, 'is_running', lambda: bool(started) or stops_after is None or clock[0] < stops_after or not flag.exists())
+    monkeypatch.setattr(fg, 'start', lambda *a, **k: started.append(clock[0]))
+    monkeypatch.setattr(fg, 'shortcut_folder', lambda: ''); monkeypatch.setattr(fg, 'make_shortcut', lambda: None); monkeypatch.setattr(fg, 'bs_conf', no_studio)
+    return clock, started
+
+def test_stopping_the_guard_tells_stopped_from_still_running_and_not_running(state, monkeypatch, capsys):
+    """A guard in the middle of a check reads the stop flag when that check ends. After 10 s, "stop" and "uninstall" took
+    one that was still running for one that was not, and said "was not running"."""
+    clock, _ = old_guard(monkeypatch, state, 4.0)
+    assert fg.stop() == 'stopped' and 4.0 <= clock[0] < 5.0 and (state / 'stop').exists()
+    assert fg.stop() == 'not running'
+    (state / 'stop').unlink(); clock, _ = old_guard(monkeypatch, state, 25.0)
+    assert fg.stop() == 'still running' and 10.0 <= clock[0] < 11.0 and (state / 'stop').exists()      # the flag stands: it stops when its check ends
+    (state / 'stop').unlink(); (state / 'guard.pid').write_text(f'4242\n{fg.HERE}\n'); old_guard(monkeypatch, state, 25.0)
+    assert fg.main(['stop']) == 0 and capsys.readouterr().out.strip() == 'still running: it stops when its current check ends'
+    (state / 'stop').unlink(); old_guard(monkeypatch, state, 25.0); fg.uninstall()
+    assert 'still running: it stops when its current check ends' in capsys.readouterr().out
+
+def test_install_waits_for_the_guard_that_runs_to_go_before_it_starts_its_own(state, monkeypatch, capsys):
+    """Updating while the old guard checks a printer that is off ("slice all": some 13 s a plate): install gave up
+    waiting after 10 s, started nothing because a guard was running, and said "watcher running". Seconds later the
+    old guard read the stop flag and went: no guard ran until the next login."""
+    clock, started = old_guard(monkeypatch, state, 40.0)
+    assert fg.main(['install']) == 0 and len(started) == 1 and 40.0 <= started[0] < 41.0 and 'watcher running' in capsys.readouterr().out
+
+def test_install_says_which_guard_runs_when_the_one_that_ran_does_not_go(state, monkeypatch, capsys):
+    """A guard whose watcher hangs never reads the stop flag. Install waits a minute, then leaves it running (the flag
+    is taken back: it must not stop later with nothing in its place), says that it is still the one that runs, and
+    exits 1, as it does when no guard runs at its end."""
+    (state / 'guard.pid').write_text('4242\nC:\\old\\app\n'); clock, started = old_guard(monkeypatch, state, None)
+    ours, said = fg.install()
+    assert (ours, started) == (False, []) and clock[0] >= 60.0 and not (state / 'stop').exists()
+    assert said == [(False, "The guard that was already running (from C:\\old\\app) has not stopped, and is still the one that runs. Quit it from its icon's menu, then open Install.cmd again.")]
+    (state / 'stop').unlink(missing_ok=True); old_guard(monkeypatch, state, None)
+    assert fg.main(['install']) == 1 and 'has not stopped' in capsys.readouterr().out
+    monkeypatch.setattr(fg, 'is_running', lambda: False)                                     # no guard before, and its own does not come up
+    ours, said = fg.install()
+    assert not ours and said == [(False, f"The guard did not start. The log may say why: {state / 'guard.log'}.")] and fg.main(['install']) == 1
+    assert 'watcher did NOT start' in capsys.readouterr().out
+
+def test_a_status_without_its_spools_is_not_judged(state, monkeypatch, capsys):
+    """A piece of the printer's report taken for the whole: every spool read as not loaded, the card said "not loaded",
+    and each amount entered by hand for an AMS tray was deleted as if the tray were empty. Such a status is answered
+    "did not report its spools", by a check and by "trays", and no entry ends on it."""
+    import guard_ledger as gl
+    running(monkeypatch, {'gcode_state': 'IDLE', 'ams': {'tray_now': '255', 'version': 4}})
+    gl.enter('SERIAL', {'label': 'A1', 'type': 'PLA', 'colour': '#0A2989'}, 640)
+    res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['error'] == 'the Bambu Lab H2D did not report its spools' and res['rows'] == [] and fg.exit_code(res) == 3
+    assert fg.load_state()['spools']['SERIAL']['A1']['grams'] == 640
+    assert fg.main(['trays']) == 0 and 'Bambu Lab H2D: did not report its spools' in capsys.readouterr().out
+    assert fg.load_state()['spools']['SERIAL']['A1']['grams'] == 640
+
+@pytest.mark.windows
+def test_the_self_test_does_not_count_the_spools_of_a_status_without_them(state, monkeypatch):
+    """A piece of a report: the self-test said "0 spool(s)" of it and ended the entered amounts; it says what is missing."""
+    import guard_ui, guard_ledger as gl
+    running(monkeypatch, {'gcode_state': 'IDLE', 'ams': {'tray_now': '255', 'version': 4}}); gl.enter('SERIAL', {'label': 'A1', 'type': 'PLA', 'colour': '#0A2989'}, 640)
+    monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None); monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {})
+    lines = fg.selftest(CFG)
+    assert (None, 'Bambu Lab H2D: it did not report its spools') in lines and fg.load_state()['spools']['SERIAL']['A1']['grams'] == 640
+
+def three_printers(monkeypatch, selected, status=ENOUGH):
+    """Bambu Studio knows two P1S and an H2D, in this order, and has `selected` selected. Returns the serials asked."""
+    asked = []
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'app': {'user_last_selected_machine': selected}, 'access_code': {'P1S-ONE-0001': 'code', 'P1S-TWO-0002': 'code', 'H2D-ONE-0003': 'code'}})
+    monkeypatch.setattr(fg, 'model_by_serial_prefix', lambda: {'P1S': 'Bambu Lab P1S', 'H2D': 'Bambu Lab H2D'})
+    monkeypatch.setattr(fg, 'printer_ip', lambda serial, *a, **k: 'printer'); monkeypatch.setattr(fg, 'read_status', lambda ip, serial, code: (asked.append(serial), status)[1])
+    return asked
+
+P1S_PLATE = dict(BLUE, printer_model='Bambu Lab P1S')
+
+def test_with_two_printers_of_one_model_the_answer_names_the_one_asked(state, monkeypatch):
+    """Two P1S: one holds a full spool, the job goes to the other. The answer said "Bambu Lab P1S" and nothing more, in
+    the report, the log and on the card: nothing showed that the other printer had answered."""
+    asked = three_printers(monkeypatch, 'P1S-TWO-0002'); res = fg.evaluate(P1S_PLATE, CFG, 'Vase')
+    assert asked == ['P1S-TWO-0002'] and res['printer']['name'] == 'Bambu Lab P1S (…0002)' and res['printer']['model'] == 'Bambu Lab P1S'
+    assert '\n  Bambu Lab P1S (…0002), IDLE' in fg.report_text(res) and fg.checking_text(fg.printer_for(P1S_PLATE)) == 'Checking the spools on the Bambu Lab P1S (…0002)…'
+    asked = three_printers(monkeypatch, 'H2D-ONE-0003'); res = fg.evaluate(P1S_PLATE, CFG, 'Vase')   # the printer selected is of another model:
+    assert asked == ['P1S-ONE-0001'] and res['printer']['name'] == 'Bambu Lab P1S (…0001)'           # the first P1S of Bambu Studio's configuration
+    res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert asked[-1] == 'H2D-ONE-0003' and res['printer']['name'] == 'Bambu Lab H2D' and '\n  Bambu Lab H2D, IDLE' in fg.report_text(res)   # the only one of its model: the model says it
+    monkeypatch.setattr(fg, 'printer_ip', lambda *a, **k: None)
+    assert fg.evaluate(P1S_PLATE, CFG, 'Vase')['error'].startswith('the Bambu Lab P1S (…0001) is not announcing itself')
+
+@pytest.mark.windows
+def test_the_card_names_the_printer_asked_where_two_are_of_one_model(state, monkeypatch):
+    """The one-line card and the line under the full card's table, idle and printing, name the printer that answered."""
+    three_printers(monkeypatch, 'P1S-TWO-0002'); res = fg.evaluate(P1S_PLATE, CFG, 'Vase')
+    assert card_shown(monkeypatch, res, brief=8)[0][-1] == '1 filament against the spools on the Bambu Lab P1S (…0002)'
+    assert card_shown(monkeypatch, res)[0][-1].startswith('Spools as the Bambu Lab P1S (…0002) reports them now;')
+    busy = dict(ENOUGH, gcode_state='RUNNING', subtask_name='Cube'); three_printers(monkeypatch, 'P1S-TWO-0002', busy)
+    assert 'Spools as the Bambu Lab P1S (…0002) reports them now' in card_shown(monkeypatch, fg.evaluate(P1S_PLATE, CFG, 'Vase'))[0][-1]
+
+def knows(monkeypatch, *serials):
+    """Bambu Studio holds an access code for these printers, and its list of printers names the P1S and the H2D."""
+    monkeypatch.setattr(fg, 'bs_conf', lambda: {'access_code': {s: 'code' for s in serials}})
+    monkeypatch.setattr(fg, 'model_by_serial_prefix', lambda: {'P1S': 'Bambu Lab P1S', 'H2D': 'Bambu Lab H2D'})
+    monkeypatch.setattr(fg, 'printer_ip', lambda *a, **k: 'printer'); monkeypatch.setattr(fg, 'read_status', lambda *a, **k: ENOUGH)
+
+def test_a_printer_whose_model_cannot_be_told_is_a_fault_that_shows(state, monkeypatch):
+    """Bambu Studio's list of printers has no entry for the serial of the user's printer (a model newer than the list):
+    no plate matched it, every check ended quiet, with no card, and the log said, untruly, that Bambu Studio holds no
+    access code for the plate's model."""
+    knows(monkeypatch, 'NEW-ONE-0001'); res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert not res.get('quiet') and fg.headline(res) == 'Filament could not be checked'
+    assert res['error'] == ("the guard cannot tell which model your printer …0001 is (Bambu Studio's list of printers does not name its serial number), "
+                            "so this plate, sliced for a Bambu Lab H2D, was not checked")
+    knows(monkeypatch, 'NEW-ONE-0001', 'H2D-ONE-0003')
+    assert fg.evaluate(BLUE, CFG, 'Benchy')['printer']['name'] == 'Bambu Lab H2D'              # a printer of the plate's model is known: that one is asked
+
+def test_a_plate_sliced_for_another_model_than_the_one_printer_known_is_answered_in_one_line(state, monkeypatch):
+    """One printer, and a plate sliced with another model's preset: nothing showed at all, which is what "enough" with
+    the one line turned off looks like. With several printers known and none of the plate's model it stays quiet."""
+    knows(monkeypatch, 'P1S-ONE-0001'); res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['quiet'] and res['line'] == 'Not checked: sliced for a Bambu Lab H2D, your printer is a Bambu Lab P1S' and fg.exit_code(res) == 3
+    assert res['error'] == 'not checked: sliced for a Bambu Lab H2D, your printer is a Bambu Lab P1S'
+    knows(monkeypatch, 'P1S-ONE-0001', 'P1S-TWO-0002'); res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['quiet'] and 'line' not in res and res['error'] == 'Bambu Studio holds no LAN access code for a Bambu Lab H2D'
+    knows(monkeypatch); res = fg.evaluate(BLUE, CFG, 'Benchy')
+    assert res['quiet'] and 'line' not in res
+
+@pytest.mark.windows
+def test_the_one_line_for_a_plate_that_is_not_checked_shows_as_the_enough_line_does(state, tmp_path, monkeypatch):
+    """After a slice, held while Bambu Studio is minimised; not beside "Send print job"; not with the one line turned
+    off; and the card with its reason when the answer is asked for."""
+    f = slice_file(tmp_path, gcode()); plate = fg.parse_plate(f.read_text()); knows(monkeypatch, 'P1S-ONE-0001')
+    guard = guard_with(); guard.take_slice(str(f), plate); run_queued(guard)
+    assert guard.card.shown == [('line', 'Not checked: sliced for a Bambu Lab H2D, your printer is a Bambu Lab P1S', True)]
+    res = guard.last; guard = guard_with(); guard.deliver(res, beside=4321)
+    assert guard.card.shown == []                                                              # beside "Send print job" only a warning is worth a card
+    guard.deliver(res, full=True); assert guard.card.shown == [('show', 0)]                    # asked for: the card, with the reason
+    guard = guard_with(dict(CFG, ok_seconds=0)); guard.deliver(res)
+    assert guard.card.shown == []                                                              # quiet was asked for
+
+@pytest.mark.windows
+def test_the_self_test_fails_on_a_printer_whose_model_cannot_be_told(state, monkeypatch):
+    """It read that printer's spools and called it working, under the name "unknown model"; the other printer is still asked."""
+    import guard_ui
+    knows(monkeypatch, 'NEW-ONE-0001', 'H2D-ONE-0003'); monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None); monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {})
+    lines = fg.selftest(CFG)
+    assert (False, "The printer …0001: the guard cannot tell which model it is (Bambu Studio's list of printers does not name its serial number): plates sliced for it are not checked") in lines
+    assert (True, 'Bambu Lab H2D: 2 spool(s), 2 with a known amount') in lines and not any('unknown model' in text for mark, text in lines)
+
+def announcements(monkeypatch, *datagrams):
+    """discover() on a stand-in for the two UDP sockets it listens on: these datagrams arrive on port 2021, one a look."""
+    waiting = list(datagrams)
+    class Socket:
+        def __init__(self, *a): self.port = None
+        def setsockopt(self, *a): pass
+        def settimeout(self, seconds): pass
+        def close(self): pass
+        def bind(self, where): self.port = where[1]
+        def recvfrom(self, size):
+            if self.port != 2021 or not waiting: raise OSError('timed out')
+            return waiting.pop(0), ('192.0.2.99', 2021)
+    monkeypatch.setattr(fg.socket, 'socket', Socket)
+    return fg.discover(seconds=0.2)
+
+def notice(usn, location, nt):
+    return f'NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nServer: UPnP/1.0\r\nLocation: {location}\r\nNT: {nt}\r\nUSN: {usn}\r\n\r\n'.encode()
+
+def test_only_a_bambu_printers_announcement_is_taken_for_a_printer(monkeypatch):
+    """Every datagram with a USN line was taken: a television or a router announcing itself on the same ports was kept
+    in the state file as a printer's address."""
+    found = announcements(monkeypatch, notice('uuid:a-television', 'http://192.0.2.9:8080/desc.xml', 'urn:schemas-upnp-org:device:MediaRenderer:1'),
+                          notice('SERIAL', '192.0.2.50', 'urn:bambulab-com:device:3dprinter'), b'not an announcement at all')
+    assert found == {'SERIAL': '192.0.2.50'}
+
+def test_a_printer_that_is_not_heard_is_not_only_asked_whether_it_is_on(state, monkeypatch, capsys):
+    """Windows Firewall keeping the printer's announcements from the guard gives the same silence as a printer that is
+    off: the answer names both, and the address that can be given in config.json, whose shape no document showed."""
+    running(monkeypatch, ENOUGH); monkeypatch.setattr(fg, 'printer_ip', lambda *a, **k: None)
+    said = ('is not announcing itself on this network. Is it on? If it is, Windows Firewall may keep its announcements from the guard: allow the guard on private networks, '
+            'or give the printer\'s address in config.json: {"printers": {"<serial>": {"ip": "<address>"}}}')
+    assert fg.evaluate(BLUE, CFG, 'Benchy')['error'] == f'the Bambu Lab H2D {said}'
+    assert fg.main(['trays']) == 0 and f'Bambu Lab H2D: {said[3:]}' in capsys.readouterr().out
+
+def a_link(monkeypatch, heard):
+    """printer_link on a stand-in for paho-mqtt: the client it made, which keeps what it sent; `heard` gets every report."""
+    mods = {name: type(sys)(name) for name in ('paho', 'paho.mqtt', 'paho.mqtt.client')}
+    class Client:
+        def __init__(self, *a, **k): self.sent = []
+        def subscribe(self, topic): self.sent.append(('subscribe', topic))
+        def publish(self, topic, payload): self.sent.append(('publish', topic, payload))
+        def __getattr__(self, name): return lambda *a, **k: None
+    mods['paho'].mqtt, mods['paho.mqtt'].client, mods['paho.mqtt.client'].Client = mods['paho.mqtt'], mods['paho.mqtt.client'], Client
+    mods['paho.mqtt.client'].CallbackAPIVersion = type('CallbackAPIVersion', (), {'VERSION2': 2})
+    for name, mod in mods.items(): monkeypatch.setitem(sys.modules, name, mod)
+    return fg.printer_link('printer', 'SERIAL', 'code', 'a-test', heard.append)
+
+def test_a_message_that_is_json_but_no_object_does_not_end_the_link(monkeypatch):
+    """A payload such as [1, 2] raised AttributeError in the link's own thread, which ended it: the read then failed
+    with "did not report its status" although the whole report followed."""
+    heard = []; link = a_link(monkeypatch, heard); message = lambda payload: type('Message', (), {'payload': payload})()
+    for payload in (b'[1, 2]', b'null', b'7', b'"text"', b'not json', b'{"print": [1]}', b'{"info": {}}'): link.on_message(link, None, message(payload))
+    link.on_message(link, None, message(b'{"print": {"gcode_state": "IDLE"}}'))
+    assert heard == [{'gcode_state': 'IDLE'}]
+    link.on_connect(link, None, {}, 0)
+    assert link.sent == [('subscribe', 'device/SERIAL/report'), ('publish', 'device/SERIAL/request', '{"pushing": {"sequence_id": "0", "command": "pushall"}}')]   # and it sends the printer nothing else
+
+def refusing(monkeypatch, why):
+    """read_status against a printer that refuses the connection, for the reason paho names (paho 2) or numbers (paho 1)."""
+    def link(ip, serial, code, client_id, on_report, on_refused=None):
+        on_refused(why); return type('Client', (), {'loop_stop': lambda self: None, 'disconnect': lambda self: None})()
+    monkeypatch.setattr(fg, 'printer_link', link)
+    with pytest.raises(fg.PrinterError) as e: fg.read_status('printer', 'SERIAL', 'code')
+    return str(e.value)
+
+def test_a_refusal_that_is_not_about_the_access_code_is_not_called_one(monkeypatch):
+    """A printer that is still starting refuses with "server unavailable". Every refusal was reported as "refused the
+    access code Bambu Studio holds for it", which sends the user to an access code that is right."""
+    for why in ('Bad user name or password', 'Not authorized', '4', '5'):
+        assert refusing(monkeypatch, why) == 'printer refused the access code Bambu Studio holds for it'
+    assert refusing(monkeypatch, 'Server unavailable') == 'printer refused the connection (Server unavailable)'
+    assert refusing(monkeypatch, '3') == 'printer refused the connection (3)'
+
+def test_trays_ends_in_words_whatever_it_meets(state, monkeypatch, capsys):
+    """"trays" where Bambu Studio was never installed ended in a FileNotFoundError traceback; with no access code in its
+    configuration it printed nothing at all; and one printer's error cost the printers after it their answer."""
+    monkeypatch.setattr(fg, 'bs_conf', no_studio)
+    assert fg.main(['trays']) == 1 and capsys.readouterr().out == "Bambu Studio's configuration cannot be read (FileNotFoundError): is Bambu Studio installed for this Windows user?\n"
+    knows(monkeypatch)
+    assert fg.main(['trays']) == 1 and capsys.readouterr().out == 'Bambu Studio holds no LAN access code for a printer: open the printer once on its Device tab\n'
+    knows(monkeypatch, 'P1S-ONE-0001', 'H2D-ONE-0003')
+    def read(ip, serial, code):
+        if serial.startswith('P1S'): raise RuntimeError('a report the guard did not foresee')
+        return ENOUGH
+    monkeypatch.setattr(fg, 'read_status', read)
+    assert fg.main(['trays']) == 0
+    out = capsys.readouterr().out
+    assert 'Bambu Lab P1S: RuntimeError: a report the guard did not foresee\n' in out and 'Bambu Lab H2D (printer), IDLE\n  A1 ' in out
+
+@pytest.mark.windows
+def test_the_self_test_ends_in_lines_whatever_it_meets_and_fails_when_no_printer_answered(state, monkeypatch, capsys):
+    """The self-test from the icon runs without a console: an error it did not expect of one printer showed nothing at
+    all. And with no printer reached it said "the guard works" and exited 0, against "Exit code 1 = no"."""
+    import guard_ui
+    monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None); monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {})
+    knows(monkeypatch, 'P1S-ONE-0001', 'H2D-ONE-0003')
+    def read(ip, serial, code):
+        if serial.startswith('P1S'): raise RuntimeError('a report the guard did not foresee')
+        return ENOUGH
+    monkeypatch.setattr(fg, 'read_status', read); lines = fg.selftest(CFG)
+    assert (False, 'Bambu Lab P1S: RuntimeError: a report the guard did not foresee') in lines and (True, 'Bambu Lab H2D: 2 spool(s), 2 with a known amount') in lines
+    assert not any('No known printer answered' in text for mark, text in lines) and lines[-1][1].startswith('It ')        # one answered; and the self-test went on to its end
+    monkeypatch.setattr(fg, 'printer_ip', lambda *a, **k: None); lines = fg.selftest(CFG)                                     # both are off
+    assert [mark for mark, text in lines if 'not announcing itself' in text] == [None, None]
+    assert (False, 'No known printer answered: a plate cannot be checked until one does') in lines and fg.main(['selftest']) == 1
+    assert '[!!] No known printer answered' in capsys.readouterr().out
+    monkeypatch.setattr(fg, 'load_state', lambda: 1 / 0); lines = fg.selftest(CFG)
+    assert lines[-1] == (False, 'The self-test could not finish (ZeroDivisionError: division by zero)') and lines[0][0] is True
+
+def test_install_starts_the_guard_whatever_becomes_of_its_list_of_printers(state, monkeypatch, capsys):
+    """Install prints where each known printer is, before it starts the guard. An error there other than a missing
+    Bambu Studio (a configuration of another shape, a state file held elsewhere) ended the install before the guard
+    was started."""
+    done = install_on(monkeypatch); monkeypatch.setattr(fg, 'bs_conf', lambda: ['not', 'a', 'configuration'])
+    assert fg.install() == (True, []) and done[-1] == 'start'
+    assert 'the printers could not be listed (AttributeError)' in capsys.readouterr().out
