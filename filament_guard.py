@@ -1065,7 +1065,8 @@ class Guard:
         no result of a check is said in the log, once in a run; so is a value that is no list, read as the default."""
         on = self.cfg.get('popup_on')
         names = [str(s).upper() for s in on] if isinstance(on, list) else list(DEFAULTS['popup_on'])
-        odd = [f'names "{s}", which is no result of a check ({", ".join(SEVERITY)})' for s in names if s not in SEVERITY] if isinstance(on, list) else ['is not a list of results: the default is used']
+        odd = ([f'names "{s}", which is no result of a check ({", ".join(SEVERITY)})' for s in names if s not in SEVERITY] if isinstance(on, list)
+               else ['is not a list of results: the default is used'])
         for what in odd:
             if what not in self.told: self.told.add(what); log(f'popup_on in config.json {what}')
         return names
@@ -1188,8 +1189,9 @@ class Guard:
     def check_newest(self, pid=None, beside=None):
         """From the icon: the newest slice, as a full card. At "Send print job" (beside): every plate of the project the
         sending Bambu Studio has sliced, because which of them is being sent cannot be read; the answer that most asks
-        to be seen (rank) shows, when it is a warning, and names its plate. Of more than SEND_MOST plates the ones sliced last are checked, and
-        what shows says how many were not: silence beside the dialog means every sliced plate is fine."""
+        to be seen (rank) shows, when it is a warning, and names its plate. Of more than SEND_MOST plates the ones
+        sliced last are checked, and what shows says how many were not: silence beside the dialog means every sliced
+        plate is fine."""
         import guard_ui
         key = None if beside else 'icon'                      # beside the dialog only a warning shows: no line while it is checked
         if key in self.busy: self.checking(key, self.busy[key][1]); return     # asked again while its check runs: it says so, and starts nothing
@@ -1225,11 +1227,12 @@ class Guard:
         def then(found):
             res, unread, out = found
             try:
-                if res is not None and older: res['unchecked'] = older; log(f"{res['title']}: {len(plates)} sliced plates, of which the {older} sliced first were not checked when \"Send print job\" opened")
+                if res is not None and older:
+                    res['unchecked'] = older; log(f"{res['title']}: {len(plates)} sliced plates, of which the {older} sliced first were not checked when \"Send print job\" opened")
                 if beside and not guard_ui.visible(beside):                       # the dialog has closed meanwhile, as after a quick click on Send:
                     if res is not None and self.rank(res)[0]: self.deliver(res)   # a warning found is still one, and shows as after a slice
                 elif res is not None and self.deliver(res, full=not beside, beside=beside): pass
-                elif res is not None and older and not self.standing_warning():           # nothing to warn of among those checked, here or in the corner: the rest still has to be said
+                elif res is not None and older and not self.standing_warning():   # nothing to warn of among those checked, and no warning standing: the rest still has to be said
                     self.card.note('Not every plate was checked', [
                         (None, f"{res['title']} has {len(plates)} sliced plates. The {SEND_MOST} sliced last were checked now, with nothing to warn of; "
                                f"the {older} sliced before them {'were' if older != 1 else 'was'} not checked."),
@@ -1282,7 +1285,8 @@ class Guard:
         try: kept = aside in guard_learn.forget()
         except OSError as e:
             log(f'what was learned could not be forgotten: {e.__class__.__name__}: {e}')
-            self.card.note('What was learned could not be forgotten', [(False, f'Its file could not be written ({e.__class__.__name__}): nothing was changed. Try again in a moment.')], 'danger'); return
+            self.card.note('What was learned could not be forgotten',
+                           [(False, f'Its file could not be written ({e.__class__.__name__}): nothing was changed. Try again in a moment.')], 'danger'); return
         self.card.note('What was learned is forgotten', [(None, 'The guard learns again from the next prints it follows.')]
                        + ([(None, f'What it had learned is kept as {aside}: one copy, until something is forgotten again.')] if kept else []))
 

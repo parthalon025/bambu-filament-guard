@@ -220,7 +220,8 @@ class Card:
         self.one_line = bool(brief)
         self._label(w, fg.headline(res), tone_of(res), 12, True, row=1, column=0)
         n = res.get('unchecked') or 0                                        # at "Send print job", of a project with more plates than are checked there
-        more = (f" {n} older plate{'s' if n != 1 else ''} of the project {'were' if n != 1 else 'was'} not checked: at \"Send print job\" only the {fg.SEND_MOST} sliced last are." if n else '') + age_text(res)
+        more = (f" {n} older plate{'s' if n != 1 else ''} of the project {'were' if n != 1 else 'was'} not checked: "
+                f'at "Send print job" only the {fg.SEND_MOST} sliced last are.' if n else '') + age_text(res)
         if brief:
             line = tk.Frame(w, bg=t['surface']); line.grid(row=2, column=0, sticky='ew'); line.columnconfigure(0, weight=1)
             p = res['printer']
@@ -341,9 +342,7 @@ class Card:
             result.configure(text='' if grams is None else f'{grams:.0f} g of filament' + ('' if tare() else ': nothing taken off for the spool'))
             wrong.configure(text=''); del doubted[:]                        # a number changed: asked anew
         scale.trace_add('write', show); spool.trace_add('write', show); show()
-        def done(grams):
-            """Stores the amount, then closes: a window gone before its amount was stored took the weight typed with it
-            when the state file was held elsewhere. Not stored, it stays open and says so."""
+        def done(grams):                                                    # stored first, closed after: closed first, the window took the weight typed with it when the state file was held elsewhere
             try: self.act('weigh' if weigh else 'amount', res, (tray, grams))
             except OSError as e: wrong.configure(text=f'Not saved: {e if isinstance(e, fg.StateBusy) else e.__class__.__name__}. Save again in a moment.'); return False
             d.destroy(); return True
