@@ -228,7 +228,12 @@ def forget(label=None, printer=None, names=None):
     told (no such tray, or which printer's)."""
     with fg.state_lock():
         history, names = load(), names or {}
-        if label is None: what = 'everything learned'; history = {}
+        if label is None:
+            # The whole history is set aside, not destroyed: it takes a spool run dry and weeks of prints to learn, and
+            # went at one click in the icon's menu. One copy, replaced each time, and only by a history that holds something.
+            what, aside, whole = 'everything learned', path() + '.forgotten', fg.read_json(path(), {})
+            if whole: fg.write_json(aside, whole, separators=(',', ':')); what += f', kept aside as {aside},'
+            history = {}
         else:
             serial = whose(history, label, printer, names)
             del history[serial][label]

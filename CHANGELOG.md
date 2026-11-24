@@ -17,6 +17,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - The reserve's share of a spool's full weight (3 %) is taken from the largest spool the filament could be printed from, not from the fullest one. With a 250 g and a 1 kg spool of one filament loaded, that share is 30 g whichever is the fullest, so a check can be "tight" where it was "enough".
 - No weigh-in is offered while a job is on the printer: the readings are moving then.
 - The window for a spool's amount ("Amount in …", "Weigh C3…") takes what the scale shows and what the empty spool weighs, and takes one from the other: the filament shows as you type. It starts with the empty spool's weight entered last (`empty_spool_g`, 250 g at first); 0 there is the filament weighed alone, as before.
+- "Forget what was learned" asks first, on a card with "Forget" and "Keep", and has moved from beside Quit into the icon's settings: one slip of the mouse emptied what a spool run dry and weeks of prints had taught. Forgetting everything, there or with `learned --forget`, keeps the history as it was as `learned.json.forgotten` beside `learned.json`: one copy, replaced the next time, and the card and the command say where it is.
 
 ### Fixed
 

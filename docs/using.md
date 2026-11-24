@@ -45,7 +45,7 @@ When the guard starts, the first time Bambu Studio runs it shows one line, "Bamb
 
 ## The icon and its settings
 
-Its colour and tooltip are the last result, with its project and plate; while a warning's card stands they stay that warning's. A click shows that result again; before there is one, it checks the newest slice. A click while that check runs shows the "Checking…" line again and starts no second check. The menu: check the newest slice now, pause, self-test, the log, forget what was learned, and the settings:
+Its colour and tooltip are the last result, with its project and plate; while a warning's card stands they stay that warning's. A click shows that result again; before there is one, it checks the newest slice. A click while that check runs shows the "Checking…" line again and starts no second check. The menu: check the newest slice now, pause, self-test, the log, and the settings:
 
 - One line when there is enough (`ok_seconds`)
 - Warn when a colour is not loaded / when a spool's amount is unknown (`popup_on`: the results that open the full card. "Not enough" and "not loaded" open it whatever that list holds, and one such filament is enough, whatever the others are.)
@@ -54,6 +54,7 @@ Its colour and tooltip are the last result, with its project and plate; while a 
 - Learn from prints, tray by tray (`learn`, on; see [Learning](learning.md))
 - Measure the reserve from past prints (experimental) (`measured_reserve`, off; see [Learning, the measured reserve](learning.md#the-measured-reserve) before turning it on)
 - Start automatically
+- Forget what was learned…: asks first, on a card with "Forget" and "Keep". Learning then starts again from nothing; what was learned is kept beside it as `learned.json.forgotten`, one copy, replaced the next time something is forgotten (see [Learning](learning.md))
 
 Settings are saved to `config.json` beside the script, which holds only what was changed. The keys, their defaults and their meaning are `DEFAULTS` at the top of [`filament_guard.py`](../filament_guard.py).
 

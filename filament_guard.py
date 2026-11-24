@@ -1253,9 +1253,24 @@ class Guard:
         if self.cfg['ok_seconds'] and not self.card.is_open():
             self.card.line(f'Bambu Filament Guard {VERSION} is watching for sliced plates', 'ok', self.cfg['ok_seconds'], pid, hold=True)
 
-    def forget_learned(self):
+    def forget_learned(self, sure=False):
+        """From the icon's menu. It asks first, on a card, and forgets when "Forget" is chosen there (sure): one slip of the
+        mouse beside Quit once emptied what a spool run dry and weeks of prints had taught. The card that confirms says
+        where guard_learn.forget has kept the history as it was."""
         import guard_learn
-        guard_learn.forget(); self.card.note('What was learned is forgotten', [(None, 'The guard learns again from the next prints it follows.')])
+        if not sure:
+            self.card.note('Forget what was learned?', [
+                (None, 'What the guard learned of every tray, from the prints it followed, is set aside, and it starts again from nothing.'),
+                (None, 'Until it has learned again, a tray whose reading runs high is counted as it reads.')],
+                buttons=[('Forget', lambda: self.forget_learned(True)), ('Keep', self.card.close)])
+            return
+        aside = guard_learn.path() + '.forgotten'
+        try: kept = aside in guard_learn.forget()
+        except OSError as e:
+            log(f'what was learned could not be forgotten: {e.__class__.__name__}: {e}')
+            self.card.note('What was learned could not be forgotten', [(False, f'Its file could not be written ({e.__class__.__name__}): nothing was changed. Try again in a moment.')], 'danger'); return
+        self.card.note('What was learned is forgotten', [(None, 'The guard learns again from the next prints it follows.')]
+                       + ([(None, f'What it had learned is kept as {aside}: one copy, until something is forgotten again.')] if kept else []))
 
     def show_last(self):
         if self.last: self.deliver(self.last, full=True)

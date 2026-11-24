@@ -277,12 +277,17 @@ class Card:
         # unseen, and a note that failed before this (the state file held elsewhere) left a warning that never showed.
         if not res['error'] and res.get('weigh'): self.act('asked', res, res['weigh'])
 
-    def note(self, headline, lines, tone='muted', pid=None, beside=None):
-        """A card that says something other than a result: the self-test, the welcome after installing. beside: as for show."""
+    def note(self, headline, lines, tone='muted', pid=None, beside=None, buttons=()):
+        """A card that says something other than a result: the self-test, the welcome after installing. beside: as for show.
+        buttons: [(text, what it does)] under the lines, for a card that asks before something is done."""
+        import tkinter as tk
         w = self._open(pid, beside); self.one_line = False
         self._label(w, headline, tone, 12, True, row=1, column=0, pady=(0, SPACE))
         for i, (mark, text) in enumerate(lines):
             self._label(w, {True: '✓  ', False: '✗  ', None: '–  '}[mark] + text, {True: 'text', False: 'danger', None: 'muted'}[mark], 9, wrap=620, row=2 + i, column=0)
+        if buttons:
+            bar = tk.Frame(w, bg=self.t['surface']); bar.grid(row=2 + len(lines), column=0, sticky='w', pady=(2 * SPACE, 0))
+            for col, (text, then) in enumerate(buttons): self._button(bar, text, then, row=0, column=col, padx=(0, SPACE))
         self._place()
 
     def line(self, text, tone='muted', seconds=0, pid=None, hold=False):
@@ -387,12 +392,12 @@ class Tray:
                 option('Measure the reserve from past prints (experimental)', 'measured_reserve', True, False),
                 Item('Reserve', Menu(*[Item(f'{p} % of the full spool', do(lambda p=p: g.set_option('spool_reserve_pct', p)),
                                             checked=lambda item, p=p: g.cfg['spool_reserve_pct'] == p, radio=True) for p in (2, 3, 5)])),
-                Item('Start automatically', do(g.toggle_autostart), checked=lambda item: os.path.exists(fg.STARTUP_LNK)))),
+                Item('Start automatically', do(g.toggle_autostart), checked=lambda item: os.path.exists(fg.STARTUP_LNK)),
+                Item('Forget what was learned…', do(g.forget_learned)))),      # asks first, and here: beside Quit, one slip of the mouse emptied the history
             Item('Pause checks', do(g.toggle_pause), checked=lambda item: g.paused),
             Menu.SEPARATOR,
             Item('Self-test', do(g.run_selftest)),
             Item('Open log', do(g.open_log)),
-            Item('Forget what was learned', do(g.forget_learned)),
             Item('Quit', do(g.quit)))
         self.icon = pystray.Icon(fg.APP, icon_image('muted'), 'Bambu Filament Guard', menu)
         self.icon.run_detached()

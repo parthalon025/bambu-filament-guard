@@ -755,3 +755,71 @@ def test_a_pause_between_looks_that_is_no_positive_number_is_the_default(state, 
     guard = guard_with(dict(CFG, poll_seconds='2')); watcher = threading.Thread(target=guard.watch_slices, daemon=True); watcher.start()
     time.sleep(0.3); alive = watcher.is_alive(); guard.stopping.set(); watcher.join(5)
     assert alive and not watcher.is_alive() and Watcher.rounds == [1]
+
+def learned_something(reading=20.0):
+    """A history with one spool seen still feeding in C3 at this reading; returns the file's text."""
+    gn.keep('SERIAL', 'C3', 'seen', {'at': time.time(), 'reading': reading})
+    return open(gn.path()).read()
+
+def test_forgetting_everything_sets_the_history_aside_and_keeps_one_copy(state, capsys):
+    """learned.json was overwritten with nothing, from the menu's one click and from `learned --forget`. What a spool
+    run dry and weeks of prints taught is kept beside it as learned.json.forgotten: one copy, replaced each time, and
+    not by a history that holds nothing."""
+    first = learned_something(20.0)
+    assert gn.forget() == f"everything learned, kept aside as {gn.path()}.forgotten," and gn.load() == {}
+    assert (state / 'learned.json.forgotten').read_text() == first
+    gn.forget(); assert (state / 'learned.json.forgotten').read_text() == first             # nothing learned since: the copy stays
+    second = learned_something(35.0)
+    assert fg.main(['learned', '--forget']) == 0 and gn.load() == {} and (state / 'learned.json.forgotten').read_text() == second != first
+    assert capsys.readouterr().out == f'everything learned, kept aside as {gn.path()}.forgotten, is forgotten\n'
+    assert fg.main(['learned', '--forget']) == 0 and capsys.readouterr().out == 'everything learned is forgotten\n'
+    learned_something(); gn.keep('SERIAL', 'B2', 'seen', {'at': time.time(), 'reading': 5.0})
+    gn.forget('B2'); assert (state / 'learned.json.forgotten').read_text() == second and 'C3' in gn.load()['SERIAL']   # one tray forgotten: as before
+
+@pytest.mark.windows
+def test_forget_what_was_learned_asks_first_and_says_where_the_copy_is(state, monkeypatch):
+    """One slip of the mouse beside Quit emptied the history, and the card said so afterwards."""
+    was = learned_something(); guard = guard_with(); guard.forget_learned()
+    assert guard.card.shown == [('note', 'Forget what was learned?')] and list(guard.card.buttons) == ['Forget', 'Keep'] and open(gn.path()).read() == was
+    guard.card.buttons['Keep'](); assert guard.card.shown[-1] == ('close',) and open(gn.path()).read() == was and not (state / 'learned.json.forgotten').exists()
+    guard.forget_learned(); guard.card.buttons['Forget']()
+    assert guard.card.shown[-1] == ('note', 'What was learned is forgotten') and gn.load() == {} and (state / 'learned.json.forgotten').read_text() == was
+    assert guard.card.said == ['The guard learns again from the next prints it follows.',
+                               f"What it had learned is kept as {state / 'learned.json.forgotten'}: one copy, until something is forgotten again."]
+    guard.forget_learned(); guard.card.buttons['Forget']()                                   # nothing learned since: no copy was made, and none is promised
+    assert guard.card.said == ['The guard learns again from the next prints it follows.']
+    was = learned_something(); monkeypatch.setattr(fg, 'write_json', lambda *a, **k: (_ for _ in ()).throw(fg.StateBusy('learned.json could not be written: another program holds it')))
+    guard.forget_learned(); guard.card.buttons['Forget']()                                   # the file held elsewhere: said, and nothing lost
+    assert guard.card.shown[-1] == ('note', 'What was learned could not be forgotten') and open(gn.path()).read() == was
+
+@pytest.mark.windows
+def test_a_note_can_ask_with_buttons(monkeypatch):
+    import guard_ui
+    made, did = tk_stand_in(monkeypatch), []
+    def opened(card, pid=None, beside=None, hold=False):
+        card.win, card.t, card.owner, card.beside, card.held, card.closes_after = sys.modules['tkinter'].Toplevel(), guard_ui.THEMES['dark'], None, None, False, 0
+        return card.win
+    monkeypatch.setattr(guard_ui.Card, '_open', opened); monkeypatch.setattr(guard_ui.Card, '_place', lambda card: None)
+    guard_ui.Card(None).note('Forget what was learned?', [(None, 'It is set aside.')], buttons=[('Forget', lambda: did.append('forget')), ('Keep', lambda: did.append('keep'))])
+    buttons = {w.k['text']: w.k['command'] for w in made if type(w).__name__ == 'Button'}
+    assert list(buttons) == ['Forget', 'Keep'] and [w.k['text'] for w in made if type(w).__name__ == 'Label'] == ['Forget what was learned?', '–  It is set aside.']
+    buttons['Keep'](); buttons['Forget'](); assert did == ['keep', 'forget']
+
+@pytest.mark.windows
+def test_forget_what_was_learned_is_among_the_settings_away_from_quit(state, monkeypatch):
+    import guard_ui
+    class Item:
+        def __init__(self, text, action=None, **how): self.text, self.action, self.how = text, action, how
+    class Menu:
+        SEPARATOR = Item('-')
+        def __init__(self, *items): self.items = items
+    pystray = type(sys)('pystray'); pystray.MenuItem, pystray.Menu = Item, Menu
+    pystray.Icon = type('Icon', (), {'__init__': lambda self, name, image, title, menu: setattr(self, 'menu', menu), 'run_detached': lambda self: None})
+    monkeypatch.setitem(sys.modules, 'pystray', pystray); monkeypatch.setattr(guard_ui, 'icon_image', lambda tone: None)
+    guard = guard_with(dict(CFG, popup_on=['short', 'colour'])); menu = guard_ui.Tray(guard).icon.menu
+    top = [i.text for i in menu.items if isinstance(i.text, str)]; settings = next(i.action for i in menu.items if i.text == 'Settings')
+    assert top[-4:] == ['-', 'Self-test', 'Open log', 'Quit'] and [i.text for i in settings.items][-1] == 'Forget what was learned…'
+    forget = settings.items[-1]; forget.action(None, forget); guard.todo.get_nowait()()
+    assert guard.card.shown == [('note', 'Forget what was learned?')]
+    ticks = {i.text: i.how['checked'](i) for i in settings.items if i.text.startswith('Warn when')}
+    assert ticks == {'Warn when a colour is not loaded': True, "Warn when a spool's amount is unknown": False}   # as the guard reads popup_on: in capitals
