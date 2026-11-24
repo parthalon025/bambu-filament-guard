@@ -536,6 +536,7 @@ def test_an_odd_history_file_costs_neither_the_check_nor_what_else_was_learned(s
     c3['changes'] = [{'at': 1.0, 'found': 400.0, 'job': 'Benchy'}]
     h['SERIAL']['B1'] = {'dry': [{'at': 100.0, 'job': 'Cube', 'reading': 12.0, 'layer': 4, 'needed': 3.0, 'spool': dict(spool, id='A SPOOL IN B1'), 'print_error': None, 'hms': None}]}
     assert gn.sift(json.loads(json.dumps(h))) == (h, []) and [len(c3[kind]) for kind in gn.LIMITS] == [3, 2, 3, 1, 1]   # as written, all of it is well formed
+    assert gn.well_formed('dry', {'at': 1.0, 'reading': 20.0, 'spool': {'id': 7, 'fid': 3}}) and not gn.well_formed('dry', {'at': 1.0, 'reading': 20.0, 'spool': {'id': [7]}})   # a spool is told by any plain value
     running(monkeypatch, blue_reads(110)); seen = {'SERIAL': blue_reads(110)}
     def checked(history):
         (state / 'learned.json').write_text(json.dumps(history))

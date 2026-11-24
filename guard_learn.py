@@ -147,8 +147,8 @@ def well_formed(kind, x):
     pass."""
     if not isinstance(x, dict): return False
     spool, opt = x.get('spool'), lambda key, test=number: x.get(key) is None or test(x[key])
-    if spool is not None and not (isinstance(spool, dict) and all(spool.get(k) is None or isinstance(spool[k], str) for k in ('id', 'type', 'colour', 'fid'))
-                                  and (spool.get('weight') is None or number(spool['weight']))): return False
+    if spool is not None and not (isinstance(spool, dict) and not any(isinstance(spool.get(k), (dict, list)) for k in ('id', 'type', 'colour', 'fid'))
+                                  and (spool.get('weight') is None or number(spool['weight']))): return False   # what tells spools apart: anything that can be compared
     if kind == 'jobs':
         sliced, samples, score = x.get('sliced'), x.get('samples'), x.get('score')
         return (('at' not in x or moment(x['at'])) and isinstance(sliced, dict) and number(sliced.get('printed')) and number(sliced.get('purge'))
@@ -774,7 +774,7 @@ def report(history, names=None, learning=True, cfg=None):
             lines.append(f"  printer: readings fall {p['rho']:.3f} g per sliced gram over {many(p['ratios'], 'print')} (ratios clipped to {p['clip'][0]:.3f}..{p['clip'][1]:.3f}); "
                          + ('trays are drawn to it fully (they cannot be told apart)' if p['k_rho'] is None else f"a tray's own prints count against {p['k_rho']:.1f} of the printer's"))
             lines.append('  by filament product (a report only): ' + '; '.join(f"{fid} {r:.3f} over {n} print{'s' if n != 1 else ''}" + (f" ({ci[0]:.3f}..{ci[1]:.3f})" if ci else '')
-                                                                              for fid, (r, n, ci) in sorted(p['products'].items())))
+                                                                              for fid, (r, n, ci) in sorted(p['products'].items(), key=lambda x: str(x[0]))))
         for label, h in sorted(by_tray.items()):
             t, jobs, dries = est['trays'][label], h.get('jobs', []), h.get('dry', [])
             lines.append(f"  {label}: {len(jobs)} print{'s' if len(jobs) != 1 else ''} recorded, {sum(1 for j in jobs if j.get('sound'))} sound, {len(t['scores'])} scored"
