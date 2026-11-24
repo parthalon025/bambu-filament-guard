@@ -95,7 +95,7 @@ With enough of everything the card is one line that goes away after 8 seconds:
 
 ![The one-line card: "Enough filament for this print", 5 filaments against the spools on the Bambu Lab H2D, with a Details button.](docs/card-enough.png)
 
-When a filament falls short it is the full table, as in the picture at the top, and it stays until closed or until the next slice. From it you can check again after swapping a spool, ignore a finding for the project, or enter the amount of a spool the printer cannot measure.
+When a filament falls short it is the full table, as in the picture at the top, and it stays until closed or until the next slice. From it you can check again after swapping a spool, ignore a finding for that plate of the project (for a week, and as long as it does not get worse), or enter the amount of a spool the printer cannot measure.
 
 | Result | Meaning |
 |---|---|

@@ -38,7 +38,7 @@ When the guard starts, the first time Bambu Studio runs it shows one line, "Bamb
 | Button | Does |
 |---|---|
 | Check again | Asks the printer again, for the same slice: after swapping a spool, no re-slice is needed. |
-| Ignore for this project | This finding shows as one line from now on, until it changes. "Stop ignoring" on the full card (Details) undoes it. |
+| Ignore for this project | This finding, on this plate of the project, shows as one line from now on, and not beside "Send print job". It ends, and the full card shows again, when a filament's result changes or the plate uses other filaments; when a filament falls more than 5 g further short than it was when you ignored it; after 7 days; and with "Stop ignoring" on the full card (Details). Another plate of the project is not covered. A project that was never saved has no name of its own: there the ignore holds for the folder Bambu Studio keeps that project's slices in, and reaches no other unsaved project. |
 | Amount in A3… | For a spool the printer cannot measure: enter the grams left. See [Spools without a reading](manual-amounts.md). |
 | Weigh C3… | Offered when weighing that spool would settle the answer: enter the grams on it. See [Learning, weigh-ins](learning.md#weigh-ins). |
 | Details | On the one-line card: the full table. |

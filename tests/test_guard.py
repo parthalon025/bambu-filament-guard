@@ -410,3 +410,67 @@ def test_a_name_in_popup_on_the_guard_does_not_know_is_said_once_and_the_menu_st
     assert guard.popup_on() == ['SHORT', 'TIGTH', 'COLOUR']
     guard.toggle_warning('COLOUR'); assert guard.cfg['popup_on'] == ['SHORT', 'TIGTH'] and fg.load_config()['popup_on'] == ['SHORT', 'TIGTH']
     guard.toggle_warning('UNKNOWN'); assert guard.popup_on() == ['SHORT', 'TIGTH', 'UNKNOWN']
+
+def blue_print(monkeypatch, need, reads, title='Bracket', plate_no=1, folder=None):
+    """The answer for a plate that needs `need` g of blue PLA, with a blue spool that reads `reads` g: sliced as plate
+    plate_no of the project, into the session folder named (a temporary G-code the guard knows) when one is."""
+    running(monkeypatch, spools((BLUE_PLA, reads)))
+    res = fg.evaluate(fg.parse_plate(gcode(weights=f'{need:.2f}', used='1')), CFG, title); res['pid'], res['plate_no'] = 1, plate_no
+    if folder: res['gcode'] = str(folder / 'Metadata' / f'.1.{plate_no - 1}.gcode')
+    return res
+
+def card_for(res, **how):
+    """What a guard that has just started shows for an answer: 'full', 'line' or None."""
+    guard = guard_with(); guard.deliver(res, **how)
+    return {(): None, (('show', 0),): 'full', (('show', CFG['ok_seconds']),): 'line'}[tuple(guard.card.shown)]
+
+@pytest.mark.windows
+def test_an_ignored_finding_comes_back_when_it_grows_on_another_plate_or_after_a_week(state, monkeypatch):
+    """"Ignore for this project" was kept for ever, per title, as the rows' slots and results: Bracket ignored at 5 g
+    short stayed a line at 370 g short, on any plate, weeks later. It is kept per plate, dated, with each row's
+    shortfall, and holds for 7 days while the results are the same and no filament is more than 5 g further short."""
+    import guard_ui
+    monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True)
+    first = blue_print(monkeypatch, 60, 55); guard = guard_with(); guard.deliver(first)
+    assert guard.card.shown == [('show', 0)] and first['rows'][0]['note'] == 'short by 5 g'
+    guard.act('ignore', first)
+    kept = fg.load_state()['ignored']
+    assert kept == {'Bracket': {'1': {'at': pytest.approx(time.time(), abs=60), 'rows': [[1, 'SHORT', 5.0]]}}} and guard.card.shown[-1] == ('close',)
+    assert card_for(blue_print(monkeypatch, 60, 55)) == 'line' and card_for(blue_print(monkeypatch, 60, 55), beside=4321) is None    # as accepted: one line, nothing at the dialog
+    assert card_for(blue_print(monkeypatch, 60, 50.5)) == 'line'                             # 4.5 g further short: within what was accepted
+    assert card_for(blue_print(monkeypatch, 60, 49)) == 'full' and card_for(blue_print(monkeypatch, 400, 30), beside=4321) == 'full'   # 6 g further, and 365 g further
+    assert card_for(blue_print(monkeypatch, 60, 55, plate_no=3)) == 'full'                   # another plate of the project was not accepted
+    assert card_for(blue_print(monkeypatch, 60, 61)) == 'full'                               # another result (tight): the finding has changed
+    assert card_for(blue_print(monkeypatch, 60, 58)) == 'line'                               # less short than accepted
+    real = time.time
+    monkeypatch.setattr(fg.time, 'time', lambda: real() + 7 * 86400 + 60)
+    assert card_for(blue_print(monkeypatch, 60, 55)) == 'full'                               # a week on: asked again
+    guard = guard_with(); again = blue_print(monkeypatch, 60, 55, plate_no=3); guard.deliver(again); guard.act('ignore', again)
+    assert list(fg.load_state()['ignored']['Bracket']) == ['3']                              # and what has lapsed is not kept
+    again['ignored'] = True; guard.act('ignore', again)                                      # "Stop ignoring"
+    assert not fg.load_state()['ignored'] and guard.card.shown[-1] == ('show', 0)
+
+@pytest.mark.windows
+def test_an_ignore_in_a_project_never_saved_does_not_reach_another_unsaved_project(state, tmp_path, monkeypatch):
+    """Every project that was never saved is titled "Unsaved project": one ignored at 5 g short muted every later one.
+    Such a project is told by the session folder of its G-code; without one there is nothing to keep an ignore under."""
+    monday, later = tmp_path / 'bamboo_model' / 'Mon_Nov_23' / '10_00_00#1#5', tmp_path / 'bamboo_model' / 'Tue_Dec_01' / '09_00_00#1#7'
+    first = blue_print(monkeypatch, 60, 55, 'Unsaved project', folder=monday); guard = guard_with(); guard.deliver(first); guard.act('ignore', first)
+    assert fg.load_state()['ignored'] == {str(monday): {'1': {'at': pytest.approx(time.time(), abs=60), 'rows': [[1, 'SHORT', 5.0]]}}}
+    assert card_for(blue_print(monkeypatch, 60, 55, 'Unsaved project', folder=monday)) == 'line'          # the project it was said of, sliced again
+    assert card_for(blue_print(monkeypatch, 60, 55, 'Unsaved project', folder=later)) == 'full'           # another unsaved project, the same finding
+    loose = blue_print(monkeypatch, 60, 55, 'Unsaved project')                                             # no G-code the guard knows (check --popup)
+    assert fg.ignore_key(loose) is None and card_for(loose) == 'full'
+    guard = guard_with(); guard.act('ignore', loose); assert list(fg.load_state()['ignored']) == [str(monday)]   # nothing to keep it under
+    assert 'Ignore for this project' not in card_shown(monkeypatch, loose)[1] and 'Ignore for this project' in card_shown(monkeypatch, first)[1]
+
+@pytest.mark.windows
+def test_an_ignore_kept_by_an_earlier_version_counts_as_lapsed(state, monkeypatch):
+    """1.4 kept {title: '[[slot, result]]'}: undated, for every plate. Such an entry ignores nothing, and goes at the next ignore."""
+    fg.update_state(lambda st: st.__setitem__('ignored', {'Bracket': '[[1, "SHORT"]]', 'Unsaved project': '[[1, "SHORT"]]'}))
+    res = blue_print(monkeypatch, 60, 55)
+    assert card_for(res) == 'full' and card_for(blue_print(monkeypatch, 60, 55, 'Unsaved project', folder=state / 'session')) == 'full'
+    guard = guard_with(); guard.deliver(res); guard.act('ignore', res)
+    assert fg.load_state()['ignored'] == {'Bracket': {'1': {'at': pytest.approx(time.time(), abs=60), 'rows': [[1, 'SHORT', 5.0]]}}}
+    fg.update_state(lambda st: st['ignored'].__setitem__('Bracket', {'1': {'at': 'yesterday', 'rows': 5}}))    # an entry no version wrote
+    assert card_for(blue_print(monkeypatch, 60, 55)) == 'full'

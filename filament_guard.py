@@ -986,6 +986,35 @@ class Watcher:
         return out
 
 
+IGNORE_DAYS, IGNORE_GROWTH = 7, 5.0                       # "Ignore for this project" ends after as many days, or with a filament as many grams further short
+UNSAVED = 'Unsaved project'                               # what project_title calls every project that was never saved
+
+def ignore_key(res):
+    """(project, plate) under which "Ignore for this project" is kept for an answer, both as the state file names them;
+    None when there is nothing to tell the project by. A project that was never saved shares its title with every other
+    such project (one ignored at 5 g short muted them all): it is told by the session folder of its G-code, and not at
+    all when the answer comes from no temporary G-code (`check --popup`)."""
+    project = res['title'] if res['title'] != UNSAVED else os.path.dirname(os.path.dirname(res['gcode'])) if res.get('gcode') else None
+    return (project, str(res.get('plate_no'))) if project else None
+
+def shortfalls(res):
+    """What an ignore accepts of an answer: per row its slot, its result and the grams it falls short by (the need less
+    what its spools hold; 0 when they hold it)."""
+    return [[r['slot'], r['status'], round(max(0.0, r['need'] - (r['total'] or 0.0)), 1)] for r in res['rows']]
+
+def ignore_lasts(entry):
+    """Whether an ignore kept in the state file ({'at', 'rows': shortfalls}) is still in its IGNORE_DAYS. 1.4 kept a bare
+    string, undated: that has lapsed."""
+    return isinstance(entry, dict) and isinstance(entry.get('at'), (int, float)) and 0 <= time.time() - entry['at'] <= IGNORE_DAYS * 86400
+
+def ignore_covers(entry, res):
+    """Whether a kept ignore covers an answer: it lasts, the rows and their results are the ones accepted, and no row is
+    more than IGNORE_GROWTH further short than it was then."""
+    if not ignore_lasts(entry): return False
+    was, now = entry['rows'], shortfalls(res)
+    return [r[:2] for r in was] == [r[:2] for r in now] and all(new[2] - old[2] <= IGNORE_GROWTH for old, new in zip(was, now))
+
+
 class Guard:
     """The running guard: it shows every answer, and does what the card and the icon ask for. Everything that
     touches the card runs on the Tk thread, through `todo`; asking the printer takes seconds and runs on threads of
@@ -1003,12 +1032,12 @@ class Guard:
         self.tray = guard_ui.Tray(self) if standing else None
 
     # -- showing an answer
-    @staticmethod
-    def signature(res):
-        return json.dumps([[r['slot'], r['status']] for r in res['rows']])
-
     def ignored(self, res):
-        return load_state().get('ignored', {}).get(res['title']) == self.signature(res)
+        key = ignore_key(res)
+        if not key: return False
+        plates = load_state().get('ignored', {}).get(key[0])
+        try: return isinstance(plates, dict) and ignore_covers(plates.get(key[1]), res)
+        except (TypeError, LookupError): return False        # an entry no version of the guard wrote ignores nothing
 
     def popup_on(self):
         """The results popup_on names, in capitals: as the guard reads the list, and as the menu ticks it. A name that is
@@ -1070,11 +1099,16 @@ class Guard:
         if name == 'recheck': self.recheck(res, self.card.beside)
         elif name == 'details': self.deliver(res, full=True)
         elif name == 'ignore':
-            on = not res.get('ignored')
-            def change(st):
-                if on: st.setdefault('ignored', {})[res['title']] = self.signature(res)
-                else: st.get('ignored', {}).pop(res['title'], None)
-            update_state(change); log(f"{res['title']}: this finding is " + ('ignored from now on' if on else 'no longer ignored'))
+            on, key = not res.get('ignored'), ignore_key(res)
+            if not key: return
+            def change(st):                                   # what has lapsed goes with every change: a session folder is never seen again
+                kept = {p: {n: e for n, e in plates.items() if ignore_lasts(e)} for p, plates in st.get('ignored', {}).items() if isinstance(plates, dict)}
+                if on: kept.setdefault(key[0], {})[key[1]] = {'at': time.time(), 'rows': shortfalls(res)}
+                else: kept.get(key[0], {}).pop(key[1], None)
+                st['ignored'] = {p: plates for p, plates in kept.items() if plates}
+            update_state(change)
+            log(f"{res['title']}" + (f", plate {res['plate_no']}" if res.get('plate_no') else '') + ': this finding is '
+                + (f'ignored for {IGNORE_DAYS} days, unless it changes or grows by more than {IGNORE_GROWTH:g} g' if on else 'no longer ignored'))
             if on: self.card.close()
             else: self.deliver(res, full=True, beside=self.card.beside)
         elif name == 'spool':                                 # the empty spool's weight typed in the amount window: the next one starts with it
@@ -1098,7 +1132,7 @@ class Guard:
         import guard_ui
         where = lambda: beside if guard_ui.visible(beside) else None
         def work():
-            new = evaluate(res['plate'], self.cfg, res['title'], res['times']); new['pid'], new['plate_no'] = res.get('pid'), res.get('plate_no')
+            new = evaluate(res['plate'], self.cfg, res['title'], res['times']); new['pid'], new['plate_no'], new['gcode'] = res.get('pid'), res.get('plate_no'), res.get('gcode')
             log('checked again: ' + report_text(new).replace('\n', ' | ')); return new
         self.later(work, lambda new: self.deliver(new, full=True, beside=where()), lambda: self.deliver(res, full=True, beside=where()))
 
@@ -1125,7 +1159,7 @@ class Guard:
                     log(f'cannot read the slice {path}: {e.__class__.__name__}: {e}'); unread.append(f'it cannot be read ({e})'); continue
                 if plate is None: unread.append('Bambu Studio is still writing it'); continue
                 if not plate['filaments']: continue
-                res = evaluate(plate, self.cfg, project_title(path), seen=seen); res['pid'], res['plate_no'] = studio_pid(path), plate_number(path)
+                res = evaluate(plate, self.cfg, project_title(path), seen=seen); res['pid'], res['plate_no'], res['gcode'] = studio_pid(path), plate_number(path), path
                 log(('at "Send print job": ' if beside else 'checked on request: ') + report_text(res).replace('\n', ' | ')); out.append(res)
             return (max(out, key=lambda r: -1 if r['error'] else SEVERITY[r['worst']]) if out else None), unread    # the newest of the worst
         def then(found):
@@ -1211,7 +1245,7 @@ class Guard:
                 printer = printer_for(plate)
                 if printer and self.cfg['ok_seconds']:                          # no line for a check that ends in silence (a printer not on this LAN), nor for a quiet guard
                     waiting = True; self.todo.put(lambda: self.checking('slice', checking_text(printer), studio_pid(path), asked=False))
-                res = evaluate(plate, self.cfg, title); res['pid'], res['plate_no'] = studio_pid(path), plate_no
+                res = evaluate(plate, self.cfg, title); res['pid'], res['plate_no'], res['gcode'] = studio_pid(path), plate_no, path
                 log(report_text(res).replace('\n', ' | '))
                 self.todo.put(lambda: self.deliver(res))
         finally:                                                                 # the slice is remembered whatever became of the check: guard_ledger counts from it

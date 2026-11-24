@@ -250,14 +250,15 @@ class Card:
                 if p.get(key): spools += f" {p[key][:1].upper()}{p[key][1:]}."
             if res.get('weigh'):
                 spools += f" Weighing the spool in {res['weigh']['label']} would settle it: the guard then counts that spool by what it held."
-            ignored = ' Ignored for this project: it shows as one line until the finding changes.' if res.get('ignored') else ''
+            ignored = (f' Ignored for this plate of the project: it shows as one line for {fg.IGNORE_DAYS} days from then, unless a result changes or a filament '
+                       f'falls more than {fg.IGNORE_GROWTH:g} g further short.') if res.get('ignored') else ''
             self._label(w, spools + ignored, 'muted', 9, wrap=620, row=4, column=0, pady=(2 * SPACE, 0))
         bar = tk.Frame(w, bg=t['surface']); bar.grid(row=5, column=0, sticky='w', pady=(2 * SPACE, 0))
         again = self._button(bar, 'Check again', None, row=0, column=0, padx=(0, SPACE))
         again.configure(command=lambda: (again.configure(text='Checking…', state='disabled'), self.act('recheck', res)))
         col = 1
         if not res['error']:
-            if res.get('ignored') or fg.SEVERITY[res['worst']] >= 2:
+            if res.get('ignored') or (fg.SEVERITY[res['worst']] >= 2 and fg.ignore_key(res)):     # no key: a project never saved, checked from no G-code the guard knows
                 self._button(bar, 'Stop ignoring' if res.get('ignored') else 'Ignore for this project', lambda: self.act('ignore', res), row=0, column=col, padx=(0, SPACE)); col += 1
             seen = set()
             for r in res['rows']:
