@@ -85,6 +85,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - A printer without an AMS, should it send no AMS data at all, would have been answered "did not report its spools" at every check since the fix for a report in pieces above. A status with no AMS data and an external spool is now judged on that spool, as 1.4.0 did; one with AMS data but no list of spools is still the report in pieces, and is not judged. No amount entered for an AMS tray ends on either.
 - `Install.cmd` showed nothing until the install was over, which can take a minute and more (it waits for a guard that runs to go, and listens for each printer that is off), and a second double click in that time started a second install beside the first. A line, "Installing Bambu Filament Guard…", now shows at once, the install runs behind it, and its card follows; a second `Install.cmd` opened meanwhile does nothing.
 - The self-test and `status` said "It starts automatically" whenever a Startup shortcut existed, also when that shortcut starts another copy of the guard, in another folder. They say so now only when it points into their own folder, and otherwise "It starts another copy, in …", with the folder.
+- "Start automatically" in the icon's menu removed the Startup shortcut whenever there was one, also the one of another copy of the guard, installed from another folder. It removes only a shortcut that points into its own folder; another is left alone, and a card says which copy it starts.
 
 ## [1.4.0] - 2026-11-20
 

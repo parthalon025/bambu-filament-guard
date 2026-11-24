@@ -1643,8 +1643,15 @@ class Guard:
         self.set_option('popup_on', [s for s in on if s != status] if status in on else on + [status])
 
     def toggle_autostart(self):
-        if os.path.exists(STARTUP_LNK): os.remove(STARTUP_LNK)
-        else: make_shortcut()
+        """The menu's "Start automatically". There is one Startup shortcut, and it may be another copy's (a newer one,
+        installed from another folder): removed from here, that copy no longer started with Windows. As for uninstall,
+        only a shortcut that points into this folder is removed; another is left alone, and a card says so."""
+        starts = autostart()
+        if starts is None: make_shortcut()
+        elif starts is True: os.remove(STARTUP_LNK)
+        else: self.card.note('The Startup shortcut was left alone', [(None, 'Where it points could not be read, so it was not removed.')] if not starts else [
+            (None, f"It starts another copy of the guard, in {starts}: that copy's own menu, or its Uninstall.cmd, removes it."),
+            (None, 'To have this copy start with Windows in its place, install it: Install.cmd in its folder, or "install".')])
         if self.tray: self.tray.refresh()
 
     def toggle_pause(self):

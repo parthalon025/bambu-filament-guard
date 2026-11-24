@@ -1582,3 +1582,19 @@ def test_the_self_test_says_whether_it_is_this_copy_that_starts_with_windows(sta
     assert fg.selftest(CFG)[-1] == (True, 'It starts automatically') and fg.main(['status']) == 0 and '| starts automatically: yes |' in capsys.readouterr().out
     points[0] = ''                                                                           # PowerShell could not read the shortcut
     assert fg.selftest(CFG)[-1] == (None, 'A Startup shortcut is there, but where it points cannot be read')
+
+@pytest.mark.windows
+def test_the_menus_start_automatically_leaves_the_shortcut_of_another_copy_alone(state, tmp_path, monkeypatch):
+    """"Start automatically" in the icon's menu removed the Startup shortcut whenever there was one: also the one of a
+    newer copy installed from another folder, which then no longer started with Windows, and nothing said so. It
+    removes only a shortcut that points into its own folder, and says on a card what it left alone."""
+    lnk, points, made = tmp_path / 'Bambu Filament Guard.lnk', [str(tmp_path / 'new' / 'app')], []
+    monkeypatch.setattr(fg, 'STARTUP_LNK', str(lnk)); monkeypatch.setattr(fg, 'shortcut_folder', lambda: points[0]); monkeypatch.setattr(fg, 'make_shortcut', lambda: made.append(1))
+    guard = guard_with(); lnk.write_text(''); guard.toggle_autostart()
+    assert lnk.exists() and guard.card.shown == [('note', 'The Startup shortcut was left alone')]
+    assert guard.card.said == [f'It starts another copy of the guard, in {points[0]}: that copy\'s own menu, or its Uninstall.cmd, removes it.', 'To have this copy start with Windows in its place, install it: Install.cmd in its folder, or "install".']
+    points[0] = ''; guard = guard_with(); guard.toggle_autostart()                           # PowerShell cannot read it: whose it is cannot be told
+    assert lnk.exists() and guard.card.said == ['Where it points could not be read, so it was not removed.']
+    points[0] = fg.HERE; guard = guard_with(); guard.toggle_autostart()
+    assert not lnk.exists() and guard.card.shown == [] and made == []                         # this copy's own: removed, as before
+    guard.toggle_autostart(); assert made == [1] and guard.card.shown == []                   # and none there: made
