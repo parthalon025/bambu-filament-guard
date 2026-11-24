@@ -1,6 +1,7 @@
 """Reading a sliced plate: the G-code header and the grams each layer takes (filament_guard)."""
 import io
 import json
+import os
 import sys
 import zipfile
 
@@ -255,3 +256,42 @@ def test_text_output_survives_a_console_that_cannot_show_a_character(state, tmp_
     raw = io.BytesIO(); monkeypatch.setattr(sys, 'stdout', io.TextIOWrapper(raw, encoding='cp1252'))
     assert fg.main(['check', str(path)]) == 2; sys.stdout.flush()
     assert raw.getvalue().decode('cp1252').splitlines()[0] == 'A filament of this print is not loaded: ????.gcode'
+
+def slice_in(root, name='.1.0.gcode'):
+    """A slice where Bambu Studio keeps it under a temp folder; its path."""
+    meta = root / 'bamboo_model' / 'Thu_Nov_19' / '01_02_03#1#9' / 'Metadata'; meta.mkdir(parents=True, exist_ok=True)
+    (meta / name).write_text(gcode())
+    return str(meta / name)
+
+def temp_folders(monkeypatch, tmp, temp, data, windows=None):
+    """The temp folders as the guard finds them named: %TMP%, %TEMP% (Python's own choice), Bambu Studio's data folder,
+    and what Windows' GetTempPath gives (None: not asked, as off Windows)."""
+    class Kernel32:
+        def GetTempPathW(self, size, buf): buf.value = str(windows) + os.sep; return len(buf.value)
+    monkeypatch.setenv('TMP', str(tmp)); monkeypatch.setenv('TEMP', str(temp)); monkeypatch.setattr(fg, '_kernel32', lambda: Kernel32() if windows else None)
+    monkeypatch.setattr(fg.tempfile, 'gettempdir', lambda: str(temp)); monkeypatch.setattr(fg, 'BS_DATA', str(data))
+
+def test_slices_are_found_under_a_temp_folder_with_brackets_in_its_path(tmp_path, monkeypatch):
+    """The folder went into the search pattern as it is, where "[ssd]" stands for one letter, s or d: no slice was found,
+    and so no plate checked. Found once, though three names lead to the folder."""
+    root, data = tmp_path / 'Temp [ssd]', tmp_path / 'Roaming [x]' / 'BambuStudio'; here = slice_in(root)
+    temp_folders(monkeypatch, root, root, data)
+    assert fg.temp_gcodes() == [here]
+    there = slice_in(data / 'tmp')                                                        # where Bambu Studio writes when the temp drive is nearly full
+    assert fg.temp_gcodes() == [here, there]
+
+def test_slices_are_looked_for_under_tmp_and_temp_when_they_differ(tmp_path, monkeypatch):
+    """Bambu Studio writes under the temp folder Windows gives it, which is %TMP% before %TEMP%; Python's is %TEMP%
+    before %TMP%. With TMP alone moved to another drive, the guard watched a folder Bambu Studio never wrote to."""
+    ram, temp = tmp_path / 'ram', tmp_path / 'Temp'; in_tmp = slice_in(ram)
+    temp_folders(monkeypatch, ram, temp, tmp_path / 'none')
+    assert fg.temp_gcodes() == [in_tmp]
+    in_temp = slice_in(temp, '.2.0.gcode')
+    assert fg.temp_gcodes() == [in_tmp, in_temp] and fg.newest_gcode(2) == in_temp
+
+def test_slices_are_looked_for_under_the_temp_folder_windows_names(tmp_path, monkeypatch):
+    """GetTempPath is what Bambu Studio goes by, so the folder it names comes first. One that a variable names as well
+    is searched once."""
+    profile, temp = tmp_path / 'profile', tmp_path / 'Temp'; in_profile, in_temp = slice_in(profile), slice_in(temp)
+    temp_folders(monkeypatch, temp, profile, tmp_path / 'none', windows=profile)
+    assert fg.temp_roots() == [str(profile), str(temp), str(tmp_path / 'none' / 'tmp')] and fg.temp_gcodes() == [in_profile, in_temp]

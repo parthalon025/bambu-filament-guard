@@ -13,7 +13,7 @@ What the guard does from the moment a plate is sliced, what its card and icon sh
 
 Bambu Studio has no plugin interface (v02.09.01.70: the `plugins` folder holds its network libraries only), so the guard runs beside it:
 
-1. Bambu Studio writes the G-code of each plate it slices to `%TEMP%\bamboo_model\<day>\<time>#<pid>#<id>\Metadata\.<pid>.<n>.gcode`. The guard watches that folder.
+1. Bambu Studio writes the G-code of each plate it slices to `bamboo_model\<day>\<time>#<pid>#<id>\Metadata\.<pid>.<n>.gcode` in its temp folder: the one Windows gives it, `%TMP%`, else `%TEMP%`. The guard watches that folder. It looks under the folder Windows names, under `%TMP%` and under `%TEMP%`, which are not always the same folder, and in Bambu Studio's own data folder, where Bambu Studio writes when the temp drive is nearly full.
 2. From the G-code it reads the grams each filament needs (purge and prime tower included), and its material, colour, product and nozzle.
 3. It asks the printer the plate was sliced for what is left on every spool (read-only status over the LAN). When the printer is running a print, it first takes off each spool what that print still needs from it: the answer is for the moment the new print could start. See [The running print](running-print.md).
 4. The answer appears as a "Filament check" card inside Bambu Studio's window, bottom right, under the slicing result. With enough of everything it is one line that goes away after 8 seconds; when a filament falls short it is the full table, and it stays until closed or until the next slice.

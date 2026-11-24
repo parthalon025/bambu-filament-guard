@@ -440,13 +440,29 @@ def layer_profile(stream, plate, why=None):
         return None
     return out
 
+def temp_roots():
+    """The folders Bambu Studio may write its temporary G-code under, each once. Its temp folder is the one Windows
+    gives a program (GetTempPath: %TMP%, else %TEMP%), not always the one Python goes by (%TEMP% before %TMP%, and
+    TMPDIR before both): with only one of the two moved, the guard would watch a folder Bambu Studio never writes to.
+    So that one, both variables', Python's, and Bambu Studio's own data folder."""
+    roots, k32 = [], _kernel32()
+    if k32:
+        buf = ctypes.create_unicode_buffer(1024)
+        if 0 < k32.GetTempPathW(len(buf), buf) < len(buf): roots.append(buf.value)
+    roots += [os.environ.get('TMP'), os.environ.get('TEMP'), tempfile.gettempdir(), os.path.join(BS_DATA, 'tmp')]
+    distinct = {}
+    for root in roots:
+        if root: distinct.setdefault(os.path.normcase(os.path.realpath(root)), os.path.abspath(root))    # one folder under two spellings would show each slice twice
+    return list(distinct.values())
+
 def temp_gcodes():
     """The G-code of every plate the running Bambu Studio copies have sliced: <temp>/bamboo_model/<day>/<time>#<pid>#<id>/
     Metadata/.<pid>.<n>.gcode (PartPlate::get_tmp_gcode_path, v02.09.01.70). With under 2 GB free in the temp folder
-    Bambu Studio uses its own data folder instead."""
+    Bambu Studio uses its own data folder instead. The folder's own path is taken as it is spelt (glob.escape): a
+    "[" in it would otherwise be read as part of the pattern, and nothing found."""
     out = []
-    for root in (tempfile.gettempdir(), os.path.join(BS_DATA, 'tmp')):
-        out += glob.glob(os.path.join(root, 'bamboo_model', '*', '*', 'Metadata', '.*.gcode'))
+    for root in temp_roots():
+        out += glob.glob(os.path.join(glob.escape(root), 'bamboo_model', '*', '*', 'Metadata', '.*.gcode'))
     return out
 
 def project_title(gcode_path):
