@@ -33,7 +33,7 @@ A check takes a second or three, because the guard asks the printer each time. W
 
 For a new slice the line does not cover a full card that is still open; asked for from the icon, it takes the place of any card, as its answer will. Beside "Send print job" nothing shows until there is a warning.
 
-When the guard starts, the first time Bambu Studio runs it shows one line, "Bambu Filament Guard 1.4.0 is watching for sliced plates", which goes away by itself; after `Install.cmd` the install card says it instead. A one-line card that comes while Bambu Studio is minimised waits for its window, and its seconds count from when it shows. With "One line when there is enough" turned off, quiet was asked for: a new slice shows no "Checking…" line, and the guard no start line.
+When the guard starts, the first time Bambu Studio runs it shows one line, "Bambu Filament Guard 1.5.0 is watching for sliced plates", which goes away by itself; after `Install.cmd` the install card says it instead. A one-line card that comes while Bambu Studio is minimised waits for its window, and its seconds count from when it shows. With "One line when there is enough" turned off, quiet was asked for: a new slice shows no "Checking…" line, and the guard no start line.
 
 | Button | Does |
 |---|---|

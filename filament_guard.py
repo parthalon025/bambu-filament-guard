@@ -39,7 +39,7 @@ file, a window or the output. Settings: the icon's menu, or config.json (see DEF
 import sys, os, re, json, ssl, time, glob, math, ctypes, hashlib, itertools, contextlib, zipfile, socket, struct, threading, queue, subprocess, argparse, tempfile
 
 APP = 'BambuFilamentGuard'
-VERSION = '1.4.0'
+VERSION = '1.5.0'
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE_DIR = os.path.join(os.environ.get('LOCALAPPDATA') or HERE, APP)
 CONFIG = os.path.join(HERE, 'config.json')
