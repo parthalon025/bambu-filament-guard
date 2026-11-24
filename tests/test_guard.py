@@ -1267,3 +1267,16 @@ def test_a_message_is_one_line_of_the_log_whatever_it_holds(state):
     fg.log('job "Benchy\n2026-11-24 10:00:00 watching for sliced plates (forged)\r\nnext\x1b[2J end\x85" counted'); fg.log('the next line')
     first, second = (state / 'guard.log').read_text(encoding='utf-8').splitlines()
     assert first.endswith(' job "Benchy 2026-11-24 10:00:00 watching for sliced plates (forged)  next [2J end " counted') and second.endswith(' the next line')
+
+@pytest.mark.windows
+def test_the_packaged_guard_starts_tk_without_another_programs_tcl_library(monkeypatch):
+    """TCL_LIBRARY or TK_LIBRARY in the environment, set by another program for its own Tcl, sends the packaged guard's
+    Tcl to a library that is not its own: its first window never comes, and under pythonw nothing says why. A run from
+    source keeps them: there the Python and its Tcl are the user's."""
+    import guard_ui
+    tk_stand_in(monkeypatch); seen = []
+    sys.modules['tkinter'].Tk = type('Tk', (), {'__init__': lambda self: seen.append({k: fg.os.environ.get(k) for k in ('TCL_LIBRARY', 'TK_LIBRARY')}), 'withdraw': lambda self: None})
+    for here, kept in (('app', None), ('bambu-filament-guard', 'elsewhere')):
+        monkeypatch.setenv('TCL_LIBRARY', 'elsewhere'); monkeypatch.setenv('TK_LIBRARY', 'elsewhere')
+        monkeypatch.setattr(fg, 'HERE', fg.os.path.join('C:', 'BambuFilamentGuard', here)); guard_ui.make_root()
+        assert seen[-1] == {'TCL_LIBRARY': kept, 'TK_LIBRARY': kept}, here

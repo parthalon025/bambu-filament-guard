@@ -145,6 +145,10 @@ def log(msg):
         LOST[0] -= lost
     except (OSError, ValueError): LOST[0] += 1
 
+def packaged():
+    """Whether this is the packaged guard: build.py puts the scripts in app/, beside a Python and a Tcl/Tk of their own."""
+    return os.path.basename(HERE) == 'app'
+
 class StateBusy(OSError):
     """The state folder's files could not be had: another holder kept them past the wait, or a program outside the guard
     held a file past the retries of a write."""

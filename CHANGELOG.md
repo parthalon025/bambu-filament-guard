@@ -62,6 +62,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - The card's buttons had no border, and in Bambu Studio's light mode their background is all but the card's own: they read as plain text. They have a one-pixel border in both modes.
 - When the guard's window loop ended by an error, its icon stayed in the notification area and the process stayed with it: a guard that checked nothing looked alive. The icon is now stopped whatever ends the loop.
 - A print job's or a project's name with a line break in it wrote lines of its own into `guard.log`, with whatever time and text it held. Every message is now one line: line breaks and other control characters are written as spaces.
+- The packaged guard did not start, and showed nothing, on a computer where another program had set `TCL_LIBRARY` or `TK_LIBRARY` for its own Tcl. It now starts its windows with the Tcl/Tk in its own folder whatever those say.
 
 ## [1.4.0] - 2026-11-20
 

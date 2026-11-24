@@ -414,6 +414,11 @@ class Card:
 
 
 def make_root():
+    # The packaged guard has its own Tcl/Tk beside it. TCL_LIBRARY or TK_LIBRARY, set by another program for its own Tcl,
+    # sends ours to a library that is not its own: the first window never comes, and under pythonw nothing says why. A
+    # run from source keeps them: there the Python and its Tcl are the user's, who may have set them for it.
+    if fg.packaged():
+        for name in ('TCL_LIBRARY', 'TK_LIBRARY'): os.environ.pop(name, None)
     import tkinter as tk
     try: ctypes.windll.shcore.SetProcessDpiAwareness(1)        # sharp text on a scaled screen
     except (AttributeError, OSError): pass
