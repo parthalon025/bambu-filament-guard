@@ -20,7 +20,7 @@ The AMS's remaining-filament figure is an estimate. It counts what it has fed, s
 
 ## Key features
 
-- **Every filament, every plate.** Checks each plate as soon as it is sliced, and all the project's sliced plates again when "Send print job" opens.
+- **Every filament, every plate.** Checks each plate as soon as it is sliced, and all the project's sliced plates again when "Send print job" opens (of more than 30, the 30 sliced last; the card says how many were left out).
 - **Batch-printing aware.** A plate sliced while another prints is checked against what the spools will hold when it can start. See [The running print](docs/running-print.md).
 - **Learns each tray's accuracy.** Follows the prints and learns, per tray, how far its reading can be trusted: what it reads when a spool runs dry, and how far it falls per gram printed. As it comes, this only makes a check stricter. An experimental setting, off unless you turn it on, measures the reserve from the guard's own forecasts instead of fixing it. See [Learning from previous prints](docs/learning.md).
 - **Spools without RFID.** Enter a weighed amount once, and the guard counts it down as prints use it. See [Spools without a reading](docs/manual-amounts.md).
@@ -95,7 +95,7 @@ With enough of everything the card is one line that goes away after 8 seconds:
 
 ![The one-line card: "Enough filament for this print", 5 filaments against the spools on the Bambu Lab H2D, with a Details button.](docs/card-enough.png)
 
-When a filament falls short it is the full table, as in the picture at the top, and it stays until closed or until the next slice. From it you can check again after swapping a spool, ignore a finding for the project, or enter the amount of a spool the printer cannot measure.
+When a filament falls short it is the full table, as in the picture at the top, and it stays until you close it, until that plate is sliced again, or until a check finds something worse. From it you can check again after swapping a spool, ignore a finding for that plate of the project (for a week, and as long as it does not get worse), or enter the amount of a spool the printer cannot measure.
 
 | Result | Meaning |
 |---|---|
@@ -105,7 +105,7 @@ When a filament falls short it is the full table, as in the picture at the top, 
 | Not enough | The matching spools together hold less than the need, or hold it only with a spool AMS auto refill does not go on to (another product or shade, the external spool): the note names those and their amounts. |
 | Not loaded | No spool of that material is loaded where the print's nozzle can reach it. |
 | Colour not loaded | The material is loaded, this colour of it is not. The nearest spool is named and counts for nothing. |
-| Unknown | The matching spool reports no remaining amount, or Bambu Studio gives the filament no weight (its profile has density 0). Shown as one line, like "enough", unless `popup_on` names it. |
+| Unknown | The matching spool reports no remaining amount, or Bambu Studio gives the filament no weight (its profile has density 0). Shown as one line, like "enough", unless "Warn when a spool's amount is unknown" is ticked in the icon's settings. |
 
 The card's buttons, the icon's menu and settings, how spools are matched and how the reserve is set are in [Using the guard](docs/using.md).
 
