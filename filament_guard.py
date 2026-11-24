@@ -124,13 +124,22 @@ def save_config(cfg):
     os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
     json.dump({k: v for k, v in cfg.items() if DEFAULTS.get(k) != v}, open(CONFIG, 'w', encoding='utf-8'), indent=1)
 
+LOST = [0]                                                # the lines guard.log did not take since the last one it took
+
 def log(msg):
-    os.makedirs(STATE_DIR, exist_ok=True)
-    path = os.path.join(STATE_DIR, 'guard.log')
+    """One line into guard.log, with its time. It raises nothing: a log that could not be written (the disk full, the file
+    held by another program) once cost a warning its card, and ended the watcher and the card's loop for good. The lines
+    lost are counted, and the next line that is written says how many."""
     try:
-        if os.path.getsize(path) > 1_000_000: os.replace(path, path + '.1')
-    except OSError: pass
-    with open(path, 'a', encoding='utf-8') as f: f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + msg + '\n')
+        os.makedirs(STATE_DIR, exist_ok=True)
+        path, lost = os.path.join(STATE_DIR, 'guard.log'), LOST[0]
+        try:
+            if os.path.getsize(path) > 1_000_000: os.replace(path, path + '.1')
+        except OSError: pass
+        with open(path, 'a', encoding='utf-8', errors='backslashreplace') as f:
+            f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + (f"({lost} line{'s' if lost != 1 else ''} before this one could not be written) " if lost else '') + f'{msg}\n')
+        LOST[0] -= lost
+    except (OSError, ValueError): LOST[0] += 1
 
 class StateBusy(OSError):
     """The state folder's files could not be had: another holder kept them past the wait, or a program outside the guard
@@ -1033,6 +1042,7 @@ class Guard:
         self.warning = None                                   # the warning on the full card, while it stands: see standing_warning
         self.busy, self.greeted = {}, False                   # the checks someone waits for, by what started them: (their line, its text)
         self.told = set()                                     # what was said in the log once, and is not said again in this run
+        self.watcher = None                                   # the thread that watches for slices, once it runs (watch_slices)
         self.card = guard_ui.Card(root, act=self.act, on_close=None if standing else root.quit)
         self.card.empty_spool = cfg['empty_spool_g']
         self.tray = guard_ui.Tray(self) if standing else None
@@ -1111,8 +1121,8 @@ class Guard:
         def run():
             try: out = work()
             except Exception as e:
-                log(f'error: {e.__class__.__name__}: {e}')
                 if otherwise: self.todo.put(otherwise)
+                log(f'error: {e.__class__.__name__}: {e}')
                 return
             self.todo.put(lambda: then(out))
         threading.Thread(target=run, daemon=True).start()
@@ -1156,8 +1166,11 @@ class Guard:
         where = lambda: beside if guard_ui.visible(beside) else None
         def work():
             new = evaluate(res['plate'], self.cfg, res['title'], res['times']); new['pid'], new['plate_no'], new['gcode'] = res.get('pid'), res.get('plate_no'), res.get('gcode')
-            log('checked again: ' + report_text(new).replace('\n', ' | ')); return new
-        self.later(work, lambda new: self.deliver(new, full=True, beside=where()), lambda: self.deliver(res, full=True, beside=where()))
+            return new
+        def then(new):                                        # the card first, here as after a slice: nothing of the log may hold back an answer
+            try: self.deliver(new, full=True, beside=where())
+            finally: log('checked again: ' + report_text(new).replace('\n', ' | '))
+        self.later(work, then, lambda: self.deliver(res, full=True, beside=where()))
 
     def check_newest(self, pid=None, beside=None):
         """From the icon: the newest slice, as a full card. At "Send print job" (beside): every plate of the project the
@@ -1194,10 +1207,10 @@ class Guard:
                     if res['error'] and not seen: failed[model] = res
                 res['pid'], res['plate_no'], res['gcode'] = studio_pid(path), plate_number(path), path
                 if not res['error']: res['ignored'] = self.ignored(res)
-                log(('at "Send print job": ' if beside else 'checked on request: ') + report_text(res).replace('\n', ' | ')); out.append(res)
-            return (max(out, key=self.rank) if out else None), unread             # the newest of those that most ask to be seen
+                out.append(res)
+            return (max(out, key=self.rank) if out else None), unread, out        # the newest of those that most ask to be seen
         def then(found):
-            res, unread = found
+            res, unread, out = found
             try:
                 if res is not None and older: res['unchecked'] = older; log(f"{res['title']}: {len(plates)} sliced plates, of which the {older} sliced first were not checked when \"Send print job\" opened")
                 if beside and not guard_ui.visible(beside): pass                  # the dialog has closed meanwhile
@@ -1210,7 +1223,9 @@ class Guard:
                 elif res is None and unread and not beside:                       # asked for from the icon: an answer, not a line that goes
                     self.card.note('Filament could not be checked', [(False, f'The newest slice ({project_title(newest)}): {unread[0]}.'),
                                                                      (None, 'Slice it again, or check again in a moment. The log has the file.')], 'danger', studio_pid(newest))
-            finally: self.checked(key)
+            finally:
+                self.checked(key)
+                for r in out: log(('at "Send print job": ' if beside else 'checked on request: ') + report_text(r).replace('\n', ' | '))
         self.later(work, then, lambda: self.checked(key))
 
     def checking(self, key, text, pid=None, asked=True):
@@ -1287,8 +1302,8 @@ class Guard:
                 if printer and self.cfg['ok_seconds']:                          # no line for a check that ends in silence (a printer not on this LAN), nor for a quiet guard
                     waiting = True; self.todo.put(lambda: self.checking('slice', checking_text(printer), studio_pid(path), asked=False))
                 res = evaluate(plate, self.cfg, title); res['pid'], res['plate_no'], res['gcode'] = studio_pid(path), plate_no, path
-                log(report_text(res).replace('\n', ' | '))
                 self.todo.put(lambda: self.deliver(res))
+                log(report_text(res).replace('\n', ' | '))
         finally:                                                                 # the slice is remembered whatever became of the check: guard_ledger counts from it
             if waiting: self.todo.put(lambda: self.checked('slice'))
             if plate['filaments']:
@@ -1300,26 +1315,37 @@ class Guard:
                     log(f'{title}, plate {plate_no}: no per-layer profile ({e.__class__.__name__}: {e}): a print of it is not counted while it runs')
             remember_slice(title, plate_no, plate, profile)
 
+    def poll_seconds(self):
+        """The watcher's pause between two looks: poll_seconds, or the default when that is no positive number ("2" ended
+        the watcher after its first round, null made it wait for ever)."""
+        s = self.cfg.get('poll_seconds')
+        return min(s, threading.TIMEOUT_MAX) if isinstance(s, (int, float)) and not isinstance(s, bool) and s > 0 else DEFAULTS['poll_seconds']
+
     def watch_slices(self):
-        """The watcher's own thread: every newly sliced plate is read, checked and handed to the Tk thread."""
-        watcher, stop_flag, told = Watcher(), os.path.join(STATE_DIR, 'stop'), set()
+        """The watcher's own thread: every newly sliced plate is read, checked and handed to the Tk thread. Nothing that
+        happens in a round ends it, its pause included: without this thread no slice is checked and the stop flag is
+        never seen, while the icon stays. It notes itself as `watcher`, and pump starts another should it end all the same."""
+        self.watcher = threading.current_thread()
+        watcher, stop_flag, told = None, os.path.join(STATE_DIR, 'stop'), set()
         while not self.stopping.is_set():
-            if os.path.exists(stop_flag): self.stopping.set(); break
             try:
-                for path, plate in watcher.new_plates():
-                    try: self.take_slice(path, plate)
-                    except Exception as e: log(f'error: {e.__class__.__name__}: {e}')   # one plate that fails does not cost the others of this round their check
-                for path, why in watcher.problems:
-                    version = studio_version(); log(f'cannot read the slice {path} of Bambu Studio {version}: {why}')
-                    if version not in told:                                      # said once for each Bambu Studio version, logged every time
-                        told.add(version)
-                        lines = [(False, f'Bambu Studio {version} wrote a slice the guard cannot read: {why}.'),
-                                 (None, 'Its prints are not checked until the guard is updated. The log has the file.')]
-                        self.todo.put(lambda lines=lines, pid=studio_pid(path): self.card.note('Filament is not being checked', lines, 'danger', pid))
-                watcher.problems.clear()
+                try:
+                    if os.path.exists(stop_flag): self.stopping.set(); break
+                    watcher = watcher or Watcher()
+                    for path, plate in watcher.new_plates():
+                        try: self.take_slice(path, plate)
+                        except Exception as e: log(f'error: {e.__class__.__name__}: {e}')   # one plate that fails does not cost the others of this round their check
+                    for path, why in watcher.problems:
+                        version = studio_version(); log(f'cannot read the slice {path} of Bambu Studio {version}: {why}')
+                        if version not in told:                                  # said once for each Bambu Studio version, logged every time
+                            told.add(version)
+                            lines = [(False, f'Bambu Studio {version} wrote a slice the guard cannot read: {why}.'),
+                                     (None, 'Its prints are not checked until the guard is updated. The log has the file.')]
+                            self.todo.put(lambda lines=lines, pid=studio_pid(path): self.card.note('Filament is not being checked', lines, 'danger', pid))
+                    watcher.problems.clear()
+                finally: self.stopping.wait(self.poll_seconds())                 # after a round that failed too (no loop without a pause); at once when stopping
             except Exception as e:                                               # the watcher outlives any one bad file or network hiccup
                 log(f'error: {e.__class__.__name__}: {e}')
-            self.stopping.wait(self.cfg['poll_seconds'])
 
     def look_around(self):
         """Every 0.4 s on the Tk thread: has "Send print job" opened? Is Bambu Studio running (then the icon shows)?
@@ -1338,17 +1364,20 @@ class Guard:
 
     def pump(self):
         if self.stopping.is_set(): self.root.quit(); return
-        self.ticks += 1
-        while True:
-            try: job = self.todo.get_nowait()
-            except queue.Empty: break
-            try: job()
-            except Exception as e: log(f'error: {e.__class__.__name__}: {e}')    # one failing request does not end the guard
-        for step in (self.card.follow, self.look_around if self.standing else None):
-            try: step and step()
-            except Exception as e:                                               # nor does one failing step stop the other; said once a minute at most
-                if self.ticks % 150 == 1: log(f'error: {e.__class__.__name__}: {e}')
-        self.root.after(400, self.pump)
+        try:
+            self.ticks += 1
+            while True:
+                try: job = self.todo.get_nowait()
+                except queue.Empty: break
+                try: job()
+                except Exception as e: log(f'error: {e.__class__.__name__}: {e}')    # one failing request does not end the guard
+            for step in (self.card.follow, self.look_around if self.standing else None):
+                try: step and step()
+                except Exception as e:                                           # nor does one failing step stop the other; said once a minute at most
+                    if self.ticks % 150 == 1: log(f'error: {e.__class__.__name__}: {e}')
+            if self.watcher and not self.watcher.is_alive() and self.ticks % 25 == 0:   # looked at every 10 s: a watcher that ended is one that is started again
+                log('the watcher had ended: started again'); self.watcher = threading.Thread(target=self.watch_slices, daemon=True); self.watcher.start()
+        finally: self.root.after(400, self.pump)                                 # whatever happened above: without the next round there is no card, no menu and no Quit
 
     def loop(self):
         self.root.after(400, self.pump); self.root.mainloop()

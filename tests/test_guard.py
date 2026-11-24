@@ -22,6 +22,7 @@ class Card:
     def note(self, headline, lines, tone='muted', pid=None, beside=None, buttons=()):
         self.win, self.one_line, self.said, self.where, self.buttons = object(), False, [text for _, text in lines], beside, dict(buttons); self.shown.append(('note', headline))
     def close(self): self.win = None; self.shown.append(('close',))
+    def follow(self): pass
 
 def guard_with(cfg=CFG):
     guard = fg.Guard(dict(cfg), type('Root', (), {'quit': None})(), standing=False); guard.card = Card()
@@ -657,3 +658,100 @@ def test_a_standing_warning_gives_way_at_send_print_job_and_goes_when_its_plate_
     assert shown == [('close',)] and guard.last['plate_no'] == 2
     shown, icon, guard = warned(short, answer(1, 'OK', error='no printer', quiet=True))      # sliced again for a printer the guard cannot ask
     assert shown == [('close',)]
+
+def no_log(state, monkeypatch):
+    """guard.log cannot be written: a folder stands in its place (on Windows: the disk full, or the file held elsewhere)."""
+    monkeypatch.setattr(fg, 'LOST', [0], raising=False); (state / 'guard.log').mkdir()
+
+def test_a_log_that_cannot_be_written_raises_nothing_and_says_later_what_it_lost(state, monkeypatch):
+    """log() raised whatever opening or writing guard.log raised, into the watcher and the card's loop. It raises
+    nothing; the lines lost are counted and said with the next line that is written."""
+    no_log(state, monkeypatch)
+    for n in range(3): fg.log(f'line {n}')
+    (state / 'guard.log').rmdir(); fg.log('written again'); fg.log('and on')
+    first, second = (state / 'guard.log').read_text().splitlines()
+    assert first.endswith(' (3 lines before this one could not be written) written again') and second.endswith(' and on') and 'lines' not in second
+    fg.log('a name that no codec takes: \udcff')                                             # nor does a line that cannot be encoded
+    assert (state / 'guard.log').read_text().splitlines()[-1].endswith('a name that no codec takes: \\udcff')
+
+@pytest.mark.windows
+def test_with_the_log_unwritable_a_short_slice_still_shows_its_card_and_the_watcher_lives(state, tmp_path, monkeypatch):
+    """The answer was logged before it was queued for the card, and the watcher's handlers logged again: one failed
+    write to guard.log lost the warning and ended the watcher's thread, for good."""
+    f = slice_file(tmp_path, gcode()); plate = fg.parse_plate(f.read_text()); running(monkeypatch, spools((BLUE_PLA, 2), (RED_PLA, 2)))
+    class Watcher:
+        problems = []
+        def __init__(self): self.new = [(str(f), plate)]
+        def new_plates(self): new, self.new = self.new, []; return new
+    monkeypatch.setattr(fg, 'Watcher', Watcher); no_log(state, monkeypatch)
+    guard = guard_with(dict(CFG, poll_seconds=0.05)); watcher = threading.Thread(target=guard.watch_slices, daemon=True); watcher.start()
+    try:
+        for _ in range(3): guard.todo.get(timeout=5)()                                       # the line, the answer, the end of the line
+        time.sleep(0.3)
+        assert guard.card.shown[1] == ('show', 0) and fg.headline(guard.card.res) == 'Not enough filament for this print' and watcher.is_alive()
+        assert fg.load_state()['slices'][0]['title'] and fg.LOST[0] >= 1                     # and the slice was remembered all the same
+    finally: guard.stopping.set(); watcher.join(5)
+    assert not watcher.is_alive()
+
+@pytest.mark.windows
+def test_an_answer_is_on_its_way_to_the_card_before_anything_of_it_is_logged(state, tmp_path, monkeypatch):
+    """After a slice, after "Check again" and after a check from the icon or for "Send print job": whatever becomes of
+    the log's line, the card has the answer."""
+    import guard_ui
+    f = slice_file(tmp_path, gcode()); plate = fg.parse_plate(f.read_text()); running(monkeypatch, spools((BLUE_PLA, 2), (RED_PLA, 2)))
+    monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: str(f)); monkeypatch.setattr(fg, 'temp_gcodes', lambda: [str(f)]); monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True)
+    res = fg.evaluate(plate, CFG, 'Benchy')
+    def refuse(msg): raise OSError(28, 'No space left on device')
+    def shown_after(start):
+        guard = guard_with()
+        with monkeypatch.context() as m:
+            m.setattr(fg, 'log', refuse)
+            try:
+                start(guard)
+                while True: guard.todo.get(timeout=2)()
+            except (OSError, fg.queue.Empty): pass
+        run_queued(guard)
+        return guard.card.shown
+    assert ('show', 0) in shown_after(lambda guard: guard.take_slice(str(f), plate))
+    assert ('show', 0) in shown_after(lambda guard: guard.recheck(res))
+    assert ('show', 0) in shown_after(lambda guard: guard.check_newest())
+    assert ('show', 0) in shown_after(lambda guard: guard.check_newest(1, beside=4321))
+
+@pytest.mark.windows
+def test_the_cards_loop_goes_on_whatever_a_request_does_and_starts_a_watcher_that_has_ended(state, monkeypatch):
+    """pump asked for its next round as its last step: a request that failed while the log could not be written left
+    none, and with it no card, no menu and no Quit. A watcher thread that has ended is started again."""
+    no_log(state, monkeypatch)
+    guard, rounds, started = guard_with(), [], []
+    guard.root = type('Root', (), {'quit': None, 'after': lambda self, ms, then: rounds.append(ms)})()
+    guard.todo.put(lambda: 1 / 0); guard.pump()
+    assert rounds == [400]
+    class Dies(BaseException): pass
+    def dies(): raise Dies()
+    guard.todo.put(dies)
+    with pytest.raises(Dies): guard.pump()
+    assert rounds == [400, 400]
+    guard.watch_slices = lambda: started.append(threading.current_thread())
+    ended = threading.Thread(target=lambda: None); ended.start(); ended.join(); guard.watcher = ended
+    guard.ticks = 24; guard.pump()
+    for _ in range(50):
+        if started: break
+        time.sleep(0.02)
+    assert len(started) == 1 and guard.watcher is started[0] and rounds == [400] * 3
+    quiet = guard_with(); quiet.root = guard.root; quiet.ticks = 24; quiet.pump()            # a guard that never watched (check --popup) starts none
+    assert quiet.watcher is None
+
+@pytest.mark.windows
+def test_a_pause_between_looks_that_is_no_positive_number_is_the_default(state, monkeypatch):
+    """poll_seconds "2" ended the watcher after its first round (the wait raised outside the round's guard); null made it
+    wait for ever."""
+    for odd in ('2', None, 0, -1, True, float('nan'), [2]):
+        assert guard_with(dict(CFG, poll_seconds=odd)).poll_seconds() == 2
+    assert [guard_with(dict(CFG, poll_seconds=s)).poll_seconds() for s in (0.5, 3, float('inf'))] == [0.5, 3, threading.TIMEOUT_MAX]
+    class Watcher:
+        problems, rounds = [], []
+        def new_plates(self): self.rounds.append(1); return []
+    monkeypatch.setattr(fg, 'Watcher', Watcher)
+    guard = guard_with(dict(CFG, poll_seconds='2')); watcher = threading.Thread(target=guard.watch_slices, daemon=True); watcher.start()
+    time.sleep(0.3); alive = watcher.is_alive(); guard.stopping.set(); watcher.join(5)
+    assert alive and not watcher.is_alive() and Watcher.rounds == [1]
