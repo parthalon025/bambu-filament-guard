@@ -461,3 +461,19 @@ def test_a_state_file_held_at_one_look_costs_that_look_and_not_the_link(state, m
     watch, looks, links = follow(monkeypatch, {n: over if n < 41 else H2D_JOB for n in range(1, 60)}, 60, busy=[5] + list(range(10, 41)))
     assert links == [False] and [n for n, _ in looks][:8] == [2, 3, 4, 6, 7, 8, 9, 41] and c3()['grams'] == 280
     assert (state / 'guard.log').read_text().count('held elsewhere for more than 10 s; tried again at the next look') == 1
+
+def test_a_print_the_guard_cannot_count_makes_the_entered_spools_it_may_go_on_from_out_of_date(state, monkeypatch):
+    """A print sent from the phone runs on A1, a spool the printer measures; A2 is the same filament without a tag,
+    entered at 1000 g, and A3 another material. How much the print draws cannot be told, nor whether it runs A1 out and
+    goes on from A2: A2's amount is out of date, and says why; A3's stands. Left at 1000 g, A2 read "enough" after a
+    print that had gone on from it."""
+    spools = lambda a1: [spool(0, a1, fid='GFA00'), spool(1, fid='GFA00'), spool(2, typ='PETG')]
+    gl.enter('SERIAL', {'label': 'A2', 'type': 'PLA', 'colour': '#101010'}, 1000); gl.enter('SERIAL', {'label': 'A3', 'type': 'PETG', 'colour': '#101010'}, 400)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(printing('IDLE', spools(500), task='1'))
+    watch.look(printing('RUNNING', spools(500), name='Sent from the phone', task='12', layer=1)); over = printing('FINISH', spools(0), name='Sent from the phone', task='12', layer=100)
+    watch.look(over); book = fg.load_state()['spools']['SERIAL']
+    assert book['A2']['stale'] and not book['A3'].get('stale') and book['A3']['grams'] == 400
+    running(monkeypatch, over); row = fg.evaluate(needing(300), CFG, 'Next')['rows'][0]
+    assert row['status'] == 'SHORT' and 'A2 holds an unknown amount more' in row['note']          # A1 reads 0 g, and A2 is not counted
+    assert book['A2']['why'] == 'a print the guard could not count drew on A1 and may have gone on from it'
+    assert 'out of date: A2, which the print may go on from: what it draws on A1 cannot be told' in (state / 'guard.log').read_text()

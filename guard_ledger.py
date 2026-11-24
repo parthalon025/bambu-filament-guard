@@ -17,7 +17,8 @@ print:
     Of a print whose slice has no per-layer profile all it needs comes off; a print the guard cannot count at all makes
     such an entry out of date, like any other entry of the trays it may draw on;
   - a print the guard cannot count (not sliced on this computer, or its tray cannot be told) makes the entries of
-    the trays it used "out of date": unknown again, until the amount is entered again.
+    the trays it used "out of date": unknown again, until the amount is entered again; and with them the entered spools
+    of the same filament, which it may have gone on from.
     So does a filament of a print that its slice has no weight for (fg.parse_plate), for the entry of its own tray.
   - when the printer was not followed for ten minutes or more (this computer asleep, the link down) and shows
     another job than the last one counted, every entry of that printer is out of date: more than one print may
@@ -293,21 +294,26 @@ def take_off(book, trays, need, now, fils=None):
     goes beyond it cannot be told, and the entered spools of its filament become out of date. So they do for a tray
     that is no longer loaded: the print has gone on from another spool; of its filament as the slice names it (fils:
     filaments_of), or, when the slice does not, any spool.
+    The same where what the job draws on a tray cannot be told (need None: a job the guard cannot count, a filament
+    without a weight): the entered spools of that tray's filament may be what it goes on from.
     Kept with the entries while the job runs, for fg.credit: 'over', what the job needs beyond an entry that no entered
     spool gave (credit takes it off the spools the printer measures until their readings have fallen by it); 'gave',
     {tray: grams} an entry gave for a tray the printer measures (credit does not take that off again).
     Returns ([(label, grams taken off its entry, the tray they were needed beyond or None)], [(label made out of date,
-    the tray whose amount is not known)])."""
+    why, in the log's words)])."""
     by, took, doubt = {t['label']: t for t in trays}, [], []
     for label, n in need.items():
         t, e = by.get(label), book.get(label)
         own, who = e if e and not e.get('stale') else None, t or (fils or {}).get(label)
         mates = [o['label'] for o in trays if o['label'] in now and o['label'] != label and not book[o['label']].get('stale') and (fg.same_filament(who, o) if who else not own)]
+        if n is None:
+            for l in mates: lapse(book[l], f'a print the guard could not count drew on {label} and may have gone on from it'); doubt.append((l, f'what it draws on {label} cannot be told'))
+            continue
         if own and label in now: excess = over = max(0.0, n - e['grams']); took.append((label, n - excess, None)); e['grams'] = max(0.0, e['grams'] - n)
         elif own: over = e.get('over') or 0.0; excess = min(over, n)         # counted before: what was then left to the spools the printer measures
         elif t and t['grams'] is not None: excess = max(0.0, n - t['grams'] - sum((x.get('gave') or {}).get(label, 0.0) for x in book.values()))
         else:
-            for l in mates: lapse(book[l], f'a print on {label}, whose amount is not known, may have gone on from it'); doubt.append((l, label))
+            for l in mates: lapse(book[l], f'a print on {label}, whose amount is not known, may have gone on from it'); doubt.append((l, f"{label}'s amount is not known"))
             continue
         have = {o['label']: book[o['label']]['grams'] if o['label'] in mates else o['grams'] for o in trays       # in the trays' order, as credit takes equals
                 if o['label'] in mates or (who and o['grams'] is not None and o['label'] not in book and fg.same_filament(who, o))}
@@ -335,10 +341,10 @@ def count(serial, status):
         for label, e in book.items():
             e['job'] = key; e.pop('over', None); e.pop('gave', None)          # what the job before left to other spools is history
             if label in unknown: lapse(e, 'a print the guard could not count has drawn on it')
-        took, doubt = take_off(book, trays, drawn, set(book), filaments_of(status, state.get('slices', [])))
+        took, doubt = take_off(book, trays, dict(drawn, **dict.fromkeys(unknown)), set(book), filaments_of(status, state.get('slices', [])))
         fg.log(f"job \"{status.get('subtask_name')}\" counted: " + (', '.join(f'{l} -{g:.0f} g' + (f' that it needs beyond {b}' if b else '') for l, g, b in took) or 'no entered spool drawn on')
                + (f"; out of date: {', '.join(sorted(l for l in unknown if l in book))}" if unknown & set(book) else '')
-               + ''.join(f"; out of date: {l}, which the print may go on from: {b}'s amount is not known" for l, b in doubt))
+               + ''.join(f"; out of date: {l}, which the print may go on from: {b}" for l, b in doubt))
     fg.update_state(change)
 
 def catch_up(serial, status, state=None):
@@ -354,17 +360,17 @@ def catch_up(serial, status, state=None):
     def change(st):
         book = st.get('spools', {}).get(serial, {})
         late, (trays, _) = {l: e for l, e in book.items() if e.get('job') != key}, fg.trays_of(status)
-        need, counted = owed(status, st.get('slices', []))
+        (need, counted), unknown = owed(status, st.get('slices', [])), set()
         if counted is False:
             need, unknown = draws(status, st.get('slices', []), [t['label'] for t in trays]) if trays else ({}, set(late))
             for l, e in late.items():
                 if l in unknown: lapse(e, 'a print the guard could not count has drawn on it'); fg.log(f'{l}: entered during "{name}", a print the guard cannot count: out of date')
                 elif l not in need: e['missed'] = key
-        took, doubt = take_off(book, trays, need, set(late), filaments_of(status, st.get('slices', [])))
+        took, doubt = take_off(book, trays, dict(need, **dict.fromkeys(unknown)), set(late), filaments_of(status, st.get('slices', [])))
         for l, g, b in took:
             fg.log(f'{l}: entered during "{name}": ' + (f'what that print still needs beyond {b}, {g:.0f} g' if b else f'what that print still needs of it, {need[l]:.0f} g' if counted else
                                                            f'all that print needs of it, {need[l]:.0f} g (how far it is cannot be told)') + f", taken off: {book[l]['grams']:.0f} g")
-        for l, b in doubt: fg.log(f"{l}: entered during \"{name}\": out of date, as the print may go on from it: {b}'s amount is not known")
+        for l, b in doubt: fg.log(f"{l}: entered during \"{name}\": out of date, as the print may go on from it: {b}")
         for e in late.values(): e['job'] = key
         return bool(late)
     return fg.update_state(change)
