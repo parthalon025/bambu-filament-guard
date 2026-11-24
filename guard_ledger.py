@@ -151,6 +151,12 @@ def mapped_labels(status):
         else: out.append(None)
     return out
 
+def drawn_on(status):
+    """The trays the job the printer shows may draw on: the ones its tray mapping names; every loaded tray when the
+    mapping cannot be read."""
+    labels = mapped_labels(status)
+    return {t['label'] for t in fg.trays_of(status)[0]} if labels is None or None in labels else {l for l in labels if l}
+
 def job_plate(status):
     """The plate number of the job the printer shows, from the file it prints ("/data/Metadata/plate_2.gcode" on the
     H2D), or None when the printer does not say (an A1 mini printing from its SD card reports '')."""

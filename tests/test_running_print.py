@@ -51,6 +51,7 @@ def test_the_running_print_is_taken_off_its_spool_first(state, monkeypatch):
     assert row['status'] == 'TIGHT' and 'reads' not in row['note'] and row['trays'][0]['grams'] == 105 and res['printer']['counted'] is None
     running(monkeypatch, dict(BLUE_JOB, subtask_name='Sent from the phone')); res = fg.evaluate(BLUE, CFG, 'Benchy')
     assert res['rows'][0]['status'] == 'TIGHT' and res['printer']['counted'] is False and 'the guard could not count that print' in fg.report_text(res)
+    assert res['rows'][0]['note'].endswith('; a print the guard could not count is drawing on C3')     # a warning stays the warning it is, and says so
 
 def test_the_job_is_named_without_a_figure_the_printer_does_not_give():
     p = {'state': 'RUNNING', 'job': 'Benchy', 'layer': None, 'layers': None, 'percent': None}
@@ -195,3 +196,23 @@ def test_a_job_is_matched_to_the_project_it_is_named_after(state):
     assert fg.load_state()['spools']['SERIAL']['A3']['grams'] == 200
     part(40.0, title='Bracket', layers=50)                                               # "Bracket" at 50 layers: it fits a job of 50 layers, "Bracket_v2" does not
     assert gl.match_slice('Bracket_v2', 50, fg.load_state()['slices'], 1) is None and gl.owed(dict(job, total_layer_num=50), fg.load_state()['slices']) == ({}, False)
+
+def test_a_print_the_guard_cannot_count_leaves_no_row_enough_that_rests_on_its_trays(state, monkeypatch):
+    """A 450 g job sent from elsewhere runs from A1, which reads 500 g; A2 holds red, which the job does not use. A
+    plate that needs 300 g of A1's filament and 50 g of red: after the job A1 holds about 50 g, and nobody can tell
+    the guard so. The red is enough; the other cannot be confirmed, and headline, 'worst' and exit code say that. A
+    row that warns already keeps its warning, with the reason added. Without a tray mapping the job may draw on any
+    spool."""
+    job = printing('RUNNING', [spool(0, 500, fid='GFA00'), spool(1, 400, colour='C12E1F', fid='GFA00')], name='Sent from the phone', layer=10)
+    both = lambda grams: dict(needing(grams), filaments=needing(grams)['filaments'] + [dict(needing(50, colour='#C12E1F')['filaments'][0], slot=2)])
+    running(monkeypatch, job); res = fg.evaluate(both(300), CFG, 'Next'); black, red = res['rows']
+    assert black['status'] == 'UNKNOWN' and black['note'] == 'a print the guard could not count is drawing on A1' and (red['status'], red['note']) == ('OK', '')
+    assert res['worst'] == 'UNKNOWN' and res['printer']['counted'] is False and fg.exit_code(res) == 1
+    assert fg.headline(res) == 'Enough filament could not be confirmed' and 'the guard could not count that print' in fg.report_text(res)
+    black, red = fg.evaluate(both(600), CFG, 'Next')['rows']
+    assert black['status'] == 'SHORT' and black['note'] == 'short by 100 g; a print the guard could not count is drawing on A1' and red['status'] == 'OK'
+    running(monkeypatch, dict(job, mapping=None))
+    assert [(r['status'], r['note']) for r in fg.evaluate(both(300), CFG, 'Next')['rows']] == [
+        ('UNKNOWN', 'a print the guard could not count is drawing on A1'), ('UNKNOWN', 'a print the guard could not count is drawing on A2')]
+    running(monkeypatch, dict(job, gcode_state='FINISH')); res = fg.evaluate(both(300), CFG, 'Next')
+    assert res['worst'] == 'OK' and res['printer']['counted'] is None                    # over: the amounts are the spools' own again

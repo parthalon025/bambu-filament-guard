@@ -774,6 +774,17 @@ def share_spools(rows, filaments, trays, cfg, times):
             row['note'] = (f"filaments {', '.join(str(r['slot']) for r, _ in members)} share {' + '.join(labels)} and need {total * times:.0f} g together"
                            + (f": {joint['note']}" if joint['note'] else ''))
 
+def uncounted(rows, drawn):
+    """A print the guard could not count is on the printer, and of the trays it may draw on (drawn) nobody knows what
+    will be left: no filament that rests on one of them is "enough". Such a row is UNKNOWN, and one that warns already
+    keeps its warning; both say why. (The incident of 2026-11-19 again: a 450 g job sent from elsewhere ran from a spool
+    reading 500 g, and a 300 g plate read "enough" on it, with exit code 0.)"""
+    for row in rows:
+        on = [t['label'] for t in row['trays'] if t['label'] in drawn]
+        if not on or row['status'] not in ('OK', 'TIGHT', 'SPLIT', 'SHORT'): continue
+        if row['status'] == 'OK': row['status'] = 'UNKNOWN'
+        row['note'] += ('; ' if row['note'] else '') + f"a print the guard could not count is drawing on {', '.join(on)}"
+
 def mark_looked(serial):
     """Notes in the state file that a check looked at the printer (learning follows it, guard_ledger.followed); not again
     within a minute, which would change nothing. A state file that cannot be written now only delays the following."""
@@ -825,6 +836,7 @@ def evaluate(plate, cfg, title='', times=1, seen=None):
         credit(trays, owed, learned, running, taken=guard_ledger.taken_off(status, state, printer['serial']))
         rows = [assess(f, trays, cfg, times) for f in plate['filaments']]
         share_spools(rows, plate['filaments'], trays, cfg, times)
+        if counted is False: uncounted(rows, guard_ledger.drawn_on(status))
         if cfg.get('learn') and not unlearned:
             reserve = guard_learn.reserve_words(printer['serial'], rows, history, cfg) or None
             offer = guard_learn.weigh_offer(printer['serial'], rows, cfg, busy=status.get('gcode_state') in BUSY)

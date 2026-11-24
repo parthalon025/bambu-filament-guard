@@ -67,7 +67,7 @@ Settings are saved to `config.json` beside the script, which holds only what was
 | Not enough | The matching spools together hold less than the need. |
 | Not loaded | No spool of that material is loaded where the print's nozzle can reach it. |
 | Colour not loaded | The material is loaded, this colour of it is not. The nearest spool is named and counts for nothing. |
-| Unknown | The matching spool reports no remaining amount. Shown as one line, like "enough", unless `popup_on` names it. |
+| Unknown | The matching spool reports no remaining amount, or a print the guard could not count is drawing on it. Shown as one line, like "enough", unless `popup_on` names it. |
 
 A spool matches a filament when it is the same material, on the nozzle that prints it, in the project's colour; spools of the same product come first. A spool of similar colour but another product is named in the note and not counted.
 

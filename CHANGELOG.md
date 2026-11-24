@@ -17,6 +17,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - The reserve's share of a spool's full weight (3 %) is taken from the largest spool the filament could be printed from, not from the fullest one. With a 250 g and a 1 kg spool of one filament loaded, that share is 30 g whichever is the fullest, so a check can be "tight" where it was "enough".
 - No weigh-in is offered while a job is on the printer: the readings are moving then.
 - The window for a spool's amount ("Amount in …", "Weigh C3…") takes what the scale shows and what the empty spool weighs, and takes one from the other: the filament shows as you type. It starts with the empty spool's weight entered last (`empty_spool_g`, 250 g at first); 0 there is the filament weighed alone, as before.
+- A print the guard cannot count (not sliced on this computer, or its G-code did not add up) no longer leaves a green "enough" on the spools it may draw on. A filament that would be enough on such a spool reads "unknown" ("Enough filament could not be confirmed", exit code 1), with the note "a print the guard could not count is drawing on C3"; one that is tight or short keeps its warning, with the note added. Until now only a line under the answer said that the print was not counted: a 450 g job sent from elsewhere ran from a spool reading 500 g, and a 300 g plate was "enough". The spools in question are the trays the job's tray mapping names, or every loaded spool when it cannot be read.
 
 ### Fixed
 
