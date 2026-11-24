@@ -49,11 +49,16 @@ The score is of the fall from before layer 1 to the end, pre included, which is 
 
 A check (corrections) counts a tray the printer measures (never an amount entered by hand) with its reading less a,
 less a weighed spool's bias, and never more than W - (W - G) / rho where rho is below 1 (a gauge that counts short
-reads more than the spool holds, whatever a was measured before); needs max(1, rho) x N + pre (filament_guard.assess
-takes the largest of the trays a filament could be printed from); and asks a measured reserve, margin x (N +
-MARGIN_K), never below RESERVE_FLOOR, once the printer has SCORED_MIN scored prints and repeated exact observations of
-a (SPREAD_DF), and the tray judged has one (setting measured_reserve). Until then, or with the setting off, each tray is counted with the stricter of this and of
-1.3.0's rules (rules): no answer is looser than 1.3.0's. Learning off (setting learn): every check is as without it."""
+reads more than the spool holds, whatever a was measured before); and needs max(1, rho) x N + pre (filament_guard.assess
+takes the largest of the trays a filament could be printed from). Each tray is counted with the stricter of this and
+of 1.3.0's rules (rules), and the reserve stays the fixed one: no answer is looser than 1.3.0's.
+
+The measured reserve (setting measured_reserve: experimental, off unless turned on) replaces both. With it on, once
+the printer has SCORED_MIN scored prints and repeated exact observations of a (SPREAD_DF), and the tray judged has one,
+a check asks margin x (N + MARGIN_K), never below RESERVE_FLOOR, in place of the fixed reserve, and counts that tray
+by the model alone. It is off by default because it loosens a check on evidence that cannot see a change in a: a
+change is looked for in the forecast errors, and those do not move when spools begin to read more at empty
+(docs/learning.md has the numbers). Learning off (setting learn): every check is as without it."""
 import os, time
 import filament_guard as fg
 import guard_ledger as gl
@@ -69,7 +74,7 @@ KEEP_DRY, KEEP_WEIGHS, KEEP_SEEN, KEEP_CHANGES = 20, 20, 50, 5   # each an obser
 DRY_MOST = 50.0               # grams: a spool that leaves reading more was taken out, not run dry. Flat: 10 % of a 1 kg spool
                               # would be 100 g, far beyond a gauge's error (the one measured run-dry read 20 g)
 
-# 1.3.0's rules (rules), kept as the bound no answer goes beyond until the measured reserve is earned
+# 1.3.0's rules (rules), kept as the bound no answer goes beyond unless the measured reserve is turned on and earned
 LEGACY_JOBS, LEGACY_DRY = 20, 5   # what 1.3.0 kept per tray
 DRY_EVENTS = 3                # dry is the largest of the last 3: one odd event is not forgotten at once, nor kept for ever
 RATE_JOBS = 10                # rate is taken over the last 10 sound whole jobs: recent, and many grams
@@ -335,7 +340,7 @@ def forecast(t, n):
     learned = max(1.0, t['rho'] or 1.0) * n + (t['pre'] or 0.0)
     return learned, (n if t['aside'] else learned)
 
-def measured(est, t, cfg_on=True):
+def measured(est, t, cfg_on=False):
     """Whether a check on this tray may use the measured reserve (see the module's docstring)."""
     p = est['printer']
     return bool(cfg_on and p['scored'] >= SCORED_MIN and p['df'] >= SPREAD_DF and len(t['exact']) >= OWN_EXACT_MIN and t['q'] is not None)
@@ -355,7 +360,7 @@ def corrections(serial, trays, history=None, cfg=None, plain_rules=False):
     history = load() if history is None else history
     ph = history.get(serial, {})
     est = estimates(ph)
-    on = (cfg or {}).get('measured_reserve', True)
+    on = (cfg or {}).get('measured_reserve', False)
     out = {}
     for tr in trays:
         if tr['grams'] is None or tr.get('entered') or tr.get('stale'): continue
@@ -400,7 +405,7 @@ def a_words(t):
 def reserve_words(serial, history=None, cfg=None):
     """The reserve a check on this printer uses, in one short clause."""
     p = estimates((load() if history is None else history).get(serial, {}))['printer']
-    if not (cfg or {}).get('measured_reserve', True): return 'the reserve is the fixed one (measuring it is off)'
+    if not (cfg or {}).get('measured_reserve', False): return 'the reserve is the fixed one (measuring it is off)'
     if p['scored'] >= SCORED_MIN and p['df'] >= SPREAD_DF: return f"the reserve is measured from {p['scored']} scored prints and {p['exact']} readings at empty"
     need = [x for x in (f"{SCORED_MIN - p['scored']} more scored prints" if p['scored'] < SCORED_MIN else '',
                         f"{SPREAD_DF - p['df']} more readings at empty in a tray that has one" if p['df'] < SPREAD_DF else '') if x]
@@ -641,7 +646,7 @@ def printed_and_purged(jobs):
 
 def report(history, names=None, learning=True, cfg=None):
     """learned: the text, line by line."""
-    names, on = names or {}, (cfg or {}).get('measured_reserve', True)
+    names, on = names or {}, (cfg or {}).get('measured_reserve', False)
     lines = [f"Learning from prints is {'on' if learning else 'off'}" + ('' if history else ': nothing recorded yet')]
     for serial, by_tray in sorted(history.items()):
         est = estimates(by_tray); p = est['printer']

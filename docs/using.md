@@ -52,7 +52,7 @@ Its colour and tooltip are the last result. A click shows that result again; bef
 - Check again at "Send print job" (`at_send`)
 - Reserve: 2, 3 or 5 % of the full spool (`spool_reserve_pct`)
 - Learn from prints, tray by tray (`learn`, on; see [Learning](learning.md))
-- Measure the reserve from past prints (`measured_reserve`, on)
+- Measure the reserve from past prints (experimental) (`measured_reserve`, off; see [Learning, the measured reserve](learning.md#the-measured-reserve) before turning it on)
 - Start automatically
 
 Settings are saved to `config.json` beside the script, which holds only what was changed. The keys, their defaults and their meaning are `DEFAULTS` at the top of [`filament_guard.py`](../filament_guard.py).
@@ -73,4 +73,4 @@ A spool matches a filament when it is the same material, on the nozzle that prin
 
 ### The reserve
 
-The AMS's figure is an estimate: it counts what it has fed, so its error grows as the spool empties. On 2026-11-19 a 1 kg spool reported at 105 g ran dry after 84-85 g, one gram before the end of a print that needed 85.3 g. So "enough" asks for the need plus the larger of 10 % of the need (`margin_pct`) and 3 % of a spool's full weight (`spool_reserve_pct`: 30 g on a 1 kg spool). The spool is the largest of those the filament could be printed from, whichever of them is the fullest: with a 250 g and a 1 kg spool of one filament loaded, the reserve is 30 g. Below that the result is "tight", and the full card shows. With learning, once it has the evidence, the reserve is measured from the guard's own past forecasts instead (see [Learning, the reserve](learning.md#the-reserve)).
+The AMS's figure is an estimate: it counts what it has fed, so its error grows as the spool empties. On 2026-11-19 a 1 kg spool reported at 105 g ran dry after 84-85 g, one gram before the end of a print that needed 85.3 g. So "enough" asks for the need plus the larger of 10 % of the need (`margin_pct`) and 3 % of a spool's full weight (`spool_reserve_pct`: 30 g on a 1 kg spool). The spool is the largest of those the filament could be printed from, whichever of them is the fullest: with a 250 g and a 1 kg spool of one filament loaded, the reserve is 30 g. Below that the result is "tight", and the full card shows. An experimental setting, off unless you turn it on, measures the reserve from the guard's own past forecasts instead (see [Learning, the measured reserve](learning.md#the-measured-reserve)).

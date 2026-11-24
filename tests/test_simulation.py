@@ -112,7 +112,7 @@ def simulate(scenario, prints, seed=1889, cfg=None):
 def test_the_simulated_printer_runs_dry_no_more_often_and_warns_less_where_its_gauge_is_true(state, scenario, prints):
     """Before the measured reserve, no "enough" after which the print ran dry that 1.3.0 would not have given too; with
     it, at most ALPHA of them; and for a true gauge fewer warnings on prints that fitted than 1.3.0's."""
-    out = simulate(scenario, prints)
+    out = simulate(scenario, prints, cfg={'measured_reserve': True})
     old, new, measured = out['counts']['1.3.0'], out['counts']['1.4.0'], out['counts']['1.4.0 measured']
     assert new['ok_dry'] - measured['ok_dry'] <= old['ok_dry'] and measured['ok_dry'] <= gn.ALPHA * max(1, measured['ok'])
     if scenario == 'accurate gauge': assert measured['rows'] > 0 and new['fit_warned'] < old['fit_warned']

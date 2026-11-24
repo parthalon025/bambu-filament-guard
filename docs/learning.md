@@ -22,8 +22,8 @@ Per tray, over its prints since any change was noticed in it (see [Checked again
 |---|---|---|
 | rho | how far the reading fell for each sliced gram: each print's ratio, clipped to 0.9..1.15 (to the printer's own 5 % and 95 % quantiles once it has 20), the tray's own drawn toward the printer's as far as the trays cannot be told apart from each other (shrinkage), and the printer's drawn toward 1 as if by 50 g of prints that fell true | the first sound whole print on the printer; a tray with none takes the printer's |
 | pre | the grams lost before the first layer beyond what the profile has there, drawn toward the printer's the same way | the first print followed from before its first layer |
-| a | what the tray reads with its spool empty: an upper 90 % bound from run-dries and spools weighed near empty (seen exactly), and from spools seen still feeding at a reading (their a lies below it), by Kaplan-Meier; once readings at empty repeat within a tray, also a bound for one more spool from their spread. A tray with fewer than 3 of its own takes the printer's, but never less than its own largest | the first run-dry or weigh-in near empty |
-| margin | how far the guard's own forecasts fell short of what the reading fell, per gram of print plus 20 g: the one-sided 90 % conformal bound of the scored prints, the printer's, or the tray's own once it has 9 (the larger of the two) | 9 scored prints on the printer |
+| a | what the tray reads with its spool empty, from run-dries and spools weighed near empty (seen exactly) and from spools seen still feeding at a reading (their a lies below it), by Kaplan-Meier: the largest seen exactly while there are 10 or fewer, and with more the reading that a tenth of them reach or pass (an estimate of their 90th percentile, not a bound). Once readings at empty repeat within a tray, also the 90 % bound for one more spool from their spread, where it is the larger. A tray with fewer than 3 of its own takes the printer's, but never less than its own largest | the first run-dry or weigh-in near empty |
+| margin | how far the guard's own forecasts fell short of what the reading fell, per gram of print plus 20 g: the one-sided 90 % conformal bound of the scored prints, the printer's, or the tray's own once it has 9 (the larger of the two) | 9 scored prints on the printer, and only with [the measured reserve](#the-measured-reserve) turned on |
 
 ## What it changes
 
@@ -31,7 +31,22 @@ A tray the printer measures is counted with its reading less a, and with no more
 
 ## The reserve
 
-It stays the fixed one (see [What the results mean](using.md#the-reserve)) until the printer has 9 scored prints and readings at empty that repeat within a tray (3 in one tray, or 2 in each of two: their spread from spool to spool is then known), and the tray judged has one of its own. Then it is the margin x (N + 20 g), never below 5 g or 2 % of the need, and it can be smaller than the fixed one: a tray that proves accurate is no longer called "tight" on 3 % of its spool. Until then, or with "Measure the reserve from past prints" off, no answer is looser than 1.3.0's rules give: each tray is counted with the stricter of the two. The card says which reserve it used, and on what.
+The reserve is the fixed one (see [What the results mean](using.md#the-reserve)), and each tray is counted with the stricter of what is described above and of 1.3.0's rules: the largest reading of its last 3 run-dries (less any that a later print showed the tray still feeding below), its rate over its last 10 prints when that is between 0.90 and 0.99, and the largest loss before the first layer of its last 5. So no answer is looser than 1.3.0's rules and the fixed reserve give: learning only makes a check stricter.
+
+### The measured reserve
+
+This is experimental, and off unless you turn it on: "Measure the reserve from past prints (experimental)" in the icon's settings (`measured_reserve`). 1.4.0 had it on.
+
+With it on, the reserve stays the fixed one until the printer has 9 scored prints and readings at empty that repeat within a tray (3 in one tray, or 2 in each of two: their spread from spool to spool is then known), and the tray judged has one of its own. Then it is the margin x (N + 20 g), never below 5 g or 2 % of the need, and the tray is counted by the model alone, without 1.3.0's rules. It can be smaller than the fixed one: a tray that proves accurate is no longer called "tight" on 3 % of its spool. The card says which reserve it used, and on what.
+
+### What the measured reserve cannot see
+
+It is off by default because it can say "enough" for a print that then runs dry, in two cases that this version does not solve. An independent review of 1.4.0 found both, by running the guard's own recorder and check against a simulated printer of the reviewer's making. It counted the answers the measured reserve loosened: "enough" where 1.3.0's rules said tight or worse.
+
+- **Spools begin to read more at empty.** A new batch or product whose spools hold less than their tag says, or a change in the AMS's firmware, moves what a tray reads with its spool empty. The guard looks for a change in a tray in its forecast errors, and this one never shows there: the reading still falls as far per gram as before. What a tray reads at empty is learned only from run-dries and weigh-ins near empty, and old ones count as much as new ones. In the review's runs (12 seeds of 300 prints, the reading at empty going from about 0 g to 25 g at print 150), 5 of the 31 answers loosened in the 60 prints after the change ran dry (16 %); before it, none of 66. After a change of 15 g it was 3 of 43 (7 %), and after one of 40 g (5 seeds) 3 of 9. 1.3.0's rules had no failure in the runs with 15 g and 25 g. A tray that has seen 19 run-dries near 0 g counts 9 g for an empty spool after one run-dry at 25 g, 13 g after two and 24 g after three, and each of those run-dries is a print that ran out.
+- **One tray unlike the others.** How far spools differ at empty is measured over all trays of the printer together. With three trays whose spools agree to 2 g and a fourth whose spools are anything from 0 to 50 g short of their tag (mixed products), the spread comes mostly from the three, and is too small for the fourth. In the review's runs (8 seeds of 300 prints), 2 of the 18 answers loosened on that tray ran dry (11 %).
+
+With the setting off neither can loosen an answer: the reserve is the fixed one, and 1.3.0's rules stand.
 
 ## Checked against itself
 

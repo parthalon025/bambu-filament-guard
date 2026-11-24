@@ -69,10 +69,12 @@ DEFAULTS = {
     # where the tray's history shows its reading runs high, and a print with more where it shows prints take more. Off:
     # nothing is followed or corrected for it; what was learned is kept.
     'learn': True,
-    # With learning on: once the printer has enough scored prints and readings at empty, the reserve is measured from the
-    # guard's own past forecast errors instead of the fixed one above, and may be smaller (never below 5 g or 2 % of the
-    # need). Off: the fixed reserve, and no answer looser than learning without it.
-    'measured_reserve': True,
+    # Experimental, with learning on: once the printer has enough scored prints and readings at empty, the reserve is
+    # measured from the guard's own past forecast errors instead of the fixed one above, and may be smaller (never below
+    # 5 g or 2 % of the need). Off unless turned on: it loosens a check on evidence that cannot see a change in what
+    # spools read at empty (docs/learning.md, "What the measured reserve cannot see"), and nothing of the learning has
+    # yet followed a real print. Off, no answer is looser than the fixed reserve and 1.3.0's rules give.
+    'measured_reserve': False,
     'empty_spool_g': 250,        # the empty spool's weight the amount window starts with: the last one entered there (a Bambu spool: about 250 g)
 }
 SEVERITY = {'OK': 0, 'UNKNOWN': 1, 'TIGHT': 2, 'SPLIT': 3, 'SHORT': 4, 'MISSING': 4, 'COLOUR': 4}

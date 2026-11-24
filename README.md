@@ -22,7 +22,7 @@ The AMS's remaining-filament figure is an estimate. It counts what it has fed, s
 
 - **Every filament, every plate.** Checks each plate as soon as it is sliced, and all the project's sliced plates again when "Send print job" opens.
 - **Batch-printing aware.** A plate sliced while another prints is checked against what the spools will hold when it can start. See [The running print](docs/running-print.md).
-- **Learns each tray's accuracy.** Scores its own forecasts against what each print took. Until they have earned it, learning only makes a check stricter. After that, the reserve is measured instead of fixed, and it is smaller for a tray that proves accurate. See [Learning from previous prints](docs/learning.md).
+- **Learns each tray's accuracy.** Follows the prints and learns, per tray, how far its reading can be trusted: what it reads when a spool runs dry, and how far it falls per gram printed. This only makes a check stricter. An experimental setting, off unless you turn it on, measures the reserve from the guard's own forecasts instead of fixing it. See [Learning from previous prints](docs/learning.md).
 - **Spools without RFID.** Enter a weighed amount once, and the guard counts it down as prints use it. See [Spools without a reading](docs/manual-amounts.md).
 - **Scriptable.** `check` gives a plain-text or JSON result for any sliced file, with exit codes a script can act on. See [Commands](#commands).
 - **Read-only and local.** Sends the printer no command that changes it. See [Privacy and security](#privacy-and-security).
@@ -141,7 +141,7 @@ python filament_guard.py uninstall    # remove the shortcut and stop
 |---|---|
 | [Using the guard](docs/using.md) | How it works step by step, the card and its buttons, the icon and its settings, what the results mean, the reserve |
 | [The running print](docs/running-print.md) | How the print on the printer is counted before a new plate is checked |
-| [Learning from previous prints](docs/learning.md) | What is recorded, the model, what is learned and what it changes, the measured reserve, weigh-ins, the simulation |
+| [Learning from previous prints](docs/learning.md) | What is recorded, the model, what is learned and what it changes, the experimental measured reserve and what it cannot see, weigh-ins, the simulation |
 | [Spools without a reading](docs/manual-amounts.md) | Entering the amount of a spool the printer cannot measure, and how it is counted down |
 | [Limits](docs/limits.md) | What the guard cannot read or does not yet know, and what it does in each case |
 

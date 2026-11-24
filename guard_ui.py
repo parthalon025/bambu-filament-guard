@@ -373,7 +373,7 @@ class Tray:
                 warns("Warn when a spool's amount is unknown", 'UNKNOWN'),
                 option('Check again at "Send print job"', 'at_send', True, False),
                 option('Learn from prints, tray by tray', 'learn', True, False),
-                option('Measure the reserve from past prints', 'measured_reserve', True, False),
+                option('Measure the reserve from past prints (experimental)', 'measured_reserve', True, False),
                 Item('Reserve', Menu(*[Item(f'{p} % of the full spool', do(lambda p=p: g.set_option('spool_reserve_pct', p)),
                                             checked=lambda item, p=p: g.cfg['spool_reserve_pct'] == p, radio=True) for p in (2, 3, 5)])),
                 Item('Start automatically', do(g.toggle_autostart), checked=lambda item: os.path.exists(fg.STARTUP_LNK)))),

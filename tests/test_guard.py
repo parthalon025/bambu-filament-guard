@@ -8,7 +8,7 @@ import pytest
 
 import filament_guard as fg
 import guard_learn as gn
-from helpers import CFG, gcode, sliced, e, kept, running, BLUE, benchy, run_job, blue_reads
+from helpers import CFG, MEASURED, gcode, sliced, e, kept, running, BLUE, benchy, run_job, blue_reads
 
 
 class Card:
@@ -215,7 +215,7 @@ def test_the_card_offers_a_weigh_in_records_it_and_checks_again(state, monkeypat
     running(monkeypatch, blue_reads(110))
     res = fg.evaluate(BLUE, CFG, 'Benchy')
     assert res['rows'][0]['status'] == 'TIGHT' and res['weigh']['label'] == 'C3' and res['weigh']['reading'] == 110
-    assert res['printer']['reserve'] == 'the reserve is the fixed one: 9 more scored prints and 2 more readings at empty in a tray that has one measure it'
+    assert fg.evaluate(BLUE, MEASURED, 'Benchy')['printer']['reserve'] == 'the reserve is the fixed one: 9 more scored prints and 2 more readings at empty in a tray that has one measure it'
     guard, again = guard_with(), []
     monkeypatch.setattr(guard, 'recheck', lambda res, beside=None: again.append(res['title']))
     guard.act('asked', res, res['weigh'])

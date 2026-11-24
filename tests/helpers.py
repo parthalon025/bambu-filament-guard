@@ -6,6 +6,7 @@ import guard_ledger as gl
 
 
 CFG = dict(fg.DEFAULTS)
+MEASURED = dict(CFG, measured_reserve=True)                                             # the experimental measured reserve, turned on
 
 def gcode(weights='9.99,10.87', used='1,3', types='PLA;PETG;PLA', colours='#0A2989;#FFFFFF;#C12E1F', ids='GFA00;GFG02;GFA00',
           nozzles='0.4', fmap='1,1,1', complete=True, body=('G1 X1',), settings=()):
