@@ -44,6 +44,8 @@ jobs:
           7z x -o"$RUNNER_TEMP/un zip" "dist/BambuFilamentGuard-$VERSION.zip" > /dev/null
           "$RUNNER_TEMP/un zip/BambuFilamentGuard/python.exe" "$RUNNER_TEMP/un zip/BambuFilamentGuard/app/filament_guard.py" --help > /dev/null
           "$RUNNER_TEMP/un zip/BambuFilamentGuard/python.exe" .github/scripts/packaged_card.py dist/windows
+      - name: The unzipped guard installs, runs, tests itself and is removed again
+        run: python .github/scripts/packaged_run.py "$RUNNER_TEMP/un zip/BambuFilamentGuard"
       - run: python .github/scripts/release_notes.py "dist/BambuFilamentGuard-${{ steps.version.outputs.version }}.zip" > dist/notes.md && cat dist/notes.md
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9   # v7.0.2
         with:
