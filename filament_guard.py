@@ -282,8 +282,10 @@ def parse_plate(text):
             'layers': int(layers) if layers and layers.isdigit() else None, 'filaments': filaments}
 
 def plates_of_file(path):
-    """[(label, plate)] of a .gcode file or of every sliced plate in a .gcode.3mf. ValueError, with the reason, for a
-    file that is not one or cannot be read: a 3MF that is damaged, cut short or encrypted included."""
+    """[(label, plate)] of a .gcode file or of every sliced plate in a .gcode.3mf; the plate is None for a plate of a 3MF
+    whose G-code is not complete, which the caller has to say: left out, the rest would pass for the whole file.
+    ValueError, with the reason, for a file that is not one or cannot be read: a 3MF that is damaged, cut short or
+    encrypted included."""
     if zipfile.is_zipfile(path):
         import zlib
         out = []
@@ -291,8 +293,7 @@ def plates_of_file(path):
             with zipfile.ZipFile(path) as z:
                 names = sorted((n for n in z.namelist() if re.fullmatch(r'Metadata/plate_\d+\.gcode', n)), key=lambda n: int(re.findall(r'\d+', n)[0]))
                 for n in names:
-                    with z.open(n) as f: plate = parse_plate(read_head(f))
-                    if plate: out.append(('plate ' + re.findall(r'\d+', n)[0], plate))
+                    with z.open(n) as f: out.append(('plate ' + re.findall(r'\d+', n)[0], parse_plate(read_head(f))))
         except (zipfile.BadZipFile, zlib.error, RuntimeError, EOFError) as e: raise ValueError(f'this 3MF cannot be read ({e})')
         if not out: raise ValueError('no sliced plate in this 3MF: slice it first (a project file holds no G-code)')
         return out
@@ -1483,9 +1484,12 @@ def check(a, cfg):
     slice, as text or as JSON. Returns the exit code: the worst of the answers, 3 with one line of why (with --json,
     {"error": ...}) when there is nothing to check."""
     def not_checked(why): print(json.dumps({'error': why}) if a.json else why); return 3
+    def unread(title, why): return {'title': title, 'model': '', 'time': '', 'times': a.times, 'plate': None, 'printer': None, 'rows': [], 'worst': 'OK', 'error': why}
+    cut = []                                                 # the plates of the file whose G-code is not complete
     if a.file:
-        try: plates = [(os.path.basename(a.file) + (' ' + label if label else ''), plate) for label, plate in plates_of_file(a.file)]
+        try: found = plates_of_file(a.file)
         except (OSError, ValueError) as e: return not_checked(f'{a.file}: {e}')
+        plates, cut = [(os.path.basename(a.file) + (' ' + label if label else ''), plate) for label, plate in found], [label for label, plate in found if not plate]
     else:
         newest = newest_gcode()
         if not newest: return not_checked('no sliced plate found: slice in Bambu Studio first, or name a .gcode / .gcode.3mf file')
@@ -1495,10 +1499,14 @@ def check(a, cfg):
         if not plate: return not_checked('Bambu Studio is still writing its newest slice')
         plates = [(project_title(newest), plate)]
     seen = {}
-    results = [evaluate(plate, cfg, title, a.times, seen) for title, plate in plates]
+    results = [evaluate(plate, cfg, title, a.times, seen) if plate else unread(title, 'the G-code of this plate is not complete in the file') for title, plate in plates]
     # "Print all plates" needs the sum: each plate alone can fit a spool that does not hold them all, and exit code 0
-    # for such a file once sent a script on. The same reading of the printer serves every answer (seen).
-    if len(plates) > 1: results.append(evaluate(plates_together([plate for _, plate in plates]), cfg, os.path.basename(a.file) + ' all plates together', a.times, seen))
+    # for such a file once sent a script on. The same reading of the printer serves every answer (seen). A plate
+    # that could not be read has no part in the sum, so there is none.
+    if len(plates) > 1:
+        together = os.path.basename(a.file) + ' all plates together'
+        results.append(unread(together, f"the G-code of {', '.join(cut)} is not complete in the file: what all plates need together cannot be told") if cut
+                       else evaluate(plates_together([plate for _, plate in plates]), cfg, together, a.times, seen))
     if not a.file: results[0]['pid'], results[0]['plate_no'] = studio_pid(newest), plate_number(newest)
     print(json.dumps(results, indent=1) if a.json else '\n'.join(report_text(r) for r in results))
     if a.popup:

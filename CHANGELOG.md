@@ -35,6 +35,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - The guard looked for slices under the temp folder Python goes by (`%TEMP%` before `%TMP%`); Bambu Studio writes under the one Windows gives it (`%TMP%` before `%TEMP%`). With only one of the two moved, say `TMP` to a RAM disk, no plate was ever checked and nothing said so; a temp folder with `[` or `]` in its path had the same effect. The guard now looks under the folder Windows names, under `%TMP%` and under `%TEMP%`, each as it is spelt.
 - A line of the G-code's header with nothing after its colon was read with the next line as its value: a slice with an empty `; filament:` line was reported as one the guard cannot read, though its totals can be placed, and an empty totals line gave a reason that named another line. Such a line is now empty.
 - A filament total of `nan` or `inf` in a G-code was taken as a number, and the filament's answer read "short by nan g". A slice with such a total is now one the guard cannot read, and it says which total.
+- `check FILE` left a plate whose G-code is not complete in the file out without a word, and answered for the others as if they were the whole file. Such a plate is now an answer of its own, "could not be checked", all plates together have none, and the exit code is 3.
 
 ## [1.4.0] - 2026-11-20
 

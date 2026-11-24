@@ -309,3 +309,19 @@ def test_totals_that_are_not_amounts_are_refused():
     nan g"; a slice with one is a slice the guard cannot read."""
     for total in ('nan', 'inf', '-inf', 'NaN'):
         with pytest.raises(ValueError, match=f'a filament total that is not an amount: "{total},10.87"'): fg.parse_plate(gcode(weights=f'{total},10.87'))
+
+def test_check_says_when_a_plate_of_the_file_is_not_complete(state, tmp_path, monkeypatch, capsys):
+    """The G-code of plate 2 ends before its settings: the plate was left out without a word, and the others answered as
+    if they were the whole file, with exit code 0. It is an answer of its own, and all plates together have none."""
+    whole = gcode(weights='400.00', used='1'); path = exported(tmp_path, [whole, gcode(weights='400.00', used='1', complete=False), whole])
+    running(monkeypatch, blue_reads(1000))
+    assert [(label, plate and plate['filaments'][0]['grams']) for label, plate in fg.plates_of_file(path)] == [('plate 1', 400.0), ('plate 2', None), ('plate 3', 400.0)]
+    code, out = checked(capsys, path)
+    assert code == 3 and [line for line in out.splitlines() if not line.startswith('   ')] == [
+        'Enough filament for this print: Brackets.gcode.3mf plate 1', '  Bambu Lab H2D, IDLE',
+        'Filament could not be checked: Brackets.gcode.3mf plate 2', '  the G-code of this plate is not complete in the file',
+        'Enough filament for this print: Brackets.gcode.3mf plate 3', '  Bambu Lab H2D, IDLE',
+        'Filament could not be checked: Brackets.gcode.3mf all plates together', '  the G-code of plate 2 is not complete in the file: what all plates need together cannot be told']
+    code, out = checked(capsys, path, '--json')
+    assert code == 3 and [bool(r['error']) for r in json.loads(out)] == [False, True, False, True]
+    assert checked(capsys, exported(tmp_path, [gcode(complete=False)])) == (3, 'Filament could not be checked: Brackets.gcode.3mf plate 1\n  the G-code of this plate is not complete in the file')
