@@ -1152,7 +1152,7 @@ def test_asking_for_a_screens_work_area_makes_no_new_type_each_time():
     """work_area defined its MONITORINFO structure inside the function: a class for every call, and ctypes keeps the
     pointer type of each for good. 6 kB a call, 2.5 calls a second while a card stands beside a dialog."""
     import ctypes, gc, guard_ui
-    structures = lambda: (gc.collect(), sum(1 for c in ctypes.Structure.__subclasses__() if c.__name__ == 'MONITORINFO'))[1]
+    structures = lambda: (gc.collect(), sum(1 for c in ctypes.Structure.__subclasses__() if (c.__module__, c.__name__) == ('guard_ui', 'MONITORINFO')))[1]   # guard_ui's own: another package may have one of that name
     guard_ui.work_area(1); before = structures()
     for _ in range(20): guard_ui.work_area(1)
     assert structures() == before == 1
@@ -1276,6 +1276,7 @@ def test_the_packaged_guard_starts_tk_without_another_programs_tcl_library(monke
     source keeps them: there the Python and its Tcl are the user's."""
     import guard_ui
     tk_stand_in(monkeypatch); seen = []
+    monkeypatch.setattr(guard_ui.ctypes.windll.shcore, 'SetProcessDpiAwareness', lambda how: None, raising=False)   # not for the process that runs the tests
     sys.modules['tkinter'].Tk = type('Tk', (), {'__init__': lambda self: seen.append({k: fg.os.environ.get(k) for k in ('TCL_LIBRARY', 'TK_LIBRARY')}), 'withdraw': lambda self: None})
     for here, kept in (('app', None), ('bambu-filament-guard', 'elsewhere')):
         monkeypatch.setenv('TCL_LIBRARY', 'elsewhere'); monkeypatch.setenv('TK_LIBRARY', 'elsewhere')
