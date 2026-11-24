@@ -4,7 +4,7 @@ The card is a window of the guard that Bambu Studio's window owns: it is above t
 moves, minimises and closes with it, follows its dark or light mode, and never takes the keyboard. After a slice it
 sits in the bottom right corner of the preview, under the slicing result; when "Send print job" opens with a warning
 standing, it sits beside that dialog."""
-import os, ctypes, ctypes.wintypes as wt
+import os, time, ctypes, ctypes.wintypes as wt
 import filament_guard as fg
 
 # Colour tokens: every colour of the card and the icon is named here once, for Bambu Studio's dark and light mode, and used by name.
@@ -29,6 +29,15 @@ def theme():
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize') as k:
             return THEMES['light' if winreg.QueryValueEx(k, 'AppsUseLightTheme')[0] else 'dark']
     except OSError: return THEMES['light']
+
+def age_text(res):
+    """' This answer is from 14:32: "Check again" asks the printer now.' for an answer shown again more than a minute after
+    its check (res['at']; with the day when that was not today), '' for one as it comes: "Show last result" showed hours-old
+    amounts as what the printer "reports now"."""
+    at = res.get('at')
+    if not at or time.time() - at < 60: return ''
+    when = time.localtime(at)
+    return f" This answer is from {time.strftime('%H:%M' if when[:3] == time.localtime()[:3] else '%d %b, %H:%M', when)}: \"Check again\" asks the printer now."
 
 def tone_of(res):
     return 'muted' if res['error'] else {0: 'ok', 1: 'muted', 2: 'warn', 3: 'warn', 4: 'danger'}[fg.SEVERITY[res['worst']]]
@@ -211,7 +220,7 @@ class Card:
         self.one_line = bool(brief)
         self._label(w, fg.headline(res), tone_of(res), 12, True, row=1, column=0)
         n = res.get('unchecked') or 0                                        # at "Send print job", of a project with more plates than are checked there
-        more = f" {n} older plate{'s' if n != 1 else ''} of the project {'were' if n != 1 else 'was'} not checked: at \"Send print job\" only the {fg.SEND_MOST} sliced last are." if n else ''
+        more = (f" {n} older plate{'s' if n != 1 else ''} of the project {'were' if n != 1 else 'was'} not checked: at \"Send print job\" only the {fg.SEND_MOST} sliced last are." if n else '') + age_text(res)
         if brief:
             line = tk.Frame(w, bg=t['surface']); line.grid(row=2, column=0, sticky='ew'); line.columnconfigure(0, weight=1)
             p = res['printer']

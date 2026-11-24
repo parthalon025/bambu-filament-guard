@@ -925,3 +925,21 @@ def test_a_warning_shows_though_the_state_file_cannot_be_read_for_what_is_ignore
     assert 'Bracket: what is ignored could not be looked up (StateBusy: the state folder was held elsewhere for more than 10 s): shown as not ignored' in (state / 'guard.log').read_text()
     monkeypatch.setattr(fg, 'load_state', lambda: ['not', 'a', 'state'])                      # nor is what cannot be understood
     guard = guard_with(); guard.deliver(res); assert guard.card.shown == [('show', 0)]
+
+@pytest.mark.windows
+def test_a_result_shown_again_says_when_its_check_was_made(state, monkeypatch):
+    """"Show last result", the icon's own click, showed an answer that could be hours old under "Spools as the Bambu Lab
+    H2D reports them now", with nothing to tell it from a new one."""
+    running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 2))); res = fg.evaluate(fg.parse_plate(gcode()), CFG, 'Benchy')
+    guard = guard_with(); guard.deliver(res)
+    assert res['at'] == pytest.approx(time.time(), abs=60) and 'This answer is from' not in card_shown(monkeypatch, res)[0][-1]   # as it comes: nothing to say
+    def said(ago):
+        res['at'] = at = time.time() - ago; guard.show_last()
+        assert guard.card.shown[-1] == ('show', 0) and guard.card.res is res and res['at'] == at                 # shown again, its time as it was
+        when = time.localtime(at); day = '' if when[:3] == time.localtime()[:3] else time.strftime('%d %b, ', when)
+        return f' This answer is from {day}{time.strftime("%H:%M", when)}: "Check again" asks the printer now.'
+    for ago in (90, 3 * 86400):
+        text = said(ago); assert card_shown(monkeypatch, res)[0][-1].endswith("the amounts are the AMS's estimate." + text)
+    failed = answer(1, 'OK', error='the Bambu Lab H2D did not report its status', at=time.time() - 3 * 86400, times=1, model='Bambu Lab H2D', time='')
+    labels = card_shown(monkeypatch, failed)[0]
+    assert labels[-2:] == ['The Bambu Lab H2D did not report its status.', time.strftime('This answer is from %d %b, %H:%M: "Check again" asks the printer now.', time.localtime(failed['at']))]

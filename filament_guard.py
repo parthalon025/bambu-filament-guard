@@ -1106,6 +1106,7 @@ class Guard:
         Bambu Studio's, once put a line that went after 8 seconds in its place and turned the icon green: now it does
         not show, and the icon keeps the warning's colour."""
         import guard_ui
+        res.setdefault('at', time.time())                     # when its check was made: a card that shows it again later says so
         if not res['error']: res['ignored'] = self.ignored(res)
         rank, plate, stands = self.rank(res), (res.get('pid'), res['title'], res.get('plate_no')), self.standing_warning()
         own = bool(stands) and stands[0] == plate
