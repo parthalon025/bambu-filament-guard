@@ -68,7 +68,7 @@ def test_a_setting_of_the_wrong_kind_falls_back_to_its_default_alone_and_is_name
     assert len(cfg['_wrong']) == 7 and 'margin_pct in config.json is "25", not a number from 0 to 100: the default is in use' in cfg['_wrong']
     assert 'measured_reserve in config.json is "false", not true or false: the default is in use' in cfg['_wrong']
     assert any(line.startswith('printers in config.json: the address for the printer …IAL3 is 5') for line in cfg['_wrong'])
-    cfg['ok_seconds'] = 0; fg.save_config(cfg)
+    cfg['ok_seconds'] = 0; fg.save_config(cfg, 'ok_seconds')
     assert '_wrong' not in json.load(open(fg.CONFIG))                                    # what was wrong is said, never saved
 
 def test_settings_that_are_no_json_object_leave_the_defaults_in_use_and_say_so(state):
@@ -96,8 +96,36 @@ def test_settings_the_guard_cannot_read_are_kept_when_a_setting_is_saved(state):
         (state / 'config.json').write_bytes(written)
         cfg = fg.load_config()
         assert cfg['margin_pct'] == 10 and len(cfg['_wrong']) == 1 and cfg['_wrong'][0].startswith('config.json cannot be read (') and cfg['_wrong'][0].endswith('): the defaults are in use')
-        cfg['empty_spool_g'] = 212.0; fg.save_config(cfg)
+        cfg['empty_spool_g'] = 212.0; fg.save_config(cfg, 'empty_spool_g')
         assert (state / 'config.json.unreadable').read_bytes() == written and json.load(open(fg.CONFIG)) == {'empty_spool_g': 212.0}
     text = '{"margin_pct": 25, "ok_seconds": 0,}'; (state / 'config.json').write_text(text)
     assert fg.load_config()['_wrong'] == [f'config.json cannot be read ({why_not_json(text)}): the defaults are in use'] and ': line ' in why_not_json(text)   # the place is named
     assert 'config.json could not be read: copied to config.json.unreadable before a setting was saved' in (state / 'guard.log').read_text()
+
+def test_a_setting_saved_leaves_what_was_edited_by_hand_since_the_guard_started(state):
+    """The guard reads config.json when it starts. A setting changed from its menu was written from that copy: a
+    printer's address or a margin added by hand meanwhile was gone. The file is read again and the one key set in it."""
+    (state / 'config.json').write_text('{"learn": false}'); cfg = fg.load_config()
+    edited = {'learn': False, 'margin_pct': 25, 'printers': {'SERIAL': {'ip': '192.0.2.50'}}, 'ok_seconds': '8', 'mine': 'a note'}
+    (state / 'config.json').write_text(json.dumps(edited))                               # by hand, while the guard runs
+    cfg['spool_reserve_pct'] = 5; fg.save_config(cfg, 'spool_reserve_pct')
+    assert json.load(open(fg.CONFIG)) == dict(edited, spool_reserve_pct=5)                # a key the guard does not know, and one it could not use, stay as written
+    cfg['spool_reserve_pct'] = 3; fg.save_config(cfg, 'spool_reserve_pct')              # back at its default: that key goes, the rest stays
+    assert json.load(open(fg.CONFIG)) == edited
+
+def test_a_guard_ended_while_it_saves_a_setting_leaves_the_file_as_it_was(state, monkeypatch):
+    """config.json was opened for writing, which empties it, and then written: a guard ended in between left 0 bytes, and
+    the next start ran on the defaults, with learning the user had turned off on again. It is written beside the file,
+    flushed to the disk, and put in place by a replace."""
+    (state / 'config.json').write_text('{"learn": false, "margin_pct": 25}'); cfg = fg.load_config(); cfg['spool_reserve_pct'] = 5
+    def ended(*a, **k): raise KeyboardInterrupt
+    with monkeypatch.context() as m:
+        m.setattr(fg.json, 'dump', ended)
+        with pytest.raises(KeyboardInterrupt): fg.save_config(cfg, 'spool_reserve_pct')
+    assert json.load(open(fg.CONFIG)) == {'learn': False, 'margin_pct': 25}
+    steps, sync, replace = [], os.fsync, os.replace
+    monkeypatch.setattr(fg.os, 'fsync', lambda fd: (steps.append('flushed to the disk'), sync(fd))[1])
+    monkeypatch.setattr(fg.os, 'replace', lambda a, b: (steps.append('put in place'), replace(a, b))[1])
+    fg.save_config(cfg, 'spool_reserve_pct')
+    assert steps == ['flushed to the disk', 'put in place'] and json.load(open(fg.CONFIG)) == {'learn': False, 'margin_pct': 25, 'spool_reserve_pct': 5}
+    assert sorted(os.listdir(state)) == ['config.json']                                  # and no temp file stays

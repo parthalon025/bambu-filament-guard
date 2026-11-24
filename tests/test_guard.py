@@ -410,3 +410,10 @@ def test_the_guard_says_at_its_start_that_its_settings_cannot_be_read(state, mon
     result, [(headline, [(mark, line), where], tone)] = started(monkeypatch)
     assert (result, headline, mark, tone) == (0, 'Settings in config.json are not in use', False, 'danger')
     assert line.startswith('config.json cannot be read (') and 'line 1 column 1' in line and line.endswith('): the defaults are in use.')
+
+@pytest.mark.windows
+def test_a_setting_changed_from_the_menu_leaves_what_was_edited_by_hand_meanwhile(state):
+    (state / 'config.json').write_text('{"learn": false}'); guard = guard_with(fg.load_config())
+    (state / 'config.json').write_text('{"learn": false, "margin_pct": 25}')            # by hand, while the guard runs
+    guard.toggle_warning('UNKNOWN')
+    assert fg.json.load(open(fg.CONFIG)) == {'learn': False, 'margin_pct': 25, 'popup_on': fg.DEFAULTS['popup_on'] + ['UNKNOWN']}

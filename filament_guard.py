@@ -168,15 +168,28 @@ def weigh_doubt(grams, reading):
     if apart <= guard_learn.DRY_MOST: return ''
     return f'{grams:.0f} g weighed, {reading:.0f} g read by the printer: {apart:.0f} g apart. Save again if the weight is right.'
 
-def save_config(cfg):
-    """Only what differs from DEFAULTS goes into config.json: a full copy would pin today's defaults for good. A file
-    there that cannot be read (written by hand, with a comma too many) is copied to config.json.unreadable first: what
-    was written in it can then be put right, where the saved setting alone would have taken its place."""
+def save_config(cfg, key=None):
+    """Sets one setting (key) in config.json to what cfg has for it; without a key, every setting cfg has. The file is
+    read again and that key alone changed in it: the guard's own copy is as old as its start, and writing that would
+    undo what was edited by hand since. Only what differs from DEFAULTS is in the file (a full copy would pin today's
+    defaults for good), so a setting back at its default leaves it. The new file is written beside the old one, flushed
+    to the disk and put in place by a replace: a guard ended meanwhile leaves the settings as they were, not an empty
+    file. A file that cannot be read (written by hand, with a comma too many) is copied to config.json.unreadable
+    first: what was written in it can then be put right, where the saved setting alone would have taken its place."""
     os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
-    if config_held()[1]:
+    held, why = config_held()
+    if why:
         with open(CONFIG, 'rb') as f, open(CONFIG + '.unreadable', 'wb') as copy: copy.write(f.read())
         log('config.json could not be read: copied to config.json.unreadable before a setting was saved')
-    json.dump({k: v for k, v in cfg.items() if DEFAULTS.get(k) != v and k != '_wrong'}, open(CONFIG, 'w', encoding='utf-8'), indent=1)
+    for k in ([key] if key else [k for k in DEFAULTS if k in cfg]):
+        if cfg[k] == DEFAULTS[k]: held.pop(k, None)
+        else: held[k] = cfg[k]
+    temp = f'{CONFIG}.{os.getpid()}.new'
+    try:
+        with open(temp, 'w', encoding='utf-8') as f: json.dump(held, f, indent=1); f.flush(); os.fsync(f.fileno())
+        os.replace(temp, CONFIG)
+    finally:
+        with contextlib.suppress(OSError): os.remove(temp)
 
 def log(msg):
     os.makedirs(STATE_DIR, exist_ok=True)
@@ -1213,7 +1226,7 @@ class Guard:
         self.later(lambda: selftest(self.cfg), then)
 
     def set_option(self, key, value):
-        self.cfg[key] = value; save_config(self.cfg); log(f'setting {key} = {value}')
+        self.cfg[key] = value; save_config(self.cfg, key); log(f'setting {key} = {value}')
         if self.tray: self.tray.refresh()
 
     def toggle_warning(self, status):
