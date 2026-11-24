@@ -395,6 +395,7 @@ def no_studio():
 
 @pytest.mark.windows
 def test_the_self_test_fails_on_a_setting_that_is_not_in_use(state, monkeypatch):
+    """What config.json holds and the guard cannot use is the self-test's first failed line, with Bambu Studio found or not."""
     import guard_ui
     (state / 'config.json').write_text('{"margin_pct": "25"}'); wrong = (False, 'margin_pct in config.json is "25", not a number from 0 to 100: the default is in use')
     monkeypatch.setattr(fg, 'bs_conf', lambda: {'app': {'version': '02.09.01.70'}}); monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None)
@@ -413,6 +414,7 @@ def test_the_guard_says_at_its_start_that_its_settings_cannot_be_read(state, mon
 
 @pytest.mark.windows
 def test_a_setting_changed_from_the_menu_leaves_what_was_edited_by_hand_meanwhile(state):
+    """The menu's click saves its one setting: a margin written into config.json since the guard started stays."""
     (state / 'config.json').write_text('{"learn": false}'); guard = guard_with(fg.load_config())
     (state / 'config.json').write_text('{"learn": false, "margin_pct": 25}')            # by hand, while the guard runs
     guard.toggle_warning('UNKNOWN')
@@ -574,6 +576,7 @@ def test_a_status_without_its_spools_is_not_judged(state, monkeypatch, capsys):
 
 @pytest.mark.windows
 def test_the_self_test_does_not_count_the_spools_of_a_status_without_them(state, monkeypatch):
+    """A piece of a report: the self-test said "0 spool(s)" of it and ended the entered amounts; it says what is missing."""
     import guard_ui, guard_ledger as gl
     running(monkeypatch, {'gcode_state': 'IDLE', 'ams': {'tray_now': '255', 'version': 4}}); gl.enter('SERIAL', {'label': 'A1', 'type': 'PLA', 'colour': '#0A2989'}, 640)
     monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None); monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {})
@@ -605,6 +608,7 @@ def test_with_two_printers_of_one_model_the_answer_names_the_one_asked(state, mo
 
 @pytest.mark.windows
 def test_the_card_names_the_printer_asked_where_two_are_of_one_model(state, monkeypatch):
+    """The one-line card and the line under the full card's table, idle and printing, name the printer that answered."""
     three_printers(monkeypatch, 'P1S-TWO-0002'); res = fg.evaluate(P1S_PLATE, CFG, 'Vase')
     assert card_shown(monkeypatch, res, brief=8)[0][-1] == '1 filament against the spools on the Bambu Lab P1S (…0002)'
     assert card_shown(monkeypatch, res)[0][-1].startswith('Spools as the Bambu Lab P1S (…0002) reports them now;')
@@ -641,6 +645,8 @@ def test_a_plate_sliced_for_another_model_than_the_one_printer_known_is_answered
 
 @pytest.mark.windows
 def test_the_one_line_for_a_plate_that_is_not_checked_shows_as_the_enough_line_does(state, tmp_path, monkeypatch):
+    """After a slice, held while Bambu Studio is minimised; not beside "Send print job"; not with the one line turned
+    off; and the card with its reason when the answer is asked for."""
     f = slice_file(tmp_path, gcode()); plate = fg.parse_plate(f.read_text()); knows(monkeypatch, 'P1S-ONE-0001')
     guard = guard_with(); guard.take_slice(str(f), plate); run_queued(guard)
     assert guard.card.shown == [('line', 'Not checked: sliced for a Bambu Lab H2D, your printer is a Bambu Lab P1S', True)]
@@ -652,6 +658,7 @@ def test_the_one_line_for_a_plate_that_is_not_checked_shows_as_the_enough_line_d
 
 @pytest.mark.windows
 def test_the_self_test_fails_on_a_printer_whose_model_cannot_be_told(state, monkeypatch):
+    """It read that printer's spools and called it working, under the name "unknown model"; the other printer is still asked."""
     import guard_ui
     knows(monkeypatch, 'NEW-ONE-0001', 'H2D-ONE-0003'); monkeypatch.setattr(fg, 'newest_gcode', lambda pid=None: None); monkeypatch.setattr(guard_ui, 'studio_windows', lambda *a: {})
     lines = fg.selftest(CFG)
