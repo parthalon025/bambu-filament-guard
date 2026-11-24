@@ -622,7 +622,7 @@ class Icon:
 
 def answer(plate_no, status, title='Bracket', pid=1, error=None, **more):
     """An answer as evaluate gives it, cut down to what the guard reads to show it: one filament with this result."""
-    return dict({'title': title, 'plate_no': plate_no, 'pid': pid, 'error': error, 'worst': status, 'rows': [{'slot': 1, 'status': status}],
+    return dict({'title': title, 'plate_no': plate_no, 'pid': pid, 'error': error, 'worst': status, 'times': 1, 'rows': [{'slot': 1, 'status': status}],
                  'printer': {'model': 'Bambu Lab H2D', 'state': 'IDLE'}}, **more)
 
 def warned(first, *then, cfg=CFG, **how):
@@ -1322,3 +1322,42 @@ def test_at_send_print_job_a_plate_that_cannot_be_read_is_one_that_was_not_check
     assert (again[0]['plate_no'], again[0]['error'], again[0]['worst']) == (2, None, 'SHORT')
     project_of(tmp_path, monkeypatch, [gcode(used=None), TOO_MUCH]); guard = guard_with(); at_send(guard)   # a warning on another plate comes before it
     assert (guard.card.res['plate_no'], guard.card.res['worst'], guard.card.res['error']) == (2, 'SHORT', None)
+
+@pytest.mark.windows
+def test_a_warning_held_back_shows_when_the_standing_one_has_gone(state):
+    """While a warning's card stood, another plate's warning that was no worse got no card, and none later: when the
+    standing plate was sliced again and fine, the icon went green over a plate that fell short. The latest answer of
+    each such plate is kept, and the worst of them shows when the standing card goes: by its own plate turning fine,
+    or closed by the user."""
+    shown, icon, guard = warned(answer(1, 'SHORT'), answer(2, 'OK'), answer(3, 'TIGHT'), answer(4, 'SHORT'), answer(3, 'SPLIT'), answer(5, 'TIGHT'), answer(5, 'OK'))
+    assert shown == [] and icon == [] and guard.card.res['plate_no'] == 1                    # as before: the card stands, the icon keeps its colour
+    guard.deliver(answer(1, 'OK'))                                                           # plate 1 sliced again, and fine: not its line, but the worst that waited
+    assert guard.card.shown[-1] == ('show', 0) and (guard.card.res['plate_no'], guard.card.res['worst']) == (4, 'SHORT')
+    assert guard.tray.was[-1] == ('danger', 'Not enough filament for this print · Bracket, plate 4') and guard.last is guard.card.res
+    guard.card.close(); guard.show_held()                                                    # closed by the user: the next, in its latest answer
+    assert guard.card.shown[-1] == ('show', 0) and (guard.card.res['plate_no'], guard.card.res['worst']) == (3, 'SPLIT')
+    assert guard.tray.was[-1] == ('warn', 'No single spool holds enough filament · Bracket, plate 3')
+    guard.card.close(); seen = len(guard.card.shown); guard.show_held()                      # plate 5 was fine in the end, plate 2 always: nothing waits
+    assert guard.card.shown[seen:] == [] and guard.held == {}
+
+@pytest.mark.windows
+def test_the_icon_is_not_green_while_a_warning_waits_to_be_shown(state, tmp_path, monkeypatch):
+    """The icon is green only when no plate that was checked has a warning that was neither shown nor ignored: an answer
+    asked for meanwhile does not turn it green, the icon's click checks the plate it names, and the check for "Send
+    print job" brings what waits up to date."""
+    import guard_ui
+    shown, icon, guard = warned(answer(1, 'SHORT'), answer(2, 'TIGHT'))
+    guard.deliver(answer(7, 'OK'), full=True)                                                # "Check newest slice now", say: a fine plate, shown because it was asked for
+    assert guard.card.res['plate_no'] == 7 and guard.tray.was[-1] == ('warn', 'Filament is tight for this print · Bracket, plate 2') == ('warn', guard.last_text())
+    checked = []; monkeypatch.setattr(guard, 'again', lambda res: checked.append(res['plate_no']) or res); monkeypatch.setattr(fg, 'printer_for', lambda plate: None)
+    waiting = guard.held[(1, 'Bracket', 2)]; waiting['plate'] = {'filaments': []}
+    with monkeypatch.context() as m:
+        m.setattr(fg, 'report_text', lambda res: 'the answer')                               # the answers here are cut down to what a card reads
+        guard.check_last(); guard.todo.get(timeout=5)()                                      # the click on the icon: the plate the icon names
+    assert checked == [2] and guard.card.res is waiting and guard.held == {}
+    monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True); running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 500)))
+    project_of(tmp_path, monkeypatch, [TOO_MUCH, FINE, FINE])
+    guard = guard_with(); guard.tray = Icon(); guard.deliver(answer(9, 'SHORT', 'Other'))    # another project's warning stands
+    guard.held[(1, 'Farm', 2)], guard.held[(1, 'Farm', 1)] = answer(2, 'TIGHT', 'Farm', ignored=False), answer(1, 'TIGHT', 'Farm', ignored=False)
+    at_send(guard)                                                                           # every plate of Farm checked again: plate 2 is fine now, plate 1 short
+    assert (guard.card.res['plate_no'], guard.card.res['worst'], guard.card.where) == (1, 'SHORT', 4321) and guard.held == {}

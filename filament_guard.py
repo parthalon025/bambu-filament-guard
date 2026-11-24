@@ -1095,6 +1095,10 @@ WEIGH_MOVED = 2.0                                         # grams a tray's readi
 IGNORE_DAYS, IGNORE_GROWTH = 7, 5.0                       # "Ignore for this project" ends after as many days, or with a filament as many grams further short
 UNSAVED = 'Unsaved project'                               # what project_title calls every project that was never saved
 
+def plate_key(res):
+    """The plate an answer is for: Bambu Studio's process, the project's title, the plate's number."""
+    return (res.get('pid'), res['title'], res.get('plate_no'))
+
 def written(path):
     """When a file was last written; 0 for one that has gone meanwhile."""
     try: return os.path.getmtime(path)
@@ -1136,6 +1140,7 @@ class Guard:
         self.todo, self.stopping = queue.Queue(), threading.Event()
         self.last, self.paused, self.ticks, self.sending, self.jobs = None, False, 0, set(), {}
         self.warning = None                                   # the warning on the full card, while it stands: see standing_warning
+        self.held, self.icon_shows = {}, None                 # the warnings that wait for that card to go, by plate (hold); what the icon was last given
         self.busy, self.greeted = {}, False                   # the checks someone waits for, by what started them: (their line, its text)
         self.told = set()                                     # what was said in the log once, and is not said again in this run
         self.watcher = None                                   # the thread that watches for slices, once it runs (watch_slices)
@@ -1185,21 +1190,48 @@ class Guard:
         opening = [] if res.get('ignored') else self.opening(res)
         return (2, max(SEVERITY[s] for s in opening)) if opening else (0, SEVERITY[res['worst']])
 
+    def on_icon(self):
+        """The answer the icon stands for: the last one shown, or a warning that still waits to be shown (held) when that
+        is the worse. So the icon is green only when no plate that was checked has a warning that was neither shown nor
+        ignored."""
+        waits = max(self.held.values(), key=self.rank, default=None)
+        return waits if waits and (not self.last or self.rank(waits) > self.rank(self.last)) else self.last
+
     def last_text(self):
+        res = self.on_icon()
         if self.paused: return 'Checks are paused'
-        if not self.last: return 'No slice checked yet'
-        return f"{headline(self.last)} · {self.last['title']}" + (f", plate {self.last['plate_no']}" if self.last.get('plate_no') else '')
+        if not res: return 'No slice checked yet'
+        return f"{headline(res)} · {res['title']}" + (f", plate {res['plate_no']}" if res.get('plate_no') else '')
 
     def show_icon(self):
-        """The icon's colour and tooltip: the last answer's; grey, and saying so, while checks are paused (an answer asked
-        for from the icon then turned it green, as if slices were being checked)."""
+        """The icon's colour and tooltip: those of the answer it stands for (on_icon); grey, and saying so, while checks
+        are paused (an answer asked for from the icon then turned it green, as if slices were being checked)."""
         import guard_ui
-        if self.tray: self.tray.set('muted' if self.paused or not self.last else guard_ui.tone_of(self.last), self.last_text()); self.tray.refresh()
+        res = self.on_icon(); now = ('muted' if self.paused or not res else guard_ui.tone_of(res), self.last_text())
+        if self.tray and now != self.icon_shows: self.icon_shows = now; self.tray.set(*now)
+        if self.tray: self.tray.refresh()
 
     def standing_warning(self):
         """The warning whose card still stands: (its plate: Bambu Studio's process, the project, the plate number; its
         rank; its card's window), or None."""
         return self.warning if self.warning and self.card.is_open() and self.card.win is self.warning[2] else None
+
+    def hold(self, res):
+        """An answer that may not take a standing warning's place. A warning is kept, the latest of its plate, and shows
+        when that card has gone (next_held): held back and dropped, it was never shown at all. A fine answer ends what
+        was kept of its plate."""
+        if self.rank(res)[0]: self.held[plate_key(res)] = res
+        else: self.held.pop(plate_key(res), None)
+        self.show_icon()
+
+    def next_held(self):
+        """Shows the worst of the warnings that waited, as the answer it is; its card says how old it is."""
+        return self.deliver(self.held.pop(max(self.held, key=lambda plate: self.rank(self.held[plate]))))
+
+    def show_held(self):
+        """Every 0.4 s on the Tk thread: with no card in the way (the standing one closed by the user) and no check under
+        way, the next warning that waited shows."""
+        if self.held and not self.card.is_open() and not self.busy: self.next_held()
 
     def deliver(self, res, full=False, beside=None):
         """One answer: the full card for a warning (and whenever it is asked for), one line that goes away otherwise.
@@ -1208,17 +1240,19 @@ class Guard:
         own plate of its own Bambu Studio, to a worse answer, to a warning beside "Send print job" (every plate was
         checked again for it) and to what the user asks for; to nothing else. Another plate's fine answer, or another
         Bambu Studio's, once put a line that went after 8 seconds in its place and turned the icon green: now it does
-        not show, and the icon keeps the warning's colour."""
+        not show, and the icon keeps the warning's colour. Another plate's warning that may not take its place waits
+        (hold), and shows when the standing card has gone."""
         res.setdefault('at', time.time())                     # when it was checked, where the check did not say (`check --popup`): a card that shows it later says so
         if not res['error']: res['ignored'] = self.ignored(res)
-        rank, plate, stands = self.rank(res), (res.get('pid'), res['title'], res.get('plate_no')), self.standing_warning()
+        rank, plate, stands = self.rank(res), plate_key(res), self.standing_warning()
         own = bool(stands) and stands[0] == plate
-        if stands and not full and not own and (not rank[0] if beside else rank <= stands[1]): return
-        self.last = res; self.show_icon()
+        if stands and not full and not own and (not rank[0] if beside else rank <= stands[1]): return self.hold(res)
+        self.held.pop(plate, None); self.last = res; self.show_icon()
         if full or rank[0]:
             self.card.show(res, beside=beside, hold=not full)
             self.warning = (plate, rank, self.card.win) if rank[0] else None
             return True
+        if own and self.held: self.card.close(); return self.next_held()   # its plate is fine now: the worst that waited behind it shows, not this plate's line
         if not beside and self.cfg['ok_seconds'] and not res['error']: self.card.show(res, brief=self.cfg['ok_seconds'], hold=True)
         elif own: self.card.close()                           # its plate is fine now and no line takes the card's place: it must not go on saying otherwise
         if own or not beside: self.warning = None
@@ -1365,6 +1399,8 @@ class Guard:
         def then(found):
             res, unread, out = found
             try:
+                for r in out:                                                     # what waited of these plates is as old as their last slice: this is their answer now
+                    if plate_key(r) in self.held: self.hold(r)
                 if res is not None and older:
                     res['unchecked'] = older; log(f"{res['title']}: {len(plates)} sliced plates, of which the {older} sliced first were not checked when \"Send print job\" opened")
                 if beside and not guard_ui.visible(beside):                       # the dialog has closed meanwhile, as after a quick click on Send:
@@ -1429,11 +1465,11 @@ class Guard:
                        + ([(None, f'What it had learned is kept as {aside}: one copy, until something is forgotten again.')] if kept else []))
 
     def check_last(self):
-        """The icon's click: the last answer's plate is checked again, and the fresh answer shows. The answer as it was
+        """The icon's click: the plate the icon names (on_icon) is checked again, and the fresh answer shows. The answer as it was
         is not shown again: hours old, after a print that had taken 120 g, its card read "Enough", "as the printer
         reports them now". A click while the check runs says so again and starts no second one; with no answer yet,
         the newest slice is checked."""
-        res = self.last
+        res = self.on_icon()
         if not res or not res.get('plate'): self.check_newest(); return
         if 'icon' in self.busy: self.checking('icon', self.busy['icon'][1]); return
         self.checking('icon', checking_text(printer_for(res['plate'])), res.get('pid'))
@@ -1551,7 +1587,7 @@ class Guard:
                 except queue.Empty: break
                 try: job()
                 except Exception as e: log(f'error: {e.__class__.__name__}: {e}')    # one failing request does not end the guard
-            for step in (self.card.follow, self.look_around if self.standing else None):
+            for step in (self.card.follow, self.show_held, self.look_around if self.standing else None):
                 try: step and step()
                 except Exception as e:                                           # nor does one failing step stop the other; said once a minute at most
                     if self.ticks % 150 == 1: log(f'error: {e.__class__.__name__}: {e}')
