@@ -39,7 +39,7 @@ A tray whose learned forecasts were further from what fell than the plain sliced
 
 ## Weigh-ins
 
-When weighing a spool the printer measures would settle a check (short of enough as counted, enough if its reading were true), the card offers "Weigh C3…": the grams of filament on the spool, the empty spool taken off. It asks at most once a week per tray and once a day in all, and never when "One line when there is enough" is off. From then on that spool is counted with no more than it held, until another spool is in the tray; a spool weighed at a quarter of its full weight or less is also a reading at empty for the tray. Weighed fuller, it says what that spool holds, not what the tray reads when a spool runs out: a gauge that counts a little short goes on adding to that over the rest of the spool.
+When weighing a spool the printer measures would settle a check (short of enough as counted, enough if its reading were true), the card offers "Weigh C3…": what the scale shows and what the empty spool weighs, as for [a spool without a reading](manual-amounts.md). It asks at most once a week per tray and once a day in all, and never when "One line when there is enough" is off. From then on that spool is counted with no more than it held, until another spool is in the tray; a spool weighed at a quarter of its full weight or less is also a reading at empty for the tray. Weighed fuller, it says what that spool holds, not what the tray reads when a spool runs out: a gauge that counts a little short goes on adding to that over the rest of the spool.
 
 ## On a simulated printer
 

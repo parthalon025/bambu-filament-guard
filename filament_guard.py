@@ -72,6 +72,7 @@ DEFAULTS = {
     # guard's own past forecast errors instead of the fixed one above, and may be smaller (never below 5 g or 2 % of the
     # need). Off: the fixed reserve, and no answer looser than learning without it.
     'measured_reserve': True,
+    'empty_spool_g': 250,        # the empty spool's weight the amount window starts with: the last one entered there (a Bambu spool: about 250 g)
 }
 SEVERITY = {'OK': 0, 'UNKNOWN': 1, 'TIGHT': 2, 'SPLIT': 3, 'SHORT': 4, 'MISSING': 4, 'COLOUR': 4}
 BUSY = ('RUNNING', 'PAUSE', 'PREPARE')                    # a job is on the printer: it draws, or is about to draw, on the spools
@@ -86,6 +87,22 @@ def load_config():
     except FileNotFoundError: pass
     except ValueError as e: log(f'config.json cannot be read ({e}): the defaults are used')
     return cfg
+
+def typed_grams(text):
+    """The grams typed into a field ('1 012,5 g'), or None when that is not a number."""
+    try: g = float(str(text).replace(',', '.').replace('g', '').replace(' ', ''))
+    except ValueError: return None
+    return g if math.isfinite(g) else None
+
+def filament_on(scale, spool):
+    """(grams of filament, None) for what the scale showed and what the empty spool weighs, both as typed; (None, what
+    is wrong) when that is not an amount. An empty spool left blank is 0: the filament was weighed alone."""
+    gross, tare = typed_grams(scale), typed_grams(spool) if str(spool).strip() else 0.0
+    if gross is None or not 0 < gross <= 15000: return None, 'The weight on the scale: a number of grams between 1 and 15000.'
+    if tare is None or not 0 <= tare <= 5000: return None, 'The empty spool: a number of grams between 0 and 5000.'
+    if gross <= tare: return None, 'The scale shows no more than the empty spool weighs: no filament would be left.'
+    if gross - tare > 10000: return None, 'More than 10000 g of filament: not a spool.'
+    return gross - tare, None
 
 def save_config(cfg):
     """Only what differs from DEFAULTS goes into config.json: a full copy would pin today's defaults for good."""
@@ -963,6 +980,7 @@ class Guard:
         self.warning = None                                   # the warning on the full card: (title, plate, severity, when, the card's window)
         self.busy, self.greeted = {}, False                   # the checks someone waits for, by what started them: (their line, its text)
         self.card = guard_ui.Card(root, act=self.act, on_close=None if standing else root.quit)
+        self.card.empty_spool = cfg['empty_spool_g']
         self.tray = guard_ui.Tray(self) if standing else None
 
     # -- showing an answer
@@ -1022,6 +1040,9 @@ class Guard:
             update_state(change); log(f"{res['title']}: this finding is " + ('ignored from now on' if on else 'no longer ignored'))
             if on: self.card.close()
             else: self.deliver(res, full=True, beside=self.card.beside)
+        elif name == 'spool':                                 # the empty spool's weight typed in the amount window: the next one starts with it
+            self.card.empty_spool = arg
+            if arg != self.cfg['empty_spool_g']: self.set_option('empty_spool_g', arg)
         elif name == 'amount':
             tray, grams = arg
             guard_ledger.enter(res['printer']['serial'], tray, grams); self.recheck(res, self.card.beside)

@@ -1329,3 +1329,65 @@ def test_the_simulated_printer_runs_dry_no_more_often_and_warns_less_where_its_g
     old, new, measured = out['counts']['1.3.0'], out['counts']['1.4.0'], out['counts']['1.4.0 measured']
     assert new['ok_dry'] - measured['ok_dry'] <= old['ok_dry'] and measured['ok_dry'] <= gn.ALPHA * max(1, measured['ok'])
     if scenario == 'accurate gauge': assert measured['rows'] > 0 and new['fit_warned'] < old['fit_warned']
+
+
+# ---------------------------------------------------------------- the amount window: the scale less the empty spool
+
+def test_the_filament_is_what_the_scale_shows_less_the_empty_spool():
+    assert fg.filament_on('1012', '250') == (762.0, None) and fg.filament_on(' 1 012,5 g', '212.5g') == (800.0, None)
+    assert fg.filament_on('640', '') == (640.0, None) and fg.filament_on('640', '0') == (640.0, None)      # the filament weighed alone
+    for scale, spool, word in (('', '250', 'scale'), ('abc', '250', 'scale'), ('0', '0', 'scale'), ('nan', '0', 'scale'), ('20000', '250', 'scale'),
+                               ('900', 'x', 'empty spool'), ('900', '-5', 'empty spool'), ('900', '6000', 'empty spool'),
+                               ('250', '250', 'no filament'), ('200', '250', 'no filament'), ('14000', '100', 'not a spool')):
+        grams, why = fg.filament_on(scale, spool)
+        assert grams is None and word in why, (scale, spool)
+
+def test_the_empty_spool_typed_is_what_the_next_amount_window_starts_with(state):
+    guard = guard_with(); guard.card = type('Card', (), {'beside': None})()
+    assert fg.DEFAULTS['empty_spool_g'] == 250
+    guard.act('spool', None, 212.0)
+    assert guard.card.empty_spool == 212.0 and fg.load_config()['empty_spool_g'] == 212.0 and guard.cfg['empty_spool_g'] == 212.0
+
+def test_the_amount_window_takes_the_scale_and_the_empty_spool(monkeypatch):
+    import sys, guard_ui
+    made = []
+    class Widget:
+        def __init__(self, *a, **k): self.k, self.keys = dict(k), {}; made.append(self)
+        def configure(self, **k): self.k.update(k)
+        def bind(self, key, then): self.keys[key] = then
+        def winfo_reqheight(self): return 100
+        def __getitem__(self, key): return self.k.get(key, '')
+        def __getattr__(self, name): return lambda *a, **k: None
+    class Var:
+        def __init__(self, value=''): self.value, self.watch = value, []
+        def get(self): return self.value
+        def set(self, value): self.value = value; [w() for w in self.watch]
+        def trace_add(self, how, then): self.watch.append(then)
+    monkeypatch.setitem(sys.modules, 'tkinter', type(sys)('tkinter'))
+    for name in ('Toplevel', 'Frame', 'Label', 'Button', 'Entry'): setattr(sys.modules['tkinter'], name, type(name, (Widget,), {}))
+    sys.modules['tkinter'].StringVar = Var
+    acts = []
+    card = guard_ui.Card(None, act=lambda name, res, arg=None: acts.append((name, arg))); card.t = guard_ui.THEMES['dark']; card.empty_spool = 200
+    def window(tray, weigh=False):
+        del made[:], acts[:]; card.ask_amount(None, tray, weigh)
+        scale, spool = [w.k['textvariable'] for w in made if type(w).__name__ == 'Entry']
+        result, wrong = [w for w in made if type(w).__name__ == 'Label'][-2:]
+        save = next(w.k['command'] for w in made if w.k.get('text') == 'Save')
+        return scale, spool, result, wrong, save, [w.k['text'] for w in made if type(w).__name__ == 'Button']
+    tray = {'label': 'Ext', 'name': '', 'type': 'PETG', 'grams': None}
+    scale, spool, result, wrong, save, buttons = window(tray)
+    assert (scale.get(), spool.get(), result['text'], buttons) == ('', '200', '', ['Save'])        # nothing entered yet; the spool's weight of last time
+    scale.set('950'); assert result['text'] == '750 g of filament'
+    spool.set('1000'); save()
+    assert result['text'] == '' and 'no filament' in wrong['text'] and acts == []                  # not saved, and it says why
+    spool.set('230'); assert wrong['text'] == '' and result['text'] == '720 g of filament'
+    save(); assert acts == [('spool', 230.0), ('amount', (tray, 720.0))]
+    entered = dict(tray, grams=412.4, entered=1e6)
+    scale, spool, result, wrong, save, buttons = window(entered)
+    assert (scale.get(), spool.get(), result['text'], buttons) == ('612', '200', '412 g of filament', ['Save', 'Forget this amount'])
+    spool.set(''); scale.set('300'); save()                                                        # the filament weighed alone
+    assert acts == [('spool', 0), ('amount', (entered, 300.0))]
+    measured = dict(tray, label='C3', grams=110.0, reading=110.0)
+    scale, spool, result, wrong, save, buttons = window(measured, weigh=True)
+    assert (scale.get(), buttons) == ('', ['Save'])                                                # a weigh-in is never guessed from the reading
+    scale.set('292'); save(); assert acts == [('spool', 200.0), ('weigh', (measured, 92.0))]
