@@ -49,6 +49,8 @@ GAP = 600                                                  # seconds without a r
 SILENT = 60                                                # seconds without a report after which the status held is no longer the printer's:
                                                            # the link is ended and made anew (up to 1.4.0 a link gone silent was read on as
                                                            # if live, and the prints of those hours were never taken off)
+AWAY = 1800                                                # seconds an entry made with its tray empty waits for its spool: the spool on the
+                                                           # scale is put back at once; one first seen later may be another of its kind
 LOOKED = 1800                                              # seconds a printer a check looked at is followed for learning: a print sent
                                                            # after the check is seen from its start
 PRINTING = 2 * 3600                                        # seconds a printer last seen printing is still followed for learning: while it
@@ -85,15 +87,19 @@ def ended(e, t, empty):
 
 def settle(book, trays, empty, only=None, since=None):
     """One status against a printer's entries (book): an entry whose tray holds its filament is marked 'loaded', and one
-    that has ended (ended) is dropped, with a line in the log. empty: the trays without a spool; only: {label: why},
-    the endings that may be carried out (all, when not given); since: when the status was reported: an entry made after
-    that is left as it is."""
-    by = {t['label']: t for t in trays}
+    that has ended (ended) is dropped, with a line in the log. An entry whose tray is first seen holding its filament
+    more than AWAY after it was made is out of date: typed with the spool on the scale, it would else wait without limit
+    for any spool of its material and colour. empty: the trays without a spool; only: {label: why}, the endings that
+    may be carried out (all, when not given); since: when the status was reported (now, when not given): an entry made
+    after that is left as it is."""
+    by, now = {t['label']: t for t in trays}, time.time() if since is None else since
     for label, e in list(book.items()):
-        if since is not None and e['at'] > since: continue
+        if e['at'] > now: continue
         why = ended(e, by.get(label), label in empty)
         if why and (only is None or only.get(label) == why): del book[label]; fg.log(f'{label}: amount ended: {why}')
-        elif not why and label in by: e['loaded'] = True
+        elif not why and label in by and not e.get('loaded'):
+            e['loaded'] = True
+            if now - e['at'] > AWAY: e['stale'] = True; fg.log(f'{label}: amount out of date: its spool was first seen in the tray more than {AWAY // 60} minutes after it was entered')
 
 def apply(trays, serial, complete=True):
     """Gives the trays the printer cannot measure the amount entered for them (grams, and 'entered': when), or marks

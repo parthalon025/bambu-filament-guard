@@ -393,3 +393,19 @@ def test_after_a_gap_a_printer_that_names_every_job_alike_makes_the_amounts_out_
         return fg.load_state()['spools']['SERIAL']['A3']
     numbered = after_the_gap('7'); assert numbered['grams'] == 280 and not numbered.get('stale')
     assert after_the_gap('0')['stale'] and 'it names every job alike' in (state / 'guard.log').read_text()
+
+def test_an_amount_whose_spool_is_first_seen_in_its_tray_half_an_hour_later_is_out_of_date(state):
+    """The weight is typed while the spool is on the scale, and the tray is seen empty. A spool of that material and
+    colour seen in the tray within 30 minutes is the one that was weighed: the amount applies. One first seen there
+    later may be another spool, the weighed one having gone elsewhere: the amount is out of date, at a check and at the
+    follower's look alike, and ends like any other when the tray is empty again."""
+    loaded, out = printing('IDLE', [spool(0), spool(1, 500, **RED)]), printing('IDLE', [{'id': '0'}, spool(1, 500, **RED)])
+    def typed(minutes_ago):
+        gl.enter('SERIAL', {'label': 'A1', 'type': 'PLA', 'colour': '#101010'}, 640); assert applied(out) is None
+        fg.update_state(lambda st: st['spools']['SERIAL']['A1'].__setitem__('at', time.time() - minutes_ago * 60))
+    typed(29); assert applied(loaded)['grams'] == 640
+    typed(31); late = applied(loaded); assert late['grams'] is None and late['stale'] and fg.load_state()['spools']['SERIAL']['A1']['stale']
+    assert 'A1: amount out of date: its spool was first seen in the tray more than 30 minutes after it was entered' in (state / 'guard.log').read_text()
+    assert applied(out) is None and gl.serials() == []                                   # taken out: the entry ends
+    typed(0); watch = gl.JobWatch('SERIAL', dict(CFG, learn=False)); watch.see(out)       # the printer is followed, the tray still empty
+    typed(31); watch.see(loaded); assert fg.load_state()['spools']['SERIAL']['A1']['stale']
