@@ -1141,6 +1141,7 @@ class Guard:
         self.last, self.paused, self.ticks, self.sending, self.jobs = None, False, 0, set(), {}
         self.warning = None                                   # the warning on the full card, while it stands: see standing_warning
         self.held, self.icon_shows = {}, None                 # the warnings that wait for that card to go, by plate (hold); what the icon was last given
+        self.blind = None                                     # what the icon says while slices cannot be read (not_checking)
         self.busy, self.greeted = {}, False                   # the checks someone waits for, by what started them: (their line, its text)
         self.told = set()                                     # what was said in the log once, and is not said again in this run
         self.watcher = None                                   # the thread that watches for slices, once it runs (watch_slices)
@@ -1199,17 +1200,25 @@ class Guard:
 
     def last_text(self):
         res = self.on_icon()
-        if self.paused: return 'Checks are paused'
+        if self.paused or self.blind: return 'Checks are paused' if self.paused else self.blind
         if not res: return 'No slice checked yet'
         return f"{headline(res)} · {res['title']}" + (f", plate {res['plate_no']}" if res.get('plate_no') else '')
 
     def show_icon(self):
         """The icon's colour and tooltip: those of the answer it stands for (on_icon); grey, and saying so, while checks
-        are paused (an answer asked for from the icon then turned it green, as if slices were being checked)."""
+        are paused (an answer asked for from the icon then turned it green, as if slices were being checked) and while
+        slices cannot be read (not_checking)."""
         import guard_ui
-        res = self.on_icon(); now = ('muted' if self.paused or not res else guard_ui.tone_of(res), self.last_text())
+        res = self.on_icon(); now = ('muted' if self.paused or self.blind or not res else guard_ui.tone_of(res), self.last_text())
         if self.tray and now != self.icon_shows: self.icon_shows = now; self.tray.set(*now)
         if self.tray: self.tray.refresh()
+
+    def not_checking(self, lines=None, pid=None):
+        """Bambu Studio wrote a slice the guard cannot read: the icon goes grey and says "Filament is not being checked",
+        until a slice reads again (take_slice). It kept the colour and tooltip of the last answer, green as may be,
+        while no slice was checked. lines: the card that says why, shown once for a Bambu Studio version."""
+        self.blind = 'Filament is not being checked'; self.show_icon()
+        if lines: self.card.note(self.blind, lines, 'danger', pid)
 
     def standing_warning(self):
         """The warning whose card still stands: (its plate: Bambu Studio's process, the project, the plate number; its
@@ -1524,6 +1533,7 @@ class Guard:
         from the same file. The check comes first: the card does not wait for the profile, and a re-slice of the plate
         that is printing would otherwise replace the slice, and the profile, that the running print is counted from."""
         title, plate_no, profile, waiting = project_title(path), plate_number(path), None, False
+        if self.blind: self.blind = None; self.todo.put(self.show_icon)          # a slice that reads: slices are being checked again
         try:
             if not self.paused and plate['filaments']:
                 printer = printer_for(plate)
@@ -1565,11 +1575,10 @@ class Guard:
                         except Exception as e: log(f'error: {e.__class__.__name__}: {e}')   # one plate that fails does not cost the others of this round their check
                     for path, why in watcher.problems:
                         version = studio_version(); log(f'cannot read the slice {path} of Bambu Studio {version}: {why}')
-                        if version not in told:                                  # said once for each Bambu Studio version, logged every time
-                            told.add(version)
-                            lines = [(False, f'Bambu Studio {version} wrote a slice the guard cannot read: {why}.'),
-                                     (None, 'Its prints are not checked until the guard is updated. The log has the file.')]
-                            self.todo.put(lambda lines=lines, pid=studio_pid(path): self.card.note('Filament is not being checked', lines, 'danger', pid))
+                        lines = None if version in told else [(False, f'Bambu Studio {version} wrote a slice the guard cannot read: {why}.'),
+                                                              (None, 'Its prints are not checked until the guard is updated. The log has the file.')]
+                        told.add(version)                                        # the card once for each Bambu Studio version; the log and the icon every time
+                        self.todo.put(lambda lines=lines, pid=studio_pid(path): self.not_checking(lines, pid))
                     watcher.problems.clear()
                 finally: self.stopping.wait(self.poll_seconds())                 # after a round that failed too (no loop without a pause); at once when stopping
             except Exception as e:                                               # the watcher outlives any one bad file or network hiccup

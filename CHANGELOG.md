@@ -67,6 +67,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - A plate whose G-code could not be read, or was still being written, when "Send print job" opened was a line in the log: with the other plates fine, nothing showed beside the dialog. It now counts as a plate that could not be checked, and shows as one.
 - While one plate's warning stood, another plate's warning that was no worse got no card, then or later; when the first plate was sliced again and fine, the icon went green over a plate that fell short. Such a warning now waits, in its plate's latest answer, and shows when the standing card has gone: its plate fine again, or closed by you. The icon is green only when no checked plate has a warning that was neither shown nor ignored.
 - A setting changed in the icon's menu while `config.json` could not be written (the guard's folder read-only) ended as an error in the log, with nothing on screen. The setting is now in force until the guard stops, and a card says that it was not kept.
+- When Bambu Studio wrote slices the guard could not read, "Filament is not being checked" was said on a card, once, while the icon kept the colour and tooltip of the last result, green as may be. The icon now goes grey and says so, until a slice is read again.
 
 ## [1.4.0] - 2026-11-20
 

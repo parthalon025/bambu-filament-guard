@@ -132,7 +132,7 @@ python filament_guard.py uninstall    # remove the shortcut and stop
 | 3 | Could not be checked: no slice, a file or a printer that cannot be read, or a command line that was not understood (a mistyped option, `--times` below 1) |
 
 > [!TIP]
-> **After a Bambu Studio update**, run `selftest` (or Self-test in the icon's menu). When Bambu Studio writes a slice the guard cannot read, a card says so once for that version, and every such file is in the log.
+> **After a Bambu Studio update**, run `selftest` (or Self-test in the icon's menu). When Bambu Studio writes a slice the guard cannot read, a card says so once for that version, the icon goes grey until a slice reads again, and every such file is in the log.
 
 **Log and state** are in `%LOCALAPPDATA%\BambuFilamentGuard\`, with the grams per layer of the last 30 slices in `profiles\` and what was learned in `learned.json`. Settings are saved to `config.json` beside the script.
 

@@ -1377,3 +1377,22 @@ def test_a_setting_that_cannot_be_kept_is_in_force_and_said_not_to_be_kept(state
     assert guard.card.said == ['config.json could not be written (PermissionError): is the folder the guard runs from read-only?',
                                'The setting is in force until the guard stops; at its next start it is as config.json has it.']
     assert 'setting ok_seconds = 0: not kept, config.json could not be written (PermissionError): in force until the guard stops' in (state / 'guard.log').read_text()
+
+@pytest.mark.windows
+def test_the_icon_goes_grey_when_slices_cannot_be_read(state, tmp_path, monkeypatch):
+    """"Filament is not being checked" was a card, once for a Bambu Studio version; the icon kept the colour and the
+    tooltip of the last answer, green as may be, while no slice was checked. It goes grey and says so, until a slice
+    is read again."""
+    running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 500)))
+    class Watcher:
+        problems = []
+        def new_plates(self): guard.stopping.set(); self.problems.append((str(tmp_path / '.1.0.gcode'), 'it carries no filament totals')); return []
+    monkeypatch.setattr(fg, 'Watcher', Watcher)
+    guard = guard_with(); guard.tray = Icon(); guard.deliver(answer(1, 'OK')); guard.card.close()
+    assert guard.tray.was == [('ok', 'Enough filament for this print · Bracket, plate 1')]
+    guard.watch_slices(); run_queued(guard)
+    assert guard.card.shown[-1] == ('note', 'Filament is not being checked') and guard.tray.was[-1] == ('muted', 'Filament is not being checked')
+    assert guard.last_text() == 'Filament is not being checked'
+    guard.card.close(); notes = guard.card.shown.count(('note', 'Filament is not being checked'))
+    f = slice_file(tmp_path, gcode()); guard.take_slice(str(f), fg.parse_plate(f.read_text())); run_queued(guard)   # a slice that reads: checked again
+    assert guard.tray.was[-1][0] == 'ok' and guard.last_text().startswith('Enough filament for this print') and guard.card.shown.count(('note', 'Filament is not being checked')) == notes
