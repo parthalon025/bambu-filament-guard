@@ -228,3 +228,39 @@ def test_an_amount_entered_during_a_print_has_what_the_print_needs_beyond_its_tr
     watch.look(job); assert fg.load_state()['spools']['SERIAL']['A2']['grams'] == 407 and seen() == {'A2': 407, 'A1': 0}
     assert 'A2: entered during "Part": what that print still needs beyond A1, 93 g, taken off: 407 g' in (state / 'guard.log').read_text()
     watch.look(printing('FINISH', [spool(0, 0, fid='GFA00'), spool(1, fid='GFA00')], layer=100)); assert fg.load_state()['spools']['SERIAL']['A2']['grams'] == 407
+
+def test_an_amount_entered_during_a_print_the_guard_cannot_count_is_out_of_date(state):
+    """150 g are entered for A3 at layer 10 of a print sent from the phone, which goes on drawing on A3 for 90 layers.
+    The entry is out of date at the follower's next look, as it would be had the print started after it was made; the
+    amount entered for A1, which the print does not use, stands."""
+    spools = [spool(0, typ='PETG'), spool(2)]; job = printing('RUNNING', spools, name='Sent from the phone', task='12', mapping=(2,), layer=10)
+    gl.enter('SERIAL', {'label': 'A1', 'type': 'PETG', 'colour': '#101010'}, 400)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(job)                                   # the baseline: the print already runs
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 150); gl.enter('SERIAL', {'label': 'A1', 'type': 'PETG', 'colour': '#101010'}, 380)
+    watch.look(job); watch.look(dict(job, layer_num=90)); watch.look(dict(job, gcode_state='FINISH', layer_num=100))
+    book = fg.load_state()['spools']['SERIAL']
+    assert book['A3'].get('stale') and 'missed' not in book['A3']
+    assert not book['A1'].get('stale') and book['A1']['grams'] == 380 and book['A1']['missed'] == ['12', 'Sent from the phone']
+    assert 'A3: entered during "Sent from the phone", a print the guard cannot count: out of date' in (state / 'guard.log').read_text()
+
+def test_an_amount_entered_during_a_print_whose_trays_cannot_be_told_is_out_of_date_whatever_its_tray(state):
+    """The printer reports no tray mapping for the print: any loaded spool may be the one it draws on."""
+    spools = [spool(0, typ='PETG'), spool(2)]; job = printing('RUNNING', spools, mapping=(), layer=10)
+    part(120.0); gl.enter('SERIAL', {'label': 'A1', 'type': 'PETG', 'colour': '#101010'}, 400)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(job)
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 150); gl.enter('SERIAL', {'label': 'A1', 'type': 'PETG', 'colour': '#101010'}, 380)
+    watch.look(job)
+    assert all(entry.get('stale') for entry in fg.load_state()['spools']['SERIAL'].values())
+
+def test_an_amount_entered_during_a_print_without_a_profile_has_the_whole_print_taken_off(state):
+    """The print was sliced here, 120 g from A3, but its G-code could not be counted by layer: how far it is cannot be
+    told. An amount entered while it runs has all 120 g taken off, the low side."""
+    fg.remember_slice('Part', 1, {'layers': 100, 'filaments': [{'slot': 1, 'grams': 120.0}]})
+    spools = [spool(2)]; job = printing('RUNNING', spools, mapping=(2,), layer=10)
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 400)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(job)
+    gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, None); gl.enter('SERIAL', {'label': 'A3', 'type': 'PLA', 'colour': '#101010'}, 150)
+    watch = gl.JobWatch('SERIAL', CFG); watch.look(job); watch.look(dict(job, gcode_state='FINISH', layer_num=100))
+    entry = fg.load_state()['spools']['SERIAL']['A3']
+    assert entry['grams'] == 30 and not entry.get('stale') and 'missed' not in entry
+    assert 'A3: entered during "Part": all that print needs of it, 120 g (how far it is cannot be told), taken off: 30 g' in (state / 'guard.log').read_text()

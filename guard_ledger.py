@@ -11,7 +11,9 @@ print:
     loaded, the fullest first (take_off): with AMS auto refill the print goes on from one of them. When the tray's own
     amount is not known, how much that is cannot be told, and those entries are out of date;
   - an amount entered while a print runs (or after it was counted) has what that print still needs of it taken off at
-    the next look at the printer (catch_up): the amount weighed is what the spool held then, and the print goes on;
+    the next look at the printer (catch_up): the amount weighed is what the spool held then, and the print goes on.
+    Of a print whose slice has no per-layer profile all it needs comes off; a print the guard cannot count at all makes
+    such an entry out of date, like any other entry of the trays it may draw on;
   - a print the guard cannot count (not sliced on this computer, or its tray cannot be told) makes the entries of
     the trays it used "out of date": unknown again, until the amount is entered again.
   - when the printer was not followed for ten minutes or more (this computer asleep, the link down) and shows
@@ -232,22 +234,27 @@ def count(serial, status):
 def catch_up(serial, status, state=None):
     """Entries the job the printer shows has not been taken off, although it was counted (or taken as the baseline) for
     the printer: made while it ran. What it still needs of their trays comes off now, as a print is counted in full
-    (take_off: what it needs beyond a tray's amount included); when that cannot be told (not sliced here, no profile),
-    the entry is marked 'missed' and a check takes the running print off it as far as it can tell then. Returns True
-    when it changed an entry."""
-    key = job_key(status)
+    (take_off: what it needs beyond a tray's amount included). When that cannot be told, the low side, as for a job
+    that starts after the entry was made: with the slice known and only its per-layer profile missing, all the job
+    needs comes off; otherwise (not sliced here, a tray that cannot be named) the entries of the trays the job may draw
+    on are out of date. An entry of a tray such a job does not use is marked 'missed': a check takes the running print
+    off it as far as it can tell then. Returns True when it changed an entry."""
+    key, name = job_key(status), status.get('subtask_name')
     if not any(e.get('job') != key for e in ((fg.load_state() if state is None else state).get('spools', {}).get(serial, {}) or {}).values()): return False
     def change(st):
         book = st.get('spools', {}).get(serial, {})
-        late = {l: e for l, e in book.items() if e.get('job') != key}
+        late, (trays, _) = {l: e for l, e in book.items() if e.get('job') != key}, fg.trays_of(status)
         need, counted = owed(status, st.get('slices', []))
         if counted is False:
-            for e in late.values(): e['missed'] = key
-        else:
-            took, doubt = take_off(book, fg.trays_of(status)[0], need, set(late))
-            for l, g, b in took:
-                fg.log(f"{l}: entered during \"{status.get('subtask_name')}\": what that print still needs " + (f'beyond {b}, {g:.0f} g' if b else f'of it, {need[l]:.0f} g') + f", taken off: {book[l]['grams']:.0f} g")
-            for l, b in doubt: fg.log(f"{l}: entered during \"{status.get('subtask_name')}\": out of date, as the print may go on from it: {b}'s amount is not known")
+            need, unknown = draws(status, st.get('slices', []), [t['label'] for t in trays]) if trays else ({}, set(late))
+            for l, e in late.items():
+                if l in unknown: e['stale'] = True; fg.log(f'{l}: entered during "{name}", a print the guard cannot count: out of date')
+                elif l not in need: e['missed'] = key
+        took, doubt = take_off(book, trays, need, set(late))
+        for l, g, b in took:
+            fg.log(f'{l}: entered during "{name}": ' + (f'what that print still needs beyond {b}, {g:.0f} g' if b else f'what that print still needs of it, {need[l]:.0f} g' if counted else
+                                                           f'all that print needs of it, {need[l]:.0f} g (how far it is cannot be told)') + f", taken off: {book[l]['grams']:.0f} g")
+        for l, b in doubt: fg.log(f"{l}: entered during \"{name}\": out of date, as the print may go on from it: {b}'s amount is not known")
         for e in late.values(): e['job'] = key
         return bool(late)
     return fg.update_state(change)

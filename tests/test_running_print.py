@@ -94,9 +94,9 @@ def test_an_amount_entered_during_a_print_has_the_rest_of_that_print_taken_off(s
     gl.enter('SERIAL', {'label': 'C3', 'type': 'PETG', 'colour': '#101010'}, None); gl.enter('SERIAL', {'label': 'C3', 'type': 'PETG', 'colour': '#101010'}, 150)
     phone = dict(job, subtask_name='Sent from the phone', task_id='12')                   # first entered during a print not sliced here: its rest is not known
     watch = gl.JobWatch('SERIAL', CFG); watch.look(phone)
-    assert fg.load_state()['spools']['SERIAL']['C3'] == dict(fg.load_state()['spools']['SERIAL']['C3'], grams=150.0, missed=['12', 'Sent from the phone'])
+    entry = fg.load_state()['spools']['SERIAL']['C3']; assert entry['stale'] and 'missed' not in entry      # so the amount is out of date
     running(monkeypatch, phone); res = fg.evaluate(PETG_PLATE, CFG, 'Next plate')
-    assert res['printer']['counted'] is False and 'could not count that print' in fg.report_text(res)
+    assert res['printer']['counted'] is False and res['rows'][0]['status'] == 'UNKNOWN' and 'could not count that print' in fg.report_text(res)
 
 def test_profiles_are_kept_beside_the_state_file_and_go_with_their_slice(state):
     plate = dict(SLICE, layers=3)
