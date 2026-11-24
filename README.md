@@ -20,7 +20,7 @@ The AMS's remaining-filament figure is an estimate. It counts what it has fed, s
 
 ## Key features
 
-- **Every filament, every plate.** Checks each plate as soon as it is sliced, and all the project's sliced plates again when "Send print job" opens.
+- **Every filament, every plate.** Checks each plate as soon as it is sliced, and all the project's sliced plates again when "Send print job" opens (of more than 30, the 30 sliced last; the card says how many were left out).
 - **Batch-printing aware.** A plate sliced while another prints is checked against what the spools will hold when it can start. See [The running print](docs/running-print.md).
 - **Learns each tray's accuracy.** Follows the prints and learns, per tray, how far its reading can be trusted: what it reads when a spool runs dry, and how far it falls per gram printed. As it comes, this only makes a check stricter. An experimental setting, off unless you turn it on, measures the reserve from the guard's own forecasts instead of fixing it. See [Learning from previous prints](docs/learning.md).
 - **Spools without RFID.** Enter a weighed amount once, and the guard counts it down as prints use it. See [Spools without a reading](docs/manual-amounts.md).

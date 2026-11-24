@@ -12,13 +12,15 @@ from helpers import CFG, MEASURED, gcode, sliced, e, kept, running, BLUE, benchy
 
 
 class Card:
-    """The card, as the guard sees it: what it was asked to show, in order."""
+    """The card, as the guard sees it: what it was asked to show, in order; of the last, the answer (res), the lines and
+    buttons of a note (said, buttons), and the dialog it stands beside (where)."""
     def __init__(self): self.win, self.one_line, self.shown, self.beside = None, False, [], None
     def is_open(self): return self.win is not None
     def line(self, text, tone='muted', seconds=0, pid=None, hold=False):
         self.win, self.one_line = object(), True; self.shown.append(('line', text, hold)); return self.win
-    def show(self, res, brief=0, beside=None, hold=False): self.win, self.one_line = object(), bool(brief); self.shown.append(('show', brief))
-    def note(self, headline, lines, tone='muted', pid=None): self.win, self.one_line = object(), False; self.shown.append(('note', headline))
+    def show(self, res, brief=0, beside=None, hold=False): self.win, self.one_line, self.res, self.where = object(), bool(brief), res, beside; self.shown.append(('show', brief))
+    def note(self, headline, lines, tone='muted', pid=None, beside=None, buttons=()):
+        self.win, self.one_line, self.said, self.where, self.buttons = object(), False, [text for _, text in lines], beside, dict(buttons); self.shown.append(('note', headline))
     def close(self): self.win = None; self.shown.append(('close',))
 
 def guard_with(cfg=CFG):
@@ -474,3 +476,54 @@ def test_an_ignore_kept_by_an_earlier_version_counts_as_lapsed(state, monkeypatc
     assert fg.load_state()['ignored'] == {'Bracket': {'1': {'at': pytest.approx(time.time(), abs=60), 'rows': [[1, 'SHORT', 5.0]]}}}
     fg.update_state(lambda st: st['ignored'].__setitem__('Bracket', {'1': {'at': 'yesterday', 'rows': 5}}))    # an entry no version wrote
     assert card_for(blue_print(monkeypatch, 60, 55)) == 'full'
+
+def project_of(tmp_path, monkeypatch, weights, title='Farm'):
+    """A project sliced by one Bambu Studio (process 1), "slice all": one plate for each of weights, the first sliced
+    first, a second apart, in place of what was sliced there before. Returns their files."""
+    meta = tmp_path / 'bamboo_model' / 'Thu_Nov_19' / '01_02_03#1#9' / 'Metadata'; meta.mkdir(parents=True, exist_ok=True)
+    (meta.parent / 'origin.txt').write_text(f'C:/prints/{title}.3mf')
+    monkeypatch.setattr(fg.tempfile, 'gettempdir', lambda: str(tmp_path)); monkeypatch.setattr(fg, 'BS_DATA', str(tmp_path / 'none'))
+    files, now = [], time.time()
+    for f in meta.glob('.*.gcode'): f.unlink()
+    for n, w in enumerate(weights):
+        f = meta / f'.1.{n}.gcode'; f.write_text(gcode(weights=w)); fg.os.utime(f, (now - 600 + n, now - 600 + n)); files.append(f)
+    return files
+
+def at_send(guard, pid=1, dialog=4321):
+    """"Send print job" opens in Bambu Studio's process pid: the check it starts, run to its end."""
+    guard.check_newest(pid, beside=dialog); guard.todo.get(timeout=10)()
+
+FINE, TOO_MUCH = '9.99,10.87', '900.0,10.87'                                               # a plate's blue and red: 900 g of blue is more than any spool here holds
+
+@pytest.mark.windows
+def test_every_sliced_plate_is_checked_again_at_send_print_job(state, tmp_path, monkeypatch):
+    """The 8 newest were: of 12 plates sliced in one go, the first, 900 g of a 500 g spool, was not among them, and
+    nothing showed beside the dialog it was sent from."""
+    import guard_ui
+    monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True); running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 500)))
+    project_of(tmp_path, monkeypatch, [TOO_MUCH] + [FINE] * 11)
+    guard = guard_with(); at_send(guard)
+    assert guard.card.shown == [('show', 0)] and guard.card.where == 4321 and guard.card.res['plate_no'] == 1 and 'unchecked' not in guard.card.res
+    assert (state / 'guard.log').read_text().count('at "Send print job"') == 12
+
+@pytest.mark.windows
+def test_of_more_than_30_plates_the_card_says_how_many_were_not_checked(state, tmp_path, monkeypatch):
+    """One reading of the printer serves every plate, but a limit there is: the 30 sliced last are checked, and what is
+    beside the dialog says how many older ones were not. With nothing to warn of among the 30 that is a card too:
+    silence there means every sliced plate is fine."""
+    import guard_ui
+    monkeypatch.setattr(guard_ui, 'visible', lambda hwnd: True); running(monkeypatch, spools((BLUE_PLA, 500), (RED_PLA, 500)))
+    project_of(tmp_path, monkeypatch, [FINE] * 5 + [TOO_MUCH] + [FINE] * 27)                # 33 plates: plates 1 to 3 are not checked, plate 6 is short
+    guard = guard_with(); at_send(guard)
+    assert guard.card.shown == [('show', 0)] and guard.card.res['plate_no'] == 6 and guard.card.res['unchecked'] == 3
+    assert (state / 'guard.log').read_text().count('at "Send print job"') == 30
+    labels, _, _ = card_shown(monkeypatch, guard.card.res)
+    assert labels[-1].endswith(' 3 older plates of the project were not checked: at "Send print job" only the 30 sliced last are.')
+    project_of(tmp_path, monkeypatch, [TOO_MUCH] + [FINE] * 30)                              # 31 plates: the short one is the one left out
+    guard = guard_with(); at_send(guard)
+    assert guard.card.shown == [('note', 'Not every plate was checked')] and guard.card.where == 4321
+    assert guard.card.said == ['Farm has 31 sliced plates. The 30 sliced last were checked now, with nothing to warn of; the 1 sliced before them was not checked.',
+                               'Slice a plate again to have it checked.']
+    project_of(tmp_path, monkeypatch, [FINE] * 30)                                           # 30 fine plates: nothing to say
+    guard = guard_with(); at_send(guard)
+    assert guard.card.shown == []

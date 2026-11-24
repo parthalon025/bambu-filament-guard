@@ -986,8 +986,14 @@ class Watcher:
         return out
 
 
+SEND_MOST = 30                                            # the plates of a project checked again when "Send print job" opens: the ones sliced last
 IGNORE_DAYS, IGNORE_GROWTH = 7, 5.0                       # "Ignore for this project" ends after as many days, or with a filament as many grams further short
 UNSAVED = 'Unsaved project'                               # what project_title calls every project that was never saved
+
+def written(path):
+    """When a file was last written; 0 for one that has gone meanwhile."""
+    try: return os.path.getmtime(path)
+    except OSError: return 0.0
 
 def ignore_key(res):
     """(project, plate) under which "Ignore for this project" is kept for an answer, both as the state file names them;
@@ -1063,7 +1069,7 @@ class Guard:
 
     def deliver(self, res, full=False, beside=None):
         """One answer: the full card for a warning (and whenever it is asked for), one line that goes away otherwise.
-        beside: the "Send print job" dialog, next to which only a warning is worth a card."""
+        beside: the "Send print job" dialog, next to which only a warning is worth a card. True when the full card shows."""
         import guard_ui
         severity = -1 if res['error'] else SEVERITY[res['worst']]
         if not full and not beside and self.warning and self.card.is_open() and self.card.win is self.warning[4]:   # the warning's own card, still open
@@ -1074,11 +1080,12 @@ class Guard:
         if res['error']:
             if full or not res.get('quiet'): self.card.show(res, beside=beside, hold=not full)
             self.warning = None
-            return
+            return full or not res.get('quiet')
         res['ignored'] = self.ignored(res)
         if full or (self.opening(res) and not res['ignored']):
             self.card.show(res, beside=beside, hold=not full)
             self.warning = (res['title'], res.get('plate_no'), severity, time.time(), self.card.win) if severity >= 2 else None
+            return True
         elif not beside and self.cfg['ok_seconds']:
             self.card.show(res, brief=self.cfg['ok_seconds'], hold=True); self.warning = None
 
@@ -1139,7 +1146,8 @@ class Guard:
     def check_newest(self, pid=None, beside=None):
         """From the icon: the newest slice, as a full card. At "Send print job" (beside): every plate of the project the
         sending Bambu Studio has sliced, because which of them is being sent cannot be read; the worst answer shows,
-        when it is a warning, and names its plate."""
+        when it is a warning, and names its plate. Of more than SEND_MOST plates the ones sliced last are checked, and
+        what shows says how many were not: silence beside the dialog means every sliced plate is fine."""
         import guard_ui
         key = None if beside else 'icon'                      # beside the dialog only a warning shows: no line while it is checked
         if key in self.busy: self.checking(key, self.busy[key][1]); return     # asked again while its check runs: it says so, and starts nothing
@@ -1148,7 +1156,8 @@ class Guard:
             if not beside: self.card.note('No sliced plate found', [(None, 'Slice a plate in Bambu Studio first.')])
             return
         folder = os.path.dirname(newest)
-        paths = sorted((p for p in temp_gcodes() if os.path.dirname(p) == folder), key=os.path.getmtime, reverse=True)[:8] if beside else [newest]
+        plates = sorted((p for p in temp_gcodes() if os.path.dirname(p) == folder), key=written, reverse=True) if beside else [newest]
+        paths, older = plates[:SEND_MOST], len(plates[SEND_MOST:])
         if key: self.checking(key, checking_text(printer_for(plate_at(newest))), studio_pid(newest))
         def work():
             seen, out, unread = {}, [], []
@@ -1165,7 +1174,14 @@ class Guard:
         def then(found):
             res, unread = found
             try:
-                if res is not None and (not beside or guard_ui.visible(beside)): self.deliver(res, full=not beside, beside=beside)   # not: nothing sliced, or the dialog has closed meanwhile
+                if res is not None and older: res['unchecked'] = older; log(f"{res['title']}: {len(plates)} sliced plates, of which the {older} sliced first were not checked when \"Send print job\" opened")
+                if beside and not guard_ui.visible(beside): pass                  # the dialog has closed meanwhile
+                elif res is not None and self.deliver(res, full=not beside, beside=beside): pass
+                elif res is not None and older:                                   # nothing to warn of among those checked: the rest still has to be said
+                    self.card.note('Not every plate was checked', [
+                        (None, f"{res['title']} has {len(plates)} sliced plates. The {SEND_MOST} sliced last were checked now, with nothing to warn of; "
+                               f"the {older} sliced before them {'were' if older != 1 else 'was'} not checked."),
+                        (None, 'Slice a plate again to have it checked.')], 'warn', studio_pid(newest), beside)
                 elif res is None and unread and not beside:                       # asked for from the icon: an answer, not a line that goes
                     self.card.note('Filament could not be checked', [(False, f'The newest slice ({project_title(newest)}): {unread[0]}.'),
                                                                      (None, 'Slice it again, or check again in a moment. The log has the file.')], 'danger', studio_pid(newest))

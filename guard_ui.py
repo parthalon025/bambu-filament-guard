@@ -210,6 +210,8 @@ class Card:
         w, t = self._open(res.get('pid'), beside, hold), self.t
         self.one_line = bool(brief)
         self._label(w, fg.headline(res), tone_of(res), 12, True, row=1, column=0)
+        n = res.get('unchecked') or 0                                        # at "Send print job", of a project with more plates than are checked there
+        more = f" {n} older plate{'s' if n != 1 else ''} of the project {'were' if n != 1 else 'was'} not checked: at \"Send print job\" only the {fg.SEND_MOST} sliced last are." if n else ''
         if brief:
             line = tk.Frame(w, bg=t['surface']); line.grid(row=2, column=0, sticky='ew'); line.columnconfigure(0, weight=1)
             p = res['printer']
@@ -223,6 +225,7 @@ class Card:
             return self._place()
         if res['error']:
             self._label(w, res['error'][:1].upper() + res['error'][1:] + '.', wrap=560, row=2, column=0)
+            if more: self._label(w, more.strip(), 'muted', 9, wrap=560, row=4, column=0, pady=(2 * SPACE, 0))
         else:
             sub = ' · '.join(x for x in (res['title'] + (f" × {res['times']}" if res['times'] != 1 else ''), f"plate {res['plate_no']}" if res.get('plate_no') else '',
                                          res['model'], f"prints in {res['time']}" if res['time'] and res['times'] == 1 else '') if x)
@@ -252,7 +255,7 @@ class Card:
                 spools += f" Weighing the spool in {res['weigh']['label']} would settle it: the guard then counts that spool by what it held."
             ignored = (f' Ignored for this plate of the project: it shows as one line for {fg.IGNORE_DAYS} days from then, unless a result changes or a filament '
                        f'falls more than {fg.IGNORE_GROWTH:g} g further short.') if res.get('ignored') else ''
-            self._label(w, spools + ignored, 'muted', 9, wrap=620, row=4, column=0, pady=(2 * SPACE, 0))
+            self._label(w, spools + ignored + more, 'muted', 9, wrap=620, row=4, column=0, pady=(2 * SPACE, 0))
         bar = tk.Frame(w, bg=t['surface']); bar.grid(row=5, column=0, sticky='w', pady=(2 * SPACE, 0))
         again = self._button(bar, 'Check again', None, row=0, column=0, padx=(0, SPACE))
         again.configure(command=lambda: (again.configure(text='Checking…', state='disabled'), self.act('recheck', res)))
@@ -274,9 +277,9 @@ class Card:
         # unseen, and a note that failed before this (the state file held elsewhere) left a warning that never showed.
         if not res['error'] and res.get('weigh'): self.act('asked', res, res['weigh'])
 
-    def note(self, headline, lines, tone='muted', pid=None):
-        """A card that says something other than a result: the self-test, the welcome after installing."""
-        w = self._open(pid); self.one_line = False
+    def note(self, headline, lines, tone='muted', pid=None, beside=None):
+        """A card that says something other than a result: the self-test, the welcome after installing. beside: as for show."""
+        w = self._open(pid, beside); self.one_line = False
         self._label(w, headline, tone, 12, True, row=1, column=0, pady=(0, SPACE))
         for i, (mark, text) in enumerate(lines):
             self._label(w, {True: '✓  ', False: '✗  ', None: '–  '}[mark] + text, {True: 'text', False: 'danger', None: 'muted'}[mark], 9, wrap=620, row=2 + i, column=0)
