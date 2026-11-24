@@ -9,7 +9,7 @@ What the guard cannot read or does not yet know, and what it does in each case.
 - What the running print needs beyond its tray is taken off the loaded spools AMS auto refill would go on with, as the guard reads that rule (the same material and colour, the same product where both name one, the same nozzle). Whether auto refill is on, and which spool the AMS really takes, cannot be read.
 - Each plate is checked on its own. "Print all plates" needs the sum; check the exported file with `check`.
 - Which plate "Send print job" is sending, and which tray you pick there, cannot be read: the card beside it is the worst of the project's sliced plates, against every matching spool. Bambu Studio's own warning there ("The filament in … may be insufficient for this print") covers the chosen tray.
-- Two slots of one colour draw on the same spools and are judged on what they need together.
+- Filaments that can draw on a spool in common are judged on what they need together: two slots of one colour, and also filaments that share only one of their spools (a spool that stands in for another product, the external spool for both nozzles, two shades within the colour tolerance of one spool). Which of them takes the shared spool cannot be read, so each is judged against its own spools with the others' needs added.
 - With two printers of one model, the one selected in Bambu Studio is asked.
 - Printers are the ones Bambu Studio holds a LAN access code for. A plate sliced for another printer is logged and shows no card.
 - Which nozzle an AMS feeds is read as on the H2D (firmware 01.04.20.00). Where that cannot be read, a spool counts for either nozzle.

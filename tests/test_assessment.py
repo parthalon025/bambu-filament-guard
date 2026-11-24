@@ -89,3 +89,50 @@ def test_the_spools_a_print_goes_on_with_are_taken_in_the_order_without_learning
     plain = {t['label']: t['grams'] for t in fg.credit([dict(t) for t in trays], {'B1': 85.0})}
     strict = {t['label']: t['grams'] for t in fg.credit([dict(t) for t in trays], {'B1': 85.0}, learned)}
     assert plain == {'A1': 35.0, 'B1': 0.0, 'C1': 90.0} and strict == {'A1': 0.0, 'B1': 0.0, 'C1': 75.0}
+
+def tray_labels(row):
+    return [t['label'] for t in row['trays']]
+
+def judged(fils, trays, times=1):
+    """The rows of a plate, as evaluate judges them: (each filament's status alone, the rows once those that share a spool were judged together)."""
+    rows = [fg.assess(f, trays, CFG, times) for f in fils]; alone = [r['status'] for r in rows]
+    fg.share_spools(rows, fils, trays, CFG, times)
+    return alone, rows
+
+def test_a_spool_that_stands_in_for_another_product_is_shared_with_its_own_filament():
+    """Slot 1 is PLA Basic black, slot 2 PLA Matte black, of which no spool is loaded: A1, PLA Basic, counts for both, and
+    A2 for slot 2 alone. Their tray lists differ, so each was judged alone, and both read "enough" on A1's 100 g."""
+    fils = [dict(fil(60, '#000000'), slot=1), dict(fil(60, '#000000', fid='GFA01'), slot=2)]
+    alone, rows = judged(fils, [tray('A1', 100, '#000000', weight=1000), tray('A2', 30, '#000000', fid='GFL99', name='Generic PLA', weight=1000)])
+    assert alone == ['OK', 'OK'] and [tray_labels(r) for r in rows] == [['A1'], ['A1', 'A2']]
+    assert [r['status'] for r in rows] == ['SHORT', 'SPLIT']
+    assert rows[0]['note'].startswith('filaments 1, 2 share A1 and need 120 g together: short by 20 g')
+    assert rows[1]['note'].startswith('filaments 1, 2 share A1 and need 120 g together: ')
+
+def test_the_external_spool_is_shared_by_the_filaments_of_both_nozzles():
+    """The external spool counts for either nozzle: the left nozzle's filament can also print from B1, the right one's
+    only from Ext, which does not hold both."""
+    fils = [dict(fil(60, nozzle='left'), slot=1), dict(fil(60, nozzle='right'), slot=2)]
+    alone, rows = judged(fils, [tray('B1', 20, nozzle='left', weight=1000), tray('Ext', 100, weight=1000)])
+    assert alone == ['OK', 'OK'] and [tray_labels(r) for r in rows] == [['Ext', 'B1'], ['Ext']]
+    assert [r['status'] for r in rows] == ['SPLIT', 'SHORT']
+    assert rows[1]['note'] == 'filaments 1, 2 share Ext and need 120 g together: short by 20 g'
+
+def test_two_shades_within_tolerance_of_one_spool_share_it():
+    """Two greys of the project, both within the colour tolerance of the grey in A1; only the lighter one is also within
+    it of A2."""
+    fils = [dict(fil(60, '#808080', fid=''), slot=1), dict(fil(60, '#949494', fid=''), slot=2)]
+    alone, rows = judged(fils, [tray('A1', 100, '#8A8A8A', fid='', weight=1000), tray('A2', 20, '#9E9E9E', fid='', weight=1000)])
+    assert alone == ['OK', 'OK'] and [tray_labels(r) for r in rows] == [['A1'], ['A1', 'A2']]
+    assert [r['status'] for r in rows] == ['SHORT', 'SPLIT']
+    assert rows[0]['note'] == 'filaments 1, 2 share A1 and need 120 g together: short by 20 g'
+
+def test_a_filament_is_judged_with_those_it_shares_a_spool_with_against_its_own_spools():
+    """Three greys in a row: slot 1 prints from A1, slot 2 from A1 or A2, slot 3 from A2. Slot 2 may take either, so it
+    is added to both of the others, and they to it; slots 1 and 3 share nothing and are not added to each other."""
+    fils = [dict(fil(60, c, fid=''), slot=n) for n, c in ((1, '#808080'), (2, '#949494'), (3, '#A8A8A8'))]
+    alone, rows = judged(fils, [tray('A1', 250, '#8A8A8A', fid='', weight=1000), tray('A2', 100, '#9E9E9E', fid='', weight=1000)])
+    assert alone == ['OK', 'OK', 'OK'] and [tray_labels(r) for r in rows] == [['A1'], ['A1', 'A2'], ['A2']]
+    assert [r['status'] for r in rows] == ['OK', 'OK', 'SHORT']                         # 120 g of A1's 250; 180 g of them; 120 g of A2's 100
+    assert [r['note'] for r in rows] == ['filaments 1, 2 share A1 and need 120 g together', 'filaments 1, 2, 3 share A1 + A2 and need 180 g together',
+                                         'filaments 2, 3 share A2 and need 120 g together: short by 20 g']

@@ -749,19 +749,21 @@ def pick_printer(model, printers):
     return next((p for p in printers if p['model'] == model), None)
 
 def share_spools(rows, filaments, trays, cfg, times):
-    """Filaments that draw on the same spools (two slots of one colour) are judged on what they need together: each
-    alone can fit a spool that does not hold both."""
-    groups = {}
-    for row, fil in zip(rows, filaments):
-        if row['trays']: groups.setdefault(tuple(t['label'] for t in row['trays']), []).append((row, fil))
-    for labels, members in groups.items():
-        if len(members) < 2: continue
-        total = sum(fil['grams'] for _, fil in members)
-        joint = assess(dict(members[0][1], grams=total), trays, cfg, times)
-        for row, _ in members:
-            if SEVERITY[joint['status']] > SEVERITY[row['status']]: row['status'] = joint['status']
-            row['note'] = (f"filaments {', '.join(str(r['slot']) for r, _ in members)} share {' + '.join(labels)} and need {total * times:.0f} g together"
-                           + (f": {joint['note']}" if joint['note'] else ''))
+    """Filaments that can draw on a spool in common are judged on what they need together: each alone can fit a spool
+    that does not hold both. Two slots of one colour share all their spools; one spool is enough to share (a spool that
+    stands in for another product, the external spool for both nozzles, two shades within the tolerance of one spool).
+    Which of them the print takes from the shared spool cannot be read, so each filament is judged against its own
+    spools with the need of every filament it shares one with added."""
+    labels = [{t['label'] for t in row['trays']} for row in rows]
+    for i, (row, fil) in enumerate(zip(rows, filaments)):
+        with_it = [n for n in range(len(rows)) if n == i or labels[n] & labels[i]]
+        if len(with_it) < 2: continue
+        total = sum(filaments[n]['grams'] for n in with_it)
+        joint = assess(dict(fil, grams=total), trays, cfg, times)
+        shared = [t['label'] for t in row['trays'] if any(t['label'] in labels[n] for n in with_it if n != i)]
+        if SEVERITY[joint['status']] > SEVERITY[row['status']]: row['status'] = joint['status']
+        row['note'] = (f"filaments {', '.join(str(rows[n]['slot']) for n in with_it)} share {' + '.join(shared)} and need {total * times:.0f} g together"
+                       + (f": {joint['note']}" if joint['note'] else ''))
 
 def mark_looked(serial):
     """Notes in the state file that a check looked at the printer (learning follows it, guard_ledger.followed); not again
