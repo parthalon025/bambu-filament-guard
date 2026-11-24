@@ -678,17 +678,8 @@ def assess(fil, trays, cfg, times=1):
         row['note'] = (f"no {fil['type']} of this colour is loaded; the nearest is {t['label']} {t['name'] or t['type']} ({t['colour']})"
                        + (f", {t['grams']:.0f} g" if t['grams'] is not None else ''))
         return row
-    if need is None:                                         # nothing to hold against the spools: not "enough", whatever they hold
-        row['status'] = 'UNKNOWN'
-        row['note'] = 'Bambu Studio gives no weight for this filament' + (" (its profile's density is 0)" if fil.get('density') == 0 else '')
-        return row
     group = [t for t in near if fil['fid'] and t['fid'] == fil['fid']] or near
     group.sort(key=lambda t: -(t['grams'] or 0))
-    row['sliced'] = need                                     # what the slicer says; the need below never falls under it
-    # What was learned of the trays (guard_learn): the largest rate and loss before layer 1 of the matching spools, as
-    # which of them the print draws on first cannot be read; so learning another tray first never lowers the need.
-    rho, pre = max(group, key=lambda t: t.get('rho') or 0), max(group, key=lambda t: t.get('pre') or 0)
-    need = row['need'] = need * max(1.0, rho.get('rho') or 1.0) + (pre.get('pre') or 0) * times
     row['trays'] = [{'label': t['label'], 'grams': t['grams'], 'colour': t['colour'], 'name': t['name'], 'type': t['type'], 'entered': t.get('entered'),
                      'stale': t.get('stale'), 'reads': t.get('reads'), 'reserved': t.get('reserved'), 'credited': t.get('credited'), 'evidence': t.get('evidence'),
                      'pre': t.get('pre'), 'owes': t.get('owes'), 'refills': t.get('refills'), 'beyond': t.get('beyond'), 'reading': t.get('reading'),
@@ -697,6 +688,17 @@ def assess(fil, trays, cfg, times=1):
     unknown = [t['label'] for t in group if t['grams'] is None]
     other = [t for t in group if fil['fid'] and t['fid'] != fil['fid']]     # no spool of the project's product is loaded: these count in its place
     stands_in = (' and '.join(f"{t['label']} is {t['name'] or t['type']}" for t in other) + f", another product than the project's {fil['name'] or fil['type']}") if other else ''
+    if need is None:                                         # nothing to hold against the spools: not "enough", whatever they hold. The row keeps
+        if known: row['best'], row['total'] = max(known), sum(known)   # its spools: the filaments that share one are not "enough" either (share_spools)
+        row['status'] = 'UNKNOWN'
+        row['note'] = ('Bambu Studio gives no weight for this filament' + (" (its profile's density is 0)" if fil.get('density') == 0 else '')
+                       + (f'; {stands_in}' if stands_in else ''))
+        return row
+    row['sliced'] = need                                     # what the slicer says; the need below never falls under it
+    # What was learned of the trays (guard_learn): the largest rate and loss before layer 1 of the matching spools, as
+    # which of them the print draws on first cannot be read; so learning another tray first never lowers the need.
+    rho, pre = max(group, key=lambda t: t.get('rho') or 0), max(group, key=lambda t: t.get('pre') or 0)
+    need = row['need'] = need * max(1.0, rho.get('rho') or 1.0) + (pre.get('pre') or 0) * times
     if not known:
         stale = [t['label'] for t in group if t.get('stale')]
         row['status'] = 'UNKNOWN'
@@ -831,17 +833,25 @@ def share_spools(rows, filaments, trays, cfg, times):
     that does not hold both. Two slots of one colour share all their spools; one spool is enough to share (a spool that
     stands in for another product, the external spool for both nozzles, two shades within the tolerance of one spool).
     Which of them the print takes from the shared spool cannot be read, so each filament is judged against its own
-    spools with the need of every filament it shares one with added."""
+    spools with the need of every filament it shares one with added. One that Bambu Studio gives no weight (parse_plate)
+    adds nobody knows what: a filament that shares a spool with it is not "enough" either, and says which that is."""
     labels = [{t['label'] for t in row['trays']} for row in rows]
     for i, (row, fil) in enumerate(zip(rows, filaments)):
-        with_it = [n for n in range(len(rows)) if n == i or labels[n] & labels[i]]
-        if len(with_it) < 2: continue
-        total = sum(filaments[n]['grams'] for n in with_it)
-        joint = assess(dict(fil, grams=total), trays, cfg, times)
-        shared = [t['label'] for t in row['trays'] if any(t['label'] in labels[n] for n in with_it if n != i)]
-        if SEVERITY[joint['status']] > SEVERITY[row['status']]: row['status'] = joint['status']
-        row['note'] = (f"filaments {', '.join(str(rows[n]['slot']) for n in with_it)} share {' + '.join(shared)} and need {total * times:.0f} g together"
-                       + (f": {joint['note']}" if joint['note'] else ''))
+        if fil['grams'] is None: continue                    # its own row says so
+        mates = [n for n in range(len(rows)) if n == i or labels[n] & labels[i]]
+        with_it, unweighed = [n for n in mates if filaments[n]['grams'] is not None], [n for n in mates if filaments[n]['grams'] is None]
+        shared = lambda them: ' + '.join(t['label'] for t in row['trays'] if any(t['label'] in labels[n] for n in them if n != i))
+        if len(with_it) > 1:
+            total = sum(filaments[n]['grams'] for n in with_it)
+            joint = assess(dict(fil, grams=total), trays, cfg, times)
+            if SEVERITY[joint['status']] > SEVERITY[row['status']]: row['status'] = joint['status']
+            row['note'] = (f"filaments {', '.join(str(rows[n]['slot']) for n in with_it)} share {shared(with_it)} and need {total * times:.0f} g together"
+                           + (f": {joint['note']}" if joint['note'] else ''))
+        if unweighed:
+            if row['status'] == 'OK': row['status'] = 'UNKNOWN'
+            one = len(unweighed) == 1
+            row['note'] += ('; ' if row['note'] else '') + (f"filament{'' if one else 's'} {', '.join(str(rows[n]['slot']) for n in unweighed)} can also print from "
+                                                            f"{shared(unweighed)}, and Bambu Studio gives {'it' if one else 'them'} no weight")
 
 def mark_looked(serial):
     """Notes in the state file that a check looked at the printer (learning follows it, guard_ledger.followed); not again

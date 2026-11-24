@@ -181,14 +181,14 @@ def test_a_filament_without_a_weight_is_unknown_and_says_why():
     the worse answer."""
     blue = dict(fil(None, colour='#0A2989'), density=0.0)
     row = fg.assess(blue, [tray('C3', 900, colour='#0A2989')], CFG, times=3)
-    assert (row['status'], row['need'], row['trays']) == ('UNKNOWN', None, [])
+    assert (row['status'], row['need'], tray_labels(row), row['best']) == ('UNKNOWN', None, ['C3'], 900)   # with its spools: those that share them are judged by it
     assert row['note'] == "Bambu Studio gives no weight for this filament (its profile's density is 0)"
     assert fg.assess(dict(blue, density=1.24), [tray('C3', 900, colour='#0A2989')], CFG)['note'] == 'Bambu Studio gives no weight for this filament'
     assert fg.assess(blue, [tray('C3', 900)], CFG)['status'] == 'COLOUR' and fg.assess(blue, [tray('A2', 900, typ='PETG')], CFG)['status'] == 'MISSING'
     res = {'title': 'Vase', 'times': 1, 'error': None, 'worst': 'UNKNOWN', 'rows': [row], 'printer': {'model': 'Bambu Lab H2D', 'state': 'IDLE'}}
     assert fg.need_text(row) == '?' and fg.need_text(fg.assess(fil(50), [tray('B2', 81)], CFG)) == '50.0 g'
     assert fg.exit_code(res) == 1 and fg.report_text(res).splitlines()[2] == (
-        "   2 PLA      #0A2989 Bambu PLA Basic        needs         ?   -          has -                      unknown"
+        "   2 PLA      #0A2989 Bambu PLA Basic        needs         ?   C3         has 900 g                  unknown"
         "  (Bambu Studio gives no weight for this filament (its profile's density is 0))")
 
 def test_a_spool_of_unknown_full_weight_or_with_an_entered_amount_counts_as_1_kg_for_the_reserve():
@@ -201,3 +201,20 @@ def test_a_spool_of_unknown_full_weight_or_with_an_entered_amount_counts_as_1_kg
     assert (row['status'], row['reserve']) == ('TIGHT', 30.0)
     assert fg.assess(fil(100), [tray('B2', 115, weight=250)], CFG)['status'] == 'OK'       # a 250 g spool by the printer's word: 10 % of the need is the larger
     assert fg.assess(fil(400), [tray('B2', 445)], CFG)['reserve'] == 40.0                  # as it is of a large need
+
+def test_a_filament_that_shares_a_spool_with_one_without_a_weight_is_not_enough_either():
+    """Two blues of a plate print from C3, and Bambu Studio gives the first no weight (its profile has density 0). The
+    second, 50 g of a spool that holds 900 g, read "enough" in its row, though what the first takes of C3 cannot be
+    told. A filament that shares no spool with it is judged as before."""
+    blue, no_weight = dict(fil(50, colour='#0A2989'), slot=2), dict(fil(None, colour='#0A2989'), slot=1, density=0.0)
+    trays = [tray('C3', 900, colour='#0A2989', weight=1000), tray('B2', 900, weight=1000)]
+    alone, rows = judged([no_weight, blue, dict(fil(50), slot=3)], trays)
+    assert alone == ['UNKNOWN', 'OK', 'OK'] and [tray_labels(r) for r in rows] == [['C3'], ['C3'], ['B2']]
+    assert [(r['status'], r['note']) for r in rows] == [('UNKNOWN', "Bambu Studio gives no weight for this filament (its profile's density is 0)"),
+                                                        ('UNKNOWN', 'filament 1 can also print from C3, and Bambu Studio gives it no weight'), ('OK', '')]
+    alone, rows = judged([no_weight, dict(blue, grams=500), dict(blue, grams=500, slot=3)], trays)     # with others that have a weight: those are added up, and the worse answer stays
+    assert [r['status'] for r in rows] == ['UNKNOWN', 'SHORT', 'SHORT']
+    assert rows[1]['note'] == 'filaments 2, 3 share C3 and need 1000 g together: short by 100 g; filament 1 can also print from C3, and Bambu Studio gives it no weight'
+    alone, rows = judged([no_weight, dict(no_weight, slot=4), blue], trays)
+    assert (rows[2]['status'], rows[2]['note']) == ('UNKNOWN', 'filaments 1, 4 can also print from C3, and Bambu Studio gives them no weight')
+    assert rows[0]['note'] == rows[1]['note'] == "Bambu Studio gives no weight for this filament (its profile's density is 0)"   # each says its own

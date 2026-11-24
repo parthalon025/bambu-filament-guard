@@ -179,7 +179,7 @@ def test_a_plate_with_no_filament_the_guard_can_weigh_is_not_checked(state, tmp_
     assert fg.main(['check', str(path)]) == 3 and 'this plate uses no filament the guard can weigh' in capsys.readouterr().out
     mixed = no_weight(weights='0.00,10.87', colours='#0A2989;#FFFFFF;#0A2989'); path.write_text(mixed)      # two blues, one of them without a weight
     res = fg.evaluate(fg.parse_plate(mixed), CFG, 'Vase')
-    assert [(r['slot'], r['status'], r['need']) for r in res['rows']] == [(1, 'UNKNOWN', None), (3, 'OK', 10.87)] and res['worst'] == 'UNKNOWN'
+    assert [(r['slot'], r['status'], r['need']) for r in res['rows']] == [(1, 'UNKNOWN', None), (3, 'UNKNOWN', 10.87)] and res['worst'] == 'UNKNOWN'   # both print from C3
     assert fg.headline(res) == 'Enough filament could not be confirmed' and fg.main(['check', str(path)]) == 1
 
 def test_a_filament_without_a_weight_is_carried_as_unknown_wherever_the_grams_are_used(state):

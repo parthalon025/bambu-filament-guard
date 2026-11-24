@@ -38,6 +38,7 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 - A filament total of `nan` or `inf` in a G-code was taken as a number, and the filament's answer read "short by nan g". A slice with such a total is now one the guard cannot read, and it says which total.
 - `check FILE` left a plate whose G-code is not complete in the file out without a word, and answered for the others as if they were the whole file. Such a plate is now an answer of its own, "could not be checked", all plates together have none, and the exit code is 3.
 - One very long line in a slice's G-code could hold the guard's watcher for seconds to hours, and until it was done no newly sliced plate was checked and nothing said so. Custom G-code of a shared project goes into the slice as it is: a move line of 60,000 characters with no `E` took two seconds to read for the grams per layer, and four times as long at twice the length. Such a line now takes milliseconds; every other line is read as before.
+- A filament that can print from the same spool as one Bambu Studio gives no weight read "enough" in its own row, though what the other takes of that spool cannot be told. It is "unknown" too, unless it is already tight or short, and its note names the other: "filament 1 can also print from C3, and Bambu Studio gives it no weight". The filament without a weight is shown with its spools and what they hold.
 
 ## [1.4.0] - 2026-11-20
 
